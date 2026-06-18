@@ -1,0 +1,90 @@
+# cocore local stack.
+#
+#   make stack-up          # boot
+#   make stack-smoke       # exercise it (curls + asserts)
+#   make stack-down        # tear down
+#
+# Three containers:
+#   cocore-services   Firehose + AppView indexer + AppView API +
+#                     Exchange + bridge HTTP. One process so logs
+#                     are easy to scan; production splits these.
+#   cocore-console    TanStack Start UI + device-pair endpoints.
+#   cocore-mock-provider  Synthetic provider; publishes a job +
+#                     receipt every 5s into the bridge.
+#
+# Federation note: this stack runs ONE exchange and ONE AppView for
+# simplicity. Spin up multiple copies of cocore-services with different
+# COCORE_EXCHANGE_DID values pointed at the same firehose to exercise
+# federation locally. The invariant itself is proved in
+# packages/exchange/src/firehose.test.ts and
+# packages/appview/src/indexer/federation.test.ts.
+services:
+  cocore-services:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.node
+      args:
+        WORKSPACE: infra/services
+    image: cocore/services:dev
+    container_name: cocore-services
+    environment:
+      COCORE_BRIDGE_PORT: "8080"
+      COCORE_APPVIEW_PORT: "8081"
+      COCORE_DB: "/data/appview.db"
+      COCORE_EXCHANGE_DID: "did:web:exchange.local"
+      COCORE_AUTORESPOND: "1"
+      COCORE_AUTORESPOND_PROVIDER_DID: "did:plc:bridge-autoresponder"
+    ports:
+      - "8080:8080" # bridge HTTP (publish + healthz + stats)
+      - "8081:8081" # appview read API
+    volumes:
+      - cocore-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:8080/healthz').then(r=>process.exit(r.ok?0:1))",
+        ]
+      interval: 5s
+      retries: 12
+
+  cocore-console:
+    build:
+      context: ..
+      dockerfile: packages/console/Dockerfile
+    image: cocore/console:dev
+    container_name: cocore-console
+    environment:
+      CONSOLE_PUBLIC_URL: "http://localhost:3000"
+      COCORE_BRIDGE_URL: "http://cocore-services:8080"
+      COCORE_APPVIEW_URL: "http://cocore-services:8081"
+      COCORE_EXCHANGE_DID: "did:web:exchange.local"
+    ports:
+      - "3000:3000"
+    depends_on:
+      cocore-services:
+        condition: service_healthy
+
+  cocore-mock-provider:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.node
+      args:
+        WORKSPACE: infra/mock-provider
+    image: cocore/mock-provider:dev
+    container_name: cocore-mock-provider
+    environment:
+      COCORE_BRIDGE_URL: "http://cocore-services:8080"
+      COCORE_TICK_MS: "5000"
+      COCORE_EXCHANGE_DID: "did:web:exchange.local"
+      COCORE_PROVIDER_DID: "did:plc:mock-provider"
+      COCORE_REQUESTER_DID: "did:plc:mock-requester"
+    depends_on:
+      cocore-services:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  cocore-data:

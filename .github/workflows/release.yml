@@ -1,0 +1,119 @@
+# Build the prebuilt macOS arm64 tarball for `cocore` and attach it
+# to a GitHub Release. The curl-bootstrap installer at
+# `packages/console/agent-install.sh` (served as
+# `console.cocore.dev/agent`) reads
+# `releases/latest/download/cocore-mac-arm64.tar.gz` from this repo,
+# so each release here is what `curl … | sh` lands on a fresh Mac.
+#
+# v0.6.0 collapsed the previous stub-vs-inference build matrix into
+# a single binary. Background: v0.5.x linked PyO3 + libpython into
+# the inference build, baking the build runner's brew-python path
+# into the binary's Mach-O load commands. Every user whose Mac
+# didn't have Homebrew Python at exactly that path hit a "Library
+# not loaded" dyld abort at startup. v0.6.0 moved Python inference
+# out-of-process — the agent spawns the venv's `python` as a child
+# and proxies inference over a Unix domain socket — so the binary
+# has zero libpython linkage and runs unchanged on any macOS arm64.
+# The previous "two tarballs" story collapsed naturally.
+#
+# Triggers:
+#   * push of a tag matching `v*` (e.g. `v0.6.0`) — builds and
+#     publishes the release. The release body is auto-generated.
+#   * `workflow_dispatch` with a `tag` input — same flow but lets
+#     you re-run a release after pushing a tag manually. Skip this
+#     unless you've already pushed the tag.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist; e.g. v0.6.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac-arm64:
+    runs-on: macos-14
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            provider/target
+          key: cargo-mac-arm64-${{ hashFiles('provider/Cargo.lock') }}
+          restore-keys: cargo-mac-arm64-
+      - name: Build release binary
+        # No --features inference (the flag is gone in v0.6.0).
+        # No PYO3_PYTHON env, no brew python install — none of that
+        # is needed now that we don't link libpython.
+        run: |
+          cd provider
+          cargo build --release --locked --target aarch64-apple-darwin
+      - name: Verify the binary has no Python linkage
+        # Belt-and-suspenders: if a future commit accidentally adds
+        # PyO3 back, otool -L will show a libpython load command and
+        # we want CI to fail loudly, not ship a binary that crashes
+        # on every user's Mac with "Library not loaded".
+        run: |
+          BIN="provider/target/aarch64-apple-darwin/release/cocore"
+          echo "otool -L $BIN:"
+          otool -L "$BIN"
+          if otool -L "$BIN" | grep -qi 'python'; then
+            echo ""
+            echo "::error::release binary has a libpython load command — v0.6.0+ must not link libpython. Check for accidental PyO3 re-introduction in provider/Cargo.toml."
+            exit 1
+          fi
+      - name: Stage tarball contents
+        run: |
+          STAGE="dist/cocore-mac-arm64"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/bin" "$STAGE/scripts"
+          cp provider/target/aarch64-apple-darwin/release/cocore  "$STAGE/bin/cocore"
+          cp scripts/install-mac-provider.sh                       "$STAGE/scripts/"
+          cp scripts/uninstall-mac-provider.sh                     "$STAGE/scripts/"
+          cp scripts/dev.cocore.provider.plist.template            "$STAGE/scripts/"
+          cp scripts/bootstrap-python-venv.sh                      "$STAGE/scripts/"
+          cp scripts/install-from-tarball.sh                       "$STAGE/install.sh"
+          chmod 755 "$STAGE/install.sh" "$STAGE/scripts/bootstrap-python-venv.sh"
+      - name: Tar
+        run: |
+          ARTIFACT="cocore-mac-arm64"
+          tar -C dist -czf "dist/$ARTIFACT.tar.gz" "$ARTIFACT"
+          ls -lh "dist/$ARTIFACT.tar.gz"
+      - name: SHA-256
+        run: |
+          ARTIFACT="cocore-mac-arm64"
+          shasum -a 256 "dist/$ARTIFACT.tar.gz" | tee "dist/$ARTIFACT.tar.gz.sha256"
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/cocore-mac-arm64.tar.gz
+            dist/cocore-mac-arm64.tar.gz.sha256

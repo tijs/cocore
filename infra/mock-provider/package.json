@@ -1,0 +1,19 @@
+{
+  "name": "@cocore/mock-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Synthetic provider that publishes test job/auth/attestation/receipt records into the cocore bridge on a steady cadence. For local dev only.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/main.ts",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "dependencies": {
+    "@cocore/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "typescript": "^5.6.0"
+  }
+}

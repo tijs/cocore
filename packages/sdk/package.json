@@ -1,0 +1,33 @@
+{
+  "name": "@cocore/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "cocore TypeScript SDK: lexicon types, canonical-JSON, validators, and helpers shared across appview, exchange, and console.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./canonical": "./src/canonical.ts",
+    "./firehose": "./src/firehose.ts",
+    "./lex": "./src/lex-runtime.ts",
+    "./mda": "./src/mda.ts",
+    "./p256": "./src/p256.ts",
+    "./publish": "./src/publish.ts",
+    "./resolve": "./src/resolve.ts",
+    "./types": "./src/types.ts",
+    "./validate": "./src/validate.ts"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "vitest run",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "dependencies": {
+    "@atproto/lexicon": "^0.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.4"
+  }
+}

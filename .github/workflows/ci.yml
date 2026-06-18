@@ -1,0 +1,163 @@
+# CI: lex validation, Rust tests, TS tests, type checks, production builds.
+#
+# Runs on pushes to main and on every PR (avoid listing all branches under
+# `push`: that duplicates `pull_request` when a branch has an open PR).
+# (provider/enclave, provider-shell) ship source-only and need a
+# Mac to build; the Makefile targets for those are no-ops on Linux.
+#
+# Rust and Node run in one job: `aube run test` runs `cargo test` for
+# cross-lang fixtures (provider/tests/cross_lang_fixture.rs) before workspace
+# tests, so the SDK can read repo-root target/*.json.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # push log branches
+  pull-requests: write # post failure-tail comments
+  issues: write
+
+jobs:
+  static-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tool versions pinned in repo-root mise.toml (https://mise.en.dev/).
+      # `version` pins the mise BINARY itself: mise-action otherwise installs
+      # whatever mise.jdx.dev/VERSION advertises, and on 2026-06-14 that
+      # pointed at v2026.6.7 whose GitHub release asset 404s — breaking every
+      # CI run. Pin to the last good release; bump when upstream is healthy.
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.6.6
+          cache: true
+
+      # Cargo registry + `provider/target` (mise-action only caches tool installs).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: provider
+
+      - name: Lexicon JSON parses
+        run: make lex-validate 2>&1 | tee -a /tmp/ci.log
+
+      - name: Lexicon codegen up-to-date
+        if: success() || failure()
+        run: make lex-codegen-check 2>&1 | tee -a /tmp/ci.log
+
+      - name: Rust formatting (rustfmt)
+        run: |
+          set -o pipefail
+          cd provider && cargo fmt --check 2>&1 | tee -a /tmp/ci.log
+
+      # v0.6.0 removed PyO3 + the `inference` feature flag — the agent
+       # spawns inference as a Python subprocess instead of linking
+      # libpython in-process. No more libpython-dev install, no more
+      # second test run with --features inference.
+      - name: Rust unit + integration tests
+        run: |
+          cd provider
+          set -o pipefail
+          cargo test --locked --no-fail-fast 2>&1 | tee -a /tmp/ci.log
+
+      - name: Rust clippy (all targets, all features)
+        if: success() || failure()
+        run: cd provider && cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee -a /tmp/ci.log
+
+      - name: aube install (workspaces)
+        if: success() || failure()
+        run: aube install --frozen-lockfile 2>&1 | tee -a /tmp/ci.log
+
+      # Root package.json delegates to each workspace (-r): dependency order,
+      # --if-present skips packages with no script (none today).
+      - name: Typecheck all workspaces
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          aube run typecheck 2>&1 | tee -a /tmp/ci.log
+
+      - name: Oxlint (JS/TS workspaces)
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          aube run lint 2>&1 | tee -a /tmp/ci.log
+
+      - name: Oxfmt check
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          aube run format:check 2>&1 | tee -a /tmp/ci.log
+
+      # Catches TanStack Start import-protection and other bundler-only failures
+      # that typecheck does not see (e.g. **/*.server.* in client graph).
+      - name: Production build (workspaces with `build` script)
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          aube run build 2>&1 | tee -a /tmp/ci.log
+
+      # Unused files / exports / dependencies. `--reporter github-actions`
+      # surfaces findings as inline PR annotations on the changed lines and
+      # fails the job if anything is reported.
+      #
+      # Runs *after* the production build so packages/console/src/routeTree.gen.ts
+      # contains the `declare module '@tanstack/react-start'` block that
+      # back-references `router.tsx#getRouter` — that block is emitted only
+      # by the `tanstackStart()` vite plugin during `vite build` / `vite dev`,
+      # not by `tsr generate` standalone (which is what `typecheck` runs).
+      - name: Knip (unused files / exports / dependencies)
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          aube run knip -- --reporter github-actions 2>&1 | tee -a /tmp/ci.log
+
+      - name: Test all workspaces
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          aube run test 2>&1 | tee -a /tmp/ci.log
+
+      # Playwright smoke tests on the console. Build + `vite preview`
+      # is started by playwright.config.ts's webServer; we just need
+      # the Chromium binary cached. These tests catch regressions
+      # like ffa7c56 — public/auth-gated routes that build cleanly
+      # but 500 in the browser.
+      - name: Playwright e2e smoke (console)
+        if: success() || failure()
+        working-directory: packages/console
+        env:
+          CI: "1"
+        run: |
+          set -o pipefail
+          aube run test:e2e:install 2>&1 | tee -a /tmp/ci.log
+          aube run test:e2e 2>&1 | tee -a /tmp/ci.log
+
+      - name: Upload Playwright trace on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-${{ github.run_id }}-${{ github.run_attempt }}
+          path: packages/console/test-results/
+          if-no-files-found: ignore
+
+      # On failure, upload the combined log as a workflow artifact
+      # so it's reachable from the run page. (We had a more elaborate
+      # ci-logs/* branch push during M11.x diagnosis; reverted now
+      # that CI is consistently green.)
+      - name: Upload combined CI log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/ci.log
+          if-no-files-found: ignore

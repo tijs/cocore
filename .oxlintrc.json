@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "node", "react"],
+  "jsPlugins": ["@tanstack/eslint-plugin-router"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "@tanstack/router/create-route-property-order": "error",
+    "@tanstack/router/route-param-names": "error"
+  },
+  "env": {
+    "builtin": true,
+    "node": true,
+    "browser": true
+  },
+  "ignorePatterns": ["**/dist/**", "**/.output/**", "**/.tanstack/**", "**/.next/**", "**/node_modules/**"],
+  "settings": {
+    "react": {
+      "version": "19.0.0"
+    }
+  }
+}

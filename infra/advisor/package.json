@@ -1,0 +1,23 @@
+{
+  "name": "@cocore/advisor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Advisor: WebSocket matchmaker between requesters and providers. Stateless w.r.t. receipts; everything authoritative lives on a PDS.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "dependencies": {
+    "@cocore/sdk": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.4"
+  }
+}

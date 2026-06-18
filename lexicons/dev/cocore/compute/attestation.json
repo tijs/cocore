@@ -1,0 +1,83 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.compute.attestation",
+  "description": "A snapshot of a provider machine's hardware and software state, signed by its Secure Enclave. Content-addressed: many receipts strong-ref the same attestation record until the underlying state changes (binary upgrade, OS update, key rotation).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "publicKey",
+          "encryptionPubKey",
+          "chipName",
+          "hardwareModel",
+          "serialNumberHash",
+          "osVersion",
+          "binaryHash",
+          "sipEnabled",
+          "secureBootEnabled",
+          "secureEnclaveAvailable",
+          "authenticatedRootEnabled",
+          "selfSignature",
+          "attestedAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "publicKey": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "P-256 public key (base64). MUST equal the attestationPubKey of the provider record under the signing DID."
+          },
+          "encryptionPubKey": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "X25519 public key (base64) bound to the same Secure Enclave identity. Proves a single device controls both signing and request-encryption keys."
+          },
+          "chipName": { "type": "string", "maxLength": 64 },
+          "hardwareModel": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "DMI string, e.g. 'Mac15,8'."
+          },
+          "serialNumberHash": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "description": "SHA-256 hex of (serialNumber || providerDID). Hashed so the public record never leaks raw serials. When an mdaCertChain is present, the serialNumber MUST be the one the verified MDA leaf attests (not a self-reported value), so the hashed device identity is anchored to the chain."
+          },
+          "osVersion": { "type": "string", "maxLength": 64 },
+          "binaryHash": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "description": "SHA-256 hex of the cocore-provider binary that produced this attestation."
+          },
+          "sipEnabled": { "type": "boolean" },
+          "secureBootEnabled": { "type": "boolean" },
+          "secureEnclaveAvailable": { "type": "boolean" },
+          "authenticatedRootEnabled": { "type": "boolean" },
+          "rdmaDisabled": { "type": "boolean" },
+          "mdaCertChain": {
+            "type": "array",
+            "items": { "type": "bytes", "maxLength": 8192 },
+            "maxLength": 8,
+            "description": "Optional Apple Managed Device Attestation certificate chain (DER), leaf first. Present when trustLevel is 'hardware-attested'. Verifiers MUST: (1) verify every adjacent link to the embedded Apple Enterprise Attestation Root CA, enforcing BasicConstraints (non-leaf certs are CAs, the leaf is an end-entity); and (2) require the leaf's P-256 public key to EQUAL this record's `publicKey` — i.e. the chain is BOUND to the receipt-signing key. Without (2) a valid Apple chain for one device could be stapled onto an unrelated signing key, so a chain that verifies but isn't bound MUST NOT earn 'hardware-attested'. Producers (the MDA provisioning tool) MUST therefore attest the signing key itself."
+          },
+          "selfSignature": {
+            "type": "bytes",
+            "maxLength": 256,
+            "description": "Secure Enclave P-256 signature (DER) over a sorted-key canonical JSON of every other field in this record. Verifiers MUST reconstruct the canonical JSON byte-for-byte before checking."
+          },
+          "attestedAt": { "type": "string", "format": "datetime" },
+          "expiresAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Receipts that strong-ref this attestation are only considered fresh if completedAt < expiresAt. Default 24h after attestedAt."
+          }
+        }
+      }
+    }
+  }
+}

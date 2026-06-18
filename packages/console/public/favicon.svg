@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" fill-rule="evenodd">
+  <title>cocore · receipt notch</title>
+  <style>
+    .mark {
+      fill: #ad7f58;
+    }
+  </style>
+  <path class="mark" d="M0 0 H100 V70 L70 100 H0 Z&#xA;           M22 22 V78 H55.6 L78 55.6 V22 Z"></path>
+</svg>

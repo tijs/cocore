@@ -1,0 +1,52 @@
+# Rust
+target/
+
+# Generated lexicon types — never commit
+provider/src/lex/
+packages/appview/schemas/
+sdk/py/src/cocore/lex/
+
+# Node
+node_modules/
+dist/
+.next/
+*.tsbuildinfo
+next-env.d.ts
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# mise — local overrides (see https://mise.en.dev/configuration.html)
+/mise.local.toml
+/mise.*.local.toml
+
+# Environments
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Swift / Xcode
+.build/
+provider-shell/build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Build output
+*.log
+
+# Claude Code local dir
+.claude/
+
+# Throwaway local dev/debug scripts (login, screenshot, env probes)
+.tmp-*

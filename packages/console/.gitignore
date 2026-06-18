@@ -1,0 +1,9 @@
+.output
+dist
+.tanstack
+.vinxi
+node_modules
+
+# Playwright
+test-results/
+playwright-report/

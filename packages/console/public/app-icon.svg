@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>cocore · app icon</title>
+  <style>
+    .bg {
+      fill: #111110;
+    }
+    .mark {
+      fill: #ad7f58;
+    }
+  </style>
+  <rect class="bg" x="0" y="0" width="1024" height="1024" rx="230" ry="230"></rect>
+  <g transform="translate(262 262) scale(5.00)" class="mark" fill-rule="evenodd">
+    <path d="M0 0 H100 V70 L70 100 H0 Z&#xA;             M22 22 V78 H55.6 L78 55.6 V22 Z"></path>
+  </g>
+</svg>

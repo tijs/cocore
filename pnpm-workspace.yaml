@@ -1,0 +1,21 @@
+packages:
+  - "packages/*"
+  - "infra/*"
+
+allowBuilds:
+  better-sqlite3: true
+  core-js: true
+  protobufjs: true
+  sharp: true
+  esbuild: true
+
+# Exclude `undici` from trust-downgrade enforcement: it's pulled
+# transitively at 5.29.0 by `@connectrpc/connect-node`, which doesn't
+# ship with provenance attestation at that version. Newer versions
+# elsewhere in the graph (6.x via @types/node, 7.x via
+# @atcute/oauth-node-client) are fine; the alarm is only on the older
+# transitive. Tighten when connect-node upgrades undici.
+trustPolicyExclude:
+  - "undici"
+  - "@noble/secp256k1"
+

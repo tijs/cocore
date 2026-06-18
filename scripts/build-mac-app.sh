@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Build the cocore menu-bar app (provider-shell) into a real .app
+# bundle WITHOUT Xcode.
+#
+# The provider-shell README's release path assumes Xcode (archive +
+# notarize + Developer ID). That's right for distribution, but it
+# makes day-to-day "does the tray icon actually show up" verification
+# painful, and it's overkill for local installs. This script assembles
+# a double-clickable, ad-hoc-signed bundle straight from `swift build`,
+# so `swift`-only machines (Command Line Tools, no full Xcode) can run
+# the app.
+#
+# Output: provider-shell/build/cocore.app
+#
+# Usage:
+#   ./scripts/build-mac-app.sh              # release build
+#   CONFIG=debug ./scripts/build-mac-app.sh # faster debug build
+#   OPEN=1 ./scripts/build-mac-app.sh       # build then launch it
+
+set -euo pipefail
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly SHELL_DIR="$REPO_ROOT/provider-shell"
+readonly SRC_RES="$SHELL_DIR/Sources/CoCoreShell/Resources"
+CONFIG="${CONFIG:-release}"
+OPEN="${OPEN:-0}"
+readonly APP_NAME="cocore"
+readonly EXEC_NAME="CoCoreShell"
+readonly BUNDLE_ID="dev.cocore.shell"
+readonly OUT_DIR="$SHELL_DIR/build"
+readonly APP="$OUT_DIR/$APP_NAME.app"
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+note() { printf '  %s\n' "$*"; }
+die()  { printf '\033[31m  error:\033[0m %s\n' "$*" >&2; exit 1; }
+
+[[ "$(uname -s)" == "Darwin" ]] || die "this builds a macOS .app; detected $(uname -s)"
+
+bold "==> swift build ($CONFIG)"
+( cd "$SHELL_DIR" && swift build -c "$CONFIG" )
+BIN="$(cd "$SHELL_DIR" && swift build -c "$CONFIG" --show-bin-path)/$EXEC_NAME"
+[[ -x "$BIN" ]] || die "built binary not found at $BIN"
+note "binary: $BIN"
+
+bold "==> assemble $APP_NAME.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+install -m 755 "$BIN" "$APP/Contents/MacOS/$EXEC_NAME"
+
+# Info.plist: start from the source plist, then guarantee the two keys
+# a runnable bundle must have (CFBundleExecutable, CFBundlePackageType)
+# which the Xcode-oriented source plist omits. PlistBuddy edits in place.
+cp "$SRC_RES/Info.plist" "$APP/Contents/Info.plist"
+pb() { /usr/libexec/PlistBuddy -c "$1" "$APP/Contents/Info.plist" >/dev/null 2>&1; }
+pb "Add :CFBundleExecutable string $EXEC_NAME" || pb "Set :CFBundleExecutable $EXEC_NAME"
+pb "Add :CFBundlePackageType string APPL"      || pb "Set :CFBundlePackageType APPL"
+pb "Add :CFBundleIconFile string AppIcon"      || pb "Set :CFBundleIconFile AppIcon"
+
+bold "==> render app icon (Finder/Spotlight/dock)"
+# Master 1024 PNG from brand geometry, then sips → iconset → iconutil.
+MASTER="$OUT_DIR/icon_master.png"
+ICONSET="$OUT_DIR/AppIcon.iconset"
+rm -rf "$ICONSET"; mkdir -p "$ICONSET"
+swift "$REPO_ROOT/scripts/make-app-icon.swift" "$MASTER" >/dev/null
+for s in 16 32 128 256 512; do
+  sips -z "$s" "$s"       "$MASTER" --out "$ICONSET/icon_${s}x${s}.png"    >/dev/null
+  sips -z $((s*2)) $((s*2)) "$MASTER" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+note "icon: $APP/Contents/Resources/AppIcon.icns"
+
+# Copy any SPM-generated resource bundle (none today — the tray icon is
+# drawn programmatically — but keep this so adding assets later Just
+# Works without editing this script).
+shopt -s nullglob
+for b in "$(dirname "$BIN")"/*.bundle; do
+  cp -R "$b" "$APP/Contents/Resources/"
+  note "bundled resource: $(basename "$b")"
+done
+shopt -u nullglob
+
+# Bundle the cocore CLI so the .app is a SELF-CONTAINED provider: the
+# download alone pairs, manages models, and runs the agent — no separate
+# `curl … | sh`. AgentSupervisor.locateBinary() finds it at
+# Contents/MacOS/cocore. It's signed alongside the app below.
+COCORE_CLI="$REPO_ROOT/provider/target/release/cocore"
+# Always (re)build so the bundled CLI matches the current source version —
+# a stale target/ binary from an earlier version must not get shipped.
+# cargo is incremental, so this is a no-op when already up to date.
+bold "==> build cocore release binary (to bundle in the app)"
+( cd "$REPO_ROOT/provider" && cargo build --release --locked )
+[[ -x "$COCORE_CLI" ]] || die "cocore release binary not found at $COCORE_CLI"
+install -m 755 "$COCORE_CLI" "$APP/Contents/MacOS/cocore"
+note "bundled cocore CLI ($("$COCORE_CLI" --version 2>/dev/null))"
+
+# Bundle the Python-venv bootstrap script so a download-only install can
+# set up the real-model runtime on demand (VenvBootstrapper runs it).
+mkdir -p "$APP/Contents/Resources/scripts"
+install -m 755 "$REPO_ROOT/scripts/bootstrap-python-venv.sh" \
+  "$APP/Contents/Resources/scripts/bootstrap-python-venv.sh"
+note "bundled venv bootstrap script"
+
+# Signing identity. Default: auto-detect a "Developer ID Application"
+# identity in the keychain so release builds are distributable. Override
+# with COCORE_SIGN_ID="Developer ID Application: …" or COCORE_SIGN_ID="-"
+# to force ad-hoc (local dev).
+COCORE_SIGN_ID="${COCORE_SIGN_ID:-}"
+if [[ -z "$COCORE_SIGN_ID" ]]; then
+  COCORE_SIGN_ID="$(security find-identity -p codesigning -v 2>/dev/null \
+    | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
+  [[ -z "$COCORE_SIGN_ID" ]] && COCORE_SIGN_ID="-"
+fi
+
+if [[ "$COCORE_SIGN_ID" == "-" ]]; then
+  bold "==> ad-hoc codesign (no Developer ID identity)"
+  note "Gatekeeper will warn on other Macs; install a Developer ID cert for distribution."
+  codesign --force --deep --sign - "$APP" 2>&1 | sed 's/^/  /' || die "codesign failed"
+  note "signed (ad-hoc)"
+else
+  bold "==> Developer ID codesign + hardened runtime"
+  note "identity: $COCORE_SIGN_ID"
+  # Resolve the Xcode-only $(AppIdentifierPrefix) in the entitlements to
+  # this identity's Team ID (the 10-char code in the identity name).
+  TEAM_ID="$(printf '%s' "$COCORE_SIGN_ID" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
+  note "team id: ${TEAM_ID:-unknown}"
+  ENTITLEMENTS="$OUT_DIR/cocore.entitlements.resolved"
+  cp "$SRC_RES/cocore.entitlements" "$ENTITLEMENTS"
+  # Drop keychain-access-groups for the Developer ID build: the Swift
+  # shell stores its session in a file (SessionStore), not the keychain,
+  # so it doesn't need the group — and a keychain-access-group is a
+  # RESTRICTED entitlement that requires a provisioning profile. Signed
+  # without one under hardened runtime, amfid silently kills the process
+  # at spawn ("Launchd job spawn failed", no crash log). Removing the
+  # unused entitlement is the fix.
+  /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$ENTITLEMENTS" >/dev/null 2>&1 || true
+  # Sign inside-out: the bundled cocore CLI first, then the app bundle.
+  # Both need Hardened Runtime (--options runtime) + a secure --timestamp
+  # for notarization. We sign each explicitly rather than using fragile
+  # --deep. The CLI gets no entitlements file (it needs none); the app
+  # gets the resolved one above.
+  codesign --force --options runtime --timestamp \
+    --sign "$COCORE_SIGN_ID" "$APP/Contents/MacOS/cocore" 2>&1 | sed 's/^/  /' \
+    || die "codesign (bundled cocore CLI) failed"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
+    --sign "$COCORE_SIGN_ID" "$APP" 2>&1 | sed 's/^/  /' || die "codesign failed"
+  note "verifying signature"
+  codesign --verify --strict --verbose=2 "$APP" 2>&1 | sed 's/^/  /' || die "signature verify failed"
+  note "signed (Developer ID; notarize separately via scripts/notarize-mac-app.sh)"
+fi
+
+bold "==> done"
+note "app: $APP"
+note "run: open \"$APP\"   (icon appears in the menu bar; LSUIElement = no dock icon)"
+
+if [[ "$OPEN" == "1" ]]; then
+  bold "==> launch"
+  open "$APP"
+fi

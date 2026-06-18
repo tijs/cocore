@@ -1,0 +1,63 @@
+# $schema=https://mise.jdx.dev/schema/mise.json
+# https://mise.en.dev/configuration.html
+
+min_version = "2024.11.1"
+
+# Use hk's Rust Pkl evaluator so contributors do not need the `pkl` CLI.
+# https://hk.jdx.dev/getting_started.html
+[env]
+HK_PKL_BACKEND = "pklr"
+
+[tools]
+node = "22"
+aube = "1.9.1"
+rust = "stable"
+hk = "1.45.0"
+
+[tasks.deps]
+description = "Install Node workspaces (aube, frozen lockfile)"
+run = "aube install --frozen-lockfile"
+
+[tasks.dev]
+description = "AppView + bridge (:8080 / :8081) + advisor (:8082) + console UI (:3000); stops services when console exits"
+run = "bash scripts/dev.sh"
+
+[tasks.advisor]
+description = "Only the advisor matchmaker (:8082)"
+run = "pnpm --filter @cocore/advisor start"
+
+[tasks.provider]
+description = "Run the local provider agent (stub); pair first with cocore agent pair"
+run = "bash scripts/dev-provider.sh"
+
+[tasks.services]
+description = "Only infra/services (AppView read API on :8081)"
+run = "pnpm dev:services"
+
+[tasks.seed]
+description = "Dev seed via bridge; optional COCORE_SEED_PROVIDER_DID / COCORE_SEED_REQUESTER_DID (or DEV_SEED_DEFAULT_* ) for your DID"
+run = "node --experimental-strip-types infra/bootstrap-dev.ts"
+
+[tasks.lex]
+description = "Lexicon JSON parse check (Makefile)"
+run = "make lex-validate"
+
+[tasks.check]
+description = "JS/TS typecheck, lint, and format gate (aube)"
+run = "aube run typecheck && aube run lint && aube run format:check"
+
+[tasks.test]
+description = "Fixtures + all workspace tests (aube)"
+run = "aube run test"
+
+[tasks.provider-test]
+description = "Provider crate tests only (cargo, locked manifest)"
+run = "cd provider && cargo test --locked"
+
+[tasks.hk-check]
+description = "Run hk static checks on the whole repo (CI-style)"
+run = "hk check --all"
+
+[tasks.hk-fix]
+description = "Auto-fix what hk can (oxlint, oxfmt, rustfmt)"
+run = "hk fix --all"

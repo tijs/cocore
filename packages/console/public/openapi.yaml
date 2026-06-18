@@ -1,0 +1,418 @@
+openapi: 3.1.0
+info:
+  title: cocore API
+  version: "1.0.0"
+  description: >
+    cocore is a decentralized network of Apple-Silicon Macs serving local
+    inference, with every completed job recorded as a provider-signed receipt
+    on AT Protocol. This is the public HTTP API: an OpenAI-compatible
+    chat-completions surface, a public directory of the models currently being
+    served, and bearer-key authed agent status.
+
+    To use an OpenAI-compatible client, set its base URL to
+    `https://console.cocore.dev/v1` (the client appends `/chat/completions`,
+    `/models`, … exactly as it does for `https://api.openai.com/v1`) and swap
+    in a cocore API key. The legacy `/api/v1/*` paths are kept as aliases and
+    behave identically. Pointing a client at `https://console.cocore.dev`
+    alone (no version segment) hits the console web app and returns HTML, not
+    the API.
+  license:
+    name: MIT OR Apache-2.0
+servers:
+  - url: https://console.cocore.dev
+    description: Production
+tags:
+  - name: Inference
+    description: OpenAI-compatible chat completions.
+  - name: Directory
+    description: Public, unauthenticated discovery of what's being served.
+  - name: Agent
+    description: Status of a machine you operate (bearer-key authed).
+
+paths:
+  /v1/chat/completions:
+    post:
+      tags: [Inference]
+      operationId: createChatCompletion
+      summary: Create a chat completion
+      description: >
+        OpenAI-compatible chat completions, routed to a connected provider that
+        serves the requested model. Set `stream: true` for a
+        `text/event-stream` of OpenAI-shaped chunks terminated by `data: [DONE]`;
+        otherwise a single buffered completion object is returned.
+
+
+        Also available at the legacy path `/api/v1/chat/completions`
+        (identical behavior).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: "A completion (or an SSE stream when `stream: true`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletion"
+            text/event-stream:
+              schema:
+                type: string
+                description: "SSE; each `data:` line is a ChatCompletionChunk, ending with `data: [DONE]`."
+        "401":
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          description: No connected provider serves the requested model (`model_not_found`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "503":
+          description: No providers connected (`no_providers_connected`) or the target went offline.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/private/chat/completions:
+    post:
+      tags: [Inference]
+      operationId: createPrivateChatCompletion
+      summary: Create a chat completion (friends-only routing)
+      description: >
+        Identical to `/v1/chat/completions`, but routing is constrained to
+        provider DIDs in the caller's friend list. Returns `no_friends_available`
+        (503) when no friends are online and `no_friends_for_model` (404) when
+        online friends don't serve the model. Also available at the legacy path
+        `/api/v1/private/chat/completions`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: "A completion (or an SSE stream when `stream: true`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatCompletion" }
+            text/event-stream:
+              schema: { type: string }
+        "401":
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          description: Friends are online but none serve the model (`no_friends_for_model`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "503":
+          description: No friends online (`no_friends_available`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/models:
+    get:
+      tags: [Directory]
+      operationId: listModels
+      summary: List models currently being served
+      description: >
+        Public, unauthenticated list of every model NSID at least one attested
+        provider advertises right now, built from the AppView's mirror of
+        `dev.cocore.compute.provider` records.
+
+
+        The default response is the **canonical OpenAI list shape**
+        (`{object:"list", data:[{id, object:"model", …}]}`) so an unmodified
+        OpenAI client's `GET /v1/models` populates its model picker. cocore's
+        richer views are opt-in via `?view`:
+
+
+        * `?view=directory` — full per-machine detail + activity windows.
+
+        * `?view=summary` — lean rows (model id + machine count + price).
+
+
+        Also available at the legacy path `/api/v1/models`.
+      parameters:
+        - name: view
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [directory, summary]
+          description: >
+            Omit for the OpenAI list shape. `directory` returns the full
+            per-machine aggregate; `summary` returns the lean shape (model id +
+            machine count + price).
+      responses:
+        "200":
+          description: >
+            A model list. OpenAI `ModelList` by default; `ModelDirectory` for
+            `?view=directory`; `ModelDirectorySummary` for `?view=summary`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ModelList"
+                  - $ref: "#/components/schemas/ModelDirectory"
+                  - $ref: "#/components/schemas/ModelDirectorySummary"
+          headers:
+            Cache-Control:
+              schema: { type: string }
+              description: "public, max-age=30, stale-while-revalidate=300"
+
+  /api/agent/status:
+    get:
+      tags: [Agent]
+      operationId: getAgentStatus
+      summary: Get status for a machine you operate
+      description: >
+        Credit balance, last-24h earnings, trust level, and the agent's binary
+        version for the machine owning the supplied API key.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Provider status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentStatus" }
+        "401":
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SimpleError" }
+
+  /agent/version:
+    get:
+      tags: [Agent]
+      operationId: getLatestAgentVersion
+      summary: Latest released agent/app version
+      description: The latest release tag as plain text, e.g. `v0.7.8`.
+      responses:
+        "200":
+          description: The latest release tag.
+          content:
+            text/plain:
+              schema: { type: string, example: "v0.7.8" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        A cocore API key, sent as `Authorization: Bearer cocore-…`. Mint one in
+        the console at `/api-keys`. The key resolves to your DID server-side.
+
+  schemas:
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          example: user
+        content:
+          type: string
+
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          description: A model id returned by `/v1/models`, or `stub`.
+          example: mlx-community/Qwen2.5-7B-Instruct-4bit
+        messages:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ChatMessage" }
+        stream:
+          type: boolean
+          default: false
+        max_tokens:
+          type: integer
+          minimum: 1
+          default: 1024
+        temperature:
+          type: number
+          description: Accepted for OpenAI compatibility; honoring is provider-dependent.
+        top_p:
+          type: number
+          description: Accepted for OpenAI compatibility; honoring is provider-dependent.
+
+    ChatCompletion:
+      type: object
+      properties:
+        id: { type: string, example: chatcmpl-abc123 }
+        object: { type: string, example: chat.completion }
+        created: { type: integer, example: 1717000000 }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer, example: 0 }
+              message: { $ref: "#/components/schemas/ChatMessage" }
+              finish_reason: { type: string, nullable: true, example: stop }
+
+    ChatCompletionChunk:
+      type: object
+      description: "One SSE chunk when `stream: true`."
+      properties:
+        id: { type: string }
+        object: { type: string, example: chat.completion.chunk }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer, example: 0 }
+              delta:
+                type: object
+                properties:
+                  role: { type: string }
+                  content: { type: string }
+              finish_reason: { type: string, nullable: true }
+
+    Model:
+      type: object
+      description: OpenAI model object.
+      properties:
+        id: { type: string, example: mlx-community/Qwen2.5-7B-Instruct-4bit }
+        object: { type: string, example: model }
+        created:
+          type: integer
+          description: Unix seconds of the freshest provider sighting for this model.
+          example: 1717000000
+        owned_by: { type: string, example: cocore }
+
+    ModelList:
+      type: object
+      description: >
+        The default `/v1/models` response: the canonical OpenAI list shape.
+      properties:
+        object: { type: string, example: list }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Model" }
+
+    ModelSummary:
+      type: object
+      properties:
+        modelId: { type: string, example: mlx-community/Qwen2.5-7B-Instruct-4bit }
+        machineCount:
+          type: integer
+          description: How many providers currently advertise this model.
+          example: 3
+        inputPricePerMTok:
+          type: number
+          nullable: true
+          description: Credits per million input tokens.
+        outputPricePerMTok:
+          type: number
+          nullable: true
+        currency:
+          type: string
+          nullable: true
+          example: CC
+
+    ModelDirectorySummary:
+      type: object
+      description: The `?view=summary` response.
+      properties:
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/ModelSummary" }
+        generatedAt: { type: string, format: date-time }
+        appviewUnreachable:
+          type: boolean
+          description: True if the directory was built from an empty input set (AppView down).
+
+    ModelDirectoryEntry:
+      allOf:
+        - $ref: "#/components/schemas/ModelSummary"
+        - type: object
+          properties:
+            freshestAt: { type: string, format: date-time, nullable: true }
+            machines:
+              type: array
+              description: Per-provider detail for each machine serving the model.
+              items:
+                type: object
+                properties:
+                  did: { type: string }
+                  machineLabel: { type: string, nullable: true }
+                  chip: { type: string, nullable: true }
+                  ramGB: { type: integer, nullable: true }
+                  lastSeen: { type: string, format: date-time, nullable: true }
+                  activity: { $ref: "#/components/schemas/ActivityWindows" }
+            activity: { $ref: "#/components/schemas/ActivityWindows" }
+
+    ModelDirectory:
+      type: object
+      description: The `?view=directory` response (full per-machine aggregate).
+      properties:
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/ModelDirectoryEntry" }
+        generatedAt: { type: string, format: date-time }
+        appviewUnreachable: { type: boolean }
+
+    ActivityWindows:
+      type: object
+      description: Request + token counts in rolling windows.
+      properties:
+        hour: { $ref: "#/components/schemas/ActivityCount" }
+        day: { $ref: "#/components/schemas/ActivityCount" }
+        week: { $ref: "#/components/schemas/ActivityCount" }
+        month: { $ref: "#/components/schemas/ActivityCount" }
+
+    ActivityCount:
+      type: object
+      properties:
+        requests: { type: integer }
+        tokens: { type: integer }
+
+    AgentStatus:
+      type: object
+      properties:
+        did: { type: string }
+        currency: { type: string, example: credits }
+        balance: { type: integer, nullable: true }
+        earned24h: { type: integer }
+        trustLevel: { type: string, nullable: true, example: self-attested }
+        agentVersion: { type: string, nullable: true, example: 0.7.8 }
+
+    ErrorEnvelope:
+      type: object
+      description: OpenAI-shaped error envelope.
+      properties:
+        error:
+          type: object
+          properties:
+            message: { type: string }
+            type: { type: string, example: invalid_request_error }
+            code: { type: string, example: model_not_found }
+            param: { type: string, nullable: true }
+
+    SimpleError:
+      type: object
+      properties:
+        error: { type: string }

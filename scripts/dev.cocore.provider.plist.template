@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent template for the cocore agent on macOS.
+  Placeholders (@@…@@) are substituted by the installer at install
+  time. The expanded plist lands at
+  ~/Library/LaunchAgents/dev.cocore.provider.plist.
+
+  Behavior:
+    * RunAtLoad + KeepAlive: starts at user login and is restarted by
+      launchd if it exits non-zero.
+    * ThrottleInterval=10: 10s minimum between restart attempts.
+    * stdout/stderr go to $HOME/.cocore/logs/.
+    * COCORE_CONSOLE / COCORE_ADVISOR drive the agent's `serve`
+      command; both are env-driven on the Rust side.
+    * The agent reads its session from $HOME/.cocore/session.json.
+      You must run `cocore agent pair` before launchd can serve.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@@LABEL@@</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@@BIN@@</string>
+        <string>agent</string>
+        <string>serve</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>@@HOME@@</string>
+        <key>COCORE_CONSOLE</key>
+        <string>@@CONSOLE@@</string>
+        <key>COCORE_ADVISOR</key>
+        <string>@@ADVISOR@@</string>
+        <key>COCORE_LOG</key>
+        <string>@@LOG@@</string>
+        <!-- Real inference (vllm-mlx via PyO3) lives behind the
+             `--features inference` build. The inference installer
+             populates COCORE_INFERENCE_MODELS (comma-separated NSIDs)
+             so the agent loads one engine per model on startup and
+             advertises exactly that list as `supportedModels`. The
+             stub installer leaves the var empty; build_engines()
+             then only registers the stub engine.
+             COCORE_INFERENCE_MODEL (singular) is honored as a
+             back-compat fallback for v0.4.0 plists. -->
+        <key>COCORE_INFERENCE_MODELS</key>
+        <string>@@INFERENCE_MODELS@@</string>
+        <key>COCORE_PYTHON_VENV</key>
+        <string>@@PYTHON_VENV@@</string>
+        <!-- LaunchAgents inherit a minimal environment that defaults
+             to ASCII. Several tokenizer / chat-template files vllm-mlx
+             ships have non-ASCII characters (Gemma 3 in particular),
+             and Python's `codecs.ascii_decode` blows up on them with
+             "'ascii' codec can't decode byte 0xe2 ...". Forcing
+             UTF-8 here keeps `transformers` happy. -->
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+        <key>LC_ALL</key>
+        <string>en_US.UTF-8</string>
+        <!-- Ensure the agent can find shell utilities and any
+             user-installed binaries it might shell out to. -->
+        <key>PATH</key>
+        <string>@@HOME@@/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>@@HOME@@</string>
+
+    <key>StandardOutPath</key>
+    <string>@@LOG_DIR@@/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>@@LOG_DIR@@/stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

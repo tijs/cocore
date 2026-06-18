@@ -1,0 +1,117 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+
+  // ── Strict global behavior ────────────────────────────────────────────
+  // Report unused exports in entry files too. With invariant #2 ("receipts
+  // are self-verifying"), exported symbols matter — anything we export
+  // that nothing imports is a smell, not a feature.
+  "includeEntryExports": true,
+  // Configuration hints (e.g. plugin patterns that don't match any files,
+  // redundant entries) are wrong, period. Fail CI on them so we notice
+  // when something rots.
+  "treatConfigHintsAsErrors": true,
+  // All issue types are errors by default; pin them explicitly so a
+  // future "warn" downgrade in defaults doesn't quietly slacken CI.
+  "rules": {
+    "files": "error",
+    "dependencies": "error",
+    "devDependencies": "error",
+    "optionalPeerDependencies": "error",
+    "unlisted": "error",
+    "binaries": "error",
+    "unresolved": "error",
+    "exports": "error",
+    "types": "error",
+    "nsExports": "error",
+    "nsTypes": "error",
+    "enumMembers": "error",
+    "duplicates": "error"
+  },
+
+  // `aube` is the polyglot task runner provisioned via mise (mise.toml).
+  // It isn't an npm dep, but every CI/dev script invokes it.
+  "ignoreBinaries": ["aube"],
+
+  // `hip-ui` is the design-system source-of-truth that the console's
+  // `src/design-system/` mirrors and the `hip-ui mcp` server consumes
+  // (see CLAUDE.md / .mcp.json). Its symbol usage isn't visible to knip
+  // through MCP wiring, so allow it everywhere.
+  "ignoreDependencies": ["hip-ui"],
+
+  // The console's `design-system/` is a vendored UI kit — many components
+  // are kept as a library even when no current page imports them yet.
+  // We treat each file as an entry (so knip follows its imports and the
+  // npm deps it pulls in — react-aria, media-chrome, etc. — count as
+  // used at the package level) and suppress unused-export/type reports
+  // inside the directory.
+  "ignoreIssues": {
+    "packages/console/src/design-system/**": [
+      "exports",
+      "types",
+      "nsExports",
+      "nsTypes",
+      "enumMembers",
+      "duplicates"
+    ],
+    // `auth.ts` re-exports `AtprotoSessionContext` from auth.server.ts so
+    // client-side callers can `import type { ... } from
+    // "@/middleware/auth.ts"` without tripping the TanStack Start
+    // `.server.*` import-protection plugin. Knip can't see future
+    // consumers; the export is deliberate API surface, not dead code.
+    "packages/console/src/middleware/auth.ts": ["types"],
+    // `router.tsx` is the TanStack Start framework-entry file — its
+    // `getRouter` export is consumed by `tanstackStart()`'s vite
+    // plugin via convention (see the auto-emitted Register block in
+    // routeTree.gen.ts), not via static import knip can follow.
+    // Same false-positive shape as the design-system entries above.
+    "packages/console/src/router.tsx": ["exports"],
+    // `types.gen.ts` is regenerated from the lexicons by
+    // scripts/lex-codegen.ts. CI's `make lex-codegen-check` runs
+    // on every PR and fails when the on-disk file drifts from a
+    // fresh codegen. It's the drift-detection canary for a future
+    // swap of types.ts to re-export from this file; until then no
+    // workspace consumer imports from types.gen.ts directly.
+    "packages/sdk/src/types.gen.ts": ["exports", "types", "files"],
+    // `blog.ts` exports BlogFrontmatter + BlogPostModule for the
+    // not-yet-shipped blog feature — there's no consumer yet. The
+    // exports are deliberate API surface for the upcoming blog
+    // routes; suppress until those land.
+    "packages/console/src/lib/blog.ts": ["types"]
+  },
+
+  // ── Workspaces ────────────────────────────────────────────────────────
+  // Most workspaces auto-detect entries from package.json `exports` and
+  // `scripts`. We only declare entries that aren't reachable that way
+  // (Makefile targets, mise tasks, shell scripts).
+  "workspaces": {
+    ".": {
+      // Root scripts referenced from package.json + mise.toml +
+      // Makefile + scripts/dev.sh that knip can't see by static
+      // analysis of those non-JS files.
+      "entry": ["infra/smoke.ts"],
+      "project": ["infra/*.ts"]
+    },
+    "packages/console": {
+      "entry": [
+        // TanStack Start runtime entry — exports `getRouter()` consumed
+        // by the framework via convention, not via static import knip
+        // can follow.
+        "src/router.tsx",
+        // Driven by `make e2e`; not in package.json scripts.
+        "scripts/e2e-pair.ts",
+        // Vendored UI kit — see `ignoreIssues` above.
+        "src/design-system/**/*.{ts,tsx}"
+      ]
+    },
+    "packages/sdk": {
+      // `@cocore/sdk` is a published public API surface (see invariant #1
+      // — providers and external SDK consumers depend on these symbols).
+      // Its package.json `exports` list is the contract; symbols exported
+      // from those entries are intentional public API even when no
+      // workspace consumer happens to import them. Disable
+      // `includeEntryExports` here so the SDK entries are exempt from
+      // unused-export reports while still being analyzed.
+      "includeEntryExports": false
+    }
+  }
+}

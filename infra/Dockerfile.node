@@ -1,0 +1,49 @@
+# Shared Dockerfile for cocore Node workspaces.
+#
+# Build args:
+#   WORKSPACE   directory of the workspace to run (e.g. infra/services)
+#   START_CMD   aube script to invoke (default: start)
+#
+# Run with:
+#   docker build -f infra/Dockerfile.node \
+#     --build-arg WORKSPACE=infra/services -t cocore/services .
+#
+# We copy the entire monorepo and install once via aube (pnpm-lock.yaml).
+# For dev this is fine; production splits images for each workspace
+# and uses a multi-stage prune.
+
+FROM node:22-bookworm-slim AS builder
+ARG AUBE_VERSION=1.9.1
+WORKDIR /repo
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+  && ARCH="$(dpkg --print-architecture)" \
+  && case "$ARCH" in \
+       amd64) AUBE_TRIPLE=x86_64-unknown-linux-gnu ;; \
+       arm64) AUBE_TRIPLE=aarch64-unknown-linux-gnu ;; \
+       *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+     esac \
+  && curl -fsSL "https://github.com/endevco/aube/releases/download/v${AUBE_VERSION}/aube-v${AUBE_VERSION}-${AUBE_TRIPLE}.tar.gz" \
+     | tar xz -C /usr/local/bin \
+  && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+# `.npmrc` carries `enableGlobalVirtualStore=false`. Without it in the build
+# context, aube's global-virtual-store auto-detection re-resolves `vite`
+# (which it flags as GVS-incompatible) per-project, and that re-resolution
+# makes `--frozen-lockfile` reject the recorded `overrides: vite` as
+# out-of-date. Copy it so the container installs deterministically.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY packages ./packages
+COPY infra ./infra
+COPY lexicons ./lexicons
+RUN aube install --frozen-lockfile -P
+
+FROM node:22-bookworm-slim AS run
+WORKDIR /repo
+COPY --from=builder /usr/local/bin/aube /usr/local/bin/aube
+COPY --from=builder /repo /repo
+ARG WORKSPACE=infra/services
+ARG START_CMD=start
+ENV NODE_ENV=production
+ENV COCORE_WORKSPACE=$WORKSPACE
+ENV COCORE_START_CMD=$START_CMD
+WORKDIR /repo/$WORKSPACE
+CMD ["sh", "-c", "aube run $COCORE_START_CMD"]

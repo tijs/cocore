@@ -1,0 +1,426 @@
+---
+title: "How the cocore economy is shaped, and why"
+summary: "A design rationale for the cocore token market — what each mechanic does, why it's there, what we deliberately left out, and how the whole thing stays honest."
+date: "2026-05-11"
+author: "cocore"
+---
+
+The cocore protocol is built around _receipts of computational work_:
+a provider runs an inference job, signs a record with the input
+commitment, output commitment, token counts, model id, and price, and
+publishes it to their PDS. Anyone with the lexicon and the provider's
+DID document can verify the receipt offline. That's the protocol.
+
+But a receipt only describes what _happened_ — who did the work, what
+the work produced, what the price was. It doesn't, on its own,
+describe who _paid_ for it or how that settlement got recorded. We
+need an economic layer underneath: a way for one DID's balance to
+decrease and another's to increase, on terms everyone can see, in a
+unit everyone agrees on.
+
+This post is the design rationale for that layer. The mechanics
+themselves are small — five things move your balance — but each one
+exists for a specific reason, and the shape of the whole comes from
+choosing those reasons deliberately. The compact answer is that we
+borrowed from cooperative-economics traditions older than the
+internet (Sardex, WIR, REI's annual dividend, electric cooperatives'
+patronage refunds) because the property they share is _honest
+legibility_: a member can compute their share of the surplus and
+watch it arrive on schedule.
+
+Below: what we built, why, and what we left out.
+
+## The unit
+
+The unit of account between cocore members is the **token**.
+Balances are integers; every receipt's price is denominated in
+tokens. The exchange's `tokenRate` fixes the conversion between
+model tokens and balance tokens at **1:1** — one token of model
+input or output costs one token from your balance. A million-token
+completion costs a million tokens; a 500-token completion costs 500
+tokens. That ratio is published openly in the active
+`dev.cocore.compute.exchangePolicy` record, alongside every other
+parameter that affects how settlements get computed.
+
+This is what's known as a _mutual credit_ unit. The pattern goes
+back at least to the 1934 WIR cooperative bank in Switzerland and
+shows up most recently in Sardex, the Sardinian inter-business
+credit network that's been operating continuously since 2009. In a
+mutual credit system the unit exists because the members agreed it
+does — its value is the value of what other members will accept it
+for. The token buys compute. That's what gives it its meaning, and
+that's the only valuation we make any effort to assert.
+
+We chose this shape because the alternatives carry costs we didn't
+want to pay. A speculation-friendly unit (mint a coin, list it on
+an exchange, watch the price fluctuate) attracts a kind of
+participant whose interest is in the unit, not the network. A pure
+fiat-denominated system (USD-priced inference, Stripe in the
+middle) puts us in the business of being a money transmitter — and
+the regulatory cost-of-entry to do that responsibly is higher than
+our scale today justifies. A capped tokenized version of the same
+USD model would have the same regulatory cost without the
+speculation flexibility. None of those felt right for what we were
+trying to do, which is run a small federated compute exchange
+between people who mostly know each other and want to share spare
+cycles in a way that nets out fairly.
+
+So tokens. One unit, one purpose, no exchange rate to anything
+outside the system. The exchange's role is roughly that of a
+clearinghouse: sit in the middle, net out who owes whom, hold the
+ledger, publish the rules openly.
+
+## The five forces
+
+Five mechanics move your token balance. Here's what each one does
+and why it exists.
+
+### 1. The onboarding grant
+
+Every DID that interacts with cocore for the first time receives
+**1,000,000 tokens** as a one-time grant. At the 1:1 rate that's
+one million tokens of inference — enough for a few thousand small
+completions, plus headroom for one or two long ones, before you'd
+need to contribute compute back to the network to keep using it.
+
+The grant exists because a brand-new member can't otherwise do
+anything. They have no machines yet, so they can't earn. They have
+no balance yet, so they can't spend. A network whose first
+interaction is "please contribute something before you can see
+whether this works for you" loses prospective members who'd have
+been net contributors a week later. The grant is the cost of
+removing that initial barrier.
+
+The grant amount is calibrated against the floor (next mechanic):
+the grant is **ten times** the floor, so a new member can dispatch
+roughly nine successive small jobs before any consideration of
+running low. The policy publishes the grant amount as `tokenGrant`
+so other exchanges or future versions of this one can replicate the
+behavior. Each grant is recorded on the user's PDS as a
+`dev.cocore.account.tokenGrant` record — an auditable trail of
+every onboarding event.
+
+The grant is issued exactly once per DID. There's no surface area
+for sybil farming the grant (yet — we'll get there in the
+identity-gate section below). For the size of the network today,
+attempting to sybil for 1M tokens by spinning up DIDs is more
+effort than the resulting tokens are worth as compute, and there
+are no secondary markets where farmed tokens would acquire any
+value. As the network scales the calculation shifts; phase-two
+protections live in the identity layer, which we're deliberately
+not building yet in order to ship the rest.
+
+### 2. The admission floor
+
+The exchange refuses to admit a new job if your balance is below
+**100,000 tokens**. Period — there's no per-job projection, no
+price-ceiling math. If you're under the floor, the job doesn't
+run; you wait for the next weekly refresh.
+
+The floor exists to take a worse failure mode off the table. We
+can't know in advance what a job will cost — output token counts
+depend on what the model generates. If we admitted jobs based on
+projections, an unlucky one would land you below zero at settlement
+time: a provider has already done the work, the receipt is signed
+and published, and now your balance can't cover it. The exchange
+has to choose between letting the receipt stand (negative balance
+in the ledger) and refusing to settle (orphaned receipt, provider
+not credited). Neither outcome is clean. The fixed floor moves the
+failure to a point where the user has full context and a clear
+next step.
+
+We set the floor high enough that no single message is likely to
+consume the whole thing, so when admission refuses you it's because
+the network is asking you to wait a few days, not because a
+borderline-large completion just ran you over. If members converge
+on agent-style usage where individual jobs routinely cost tens of
+thousands of tokens, the floor goes up proportionally.
+
+### 3. Conservation: the 95/5 split
+
+The substantive economic event in cocore is the receipt. When a
+provider publishes a `dev.cocore.compute.receipt`, the exchange
+verifies it and writes three balance changes atomically:
+
+- the **requester** loses N tokens (where N is the receipt's price)
+- the **provider** gains 95% of N
+- the **treasury** gains the remaining 5%
+
+No tokens are minted; no tokens are burned. The sum across the
+three event rows is zero per receipt. This is the "conservation
+95/5" property the codebase invariably refers to: the network is
+closed under settlement, and the ledger's audit log sums to
+`(grants issued so far) + (refreshes credited)`. If that
+invariant ever breaks, something is wrong with the runtime, not
+with the design.
+
+The 5% to the treasury is the operating cost of the network — the
+single fee, taken once per receipt, on the provider's side of the
+ledger so the requester doesn't see two debits. It's published as
+`fee.bps` on the policy record. Self-loop receipts (requester DID
+equals provider DID — you running a job on your own machine via
+the exchange) have the fee waived by default, since there's no
+sense in routing 5% to the treasury just because you went through
+the exchange to talk to yourself. The waiver is published as
+`selfLoop.feeWaived` so anyone can see it.
+
+The treasury is the exchange's own DID balance. From the
+cooperative's perspective, the treasury _is_ the cooperative's
+balance sheet; it accumulates fees, distributes refunds, and is
+governed by whichever member or quorum the operator agrees to.
+Today there's one operator (cocore.dev), and the treasury is at
+the exchange's DID by default. Other exchanges can run with a
+different `treasuryDid` if they want to keep their operating
+account separate from a multisig-style treasury, or route fees to
+a dedicated cooperative-foundation DID.
+
+### 4. The weekly refresh
+
+The treasury accumulates 5% of every receipt's tokens. Some of it
+has to come back to members; otherwise the treasury grows
+monotonically and the network becomes increasingly extractive over
+time. We split the redistribution into two mechanics: a small
+weekly drip (this section) and a larger monthly patronage rebate
+(next section).
+
+Active members get **70,000 tokens** per week, issued **lazily**
+when they next touch the network. The lazy part is load-bearing:
+
+- A dormant DID never touches the ledger, so it never accrues a
+  refresh. Members who've stopped using cocore don't continue
+  receiving tokens they're not going to spend.
+- An active member receives the refresh as a side effect of their
+  next receipt, balance read, or governance act. There's no
+  scheduled cron job that fires for every member at midnight UTC
+  on Sunday — instead the refresh fires when there's already a
+  reason to be writing to the ledger.
+
+The refresh is the cocore equivalent of a credit union's
+basic-account fee waiver: a small thing that's worth more for
+what it _doesn't_ do than for what it does. It doesn't make
+anyone rich. It does mean a member who logs in once a month
+doesn't accidentally lock themselves out of dispatching jobs
+because they spent down the grant and then walked away. The
+amount is sized to roughly equal the cost of running ~3 small
+completions per week — enough to stay engaged at a modest baseline
+without subsidizing heavy use.
+
+We deliberately avoided two adjacent designs. The first was a
+tenure-curved refresh that pays new members more and longtime
+members less (the doc's original Section 10 design); the data
+we'd need to calibrate the curve doesn't exist yet, and starting
+flat is reversible. The second was an activity-curved refresh
+that pays more for higher patronage; we already do that via the
+monthly rebate, and adding a second proportional reward
+introduces two mechanics that pull in the same direction. Better
+to have one cleanly designed.
+
+### 5. The monthly patronage rebate
+
+Once a month, the treasury distributes **80% of its accumulated
+balance** to active members in proportion to their _patronage_
+during the period. Patronage is the sum of a member's
+`receipt-in` (tokens earned as a provider) and `receipt-out`
+(tokens spent as a requester) events in the window. The 20%
+retained is the cooperative's reserve — operating runway and the
+buffer that absorbs months where patronage exceeds receipts.
+
+This is the heart of the design. Rochdale-tradition consumer
+cooperatives (REI being the most legible to a North American
+reader, but the pattern is the same one electric cooperatives
+return a "capital credit" under and a credit union returns a
+"member dividend" under) all rest on the same idea: the surplus
+the institution generates is owed back to the members who
+generated it, in proportion to how much they participated.
+
+Both sides of patronage count. A heavy user of the network
+provides demand for compute and receives a rebate proportional
+to that demand; a heavy provider of compute provides supply and
+receives a rebate proportional to that supply. We don't want to
+choose between them. A network that only rewards consumption
+underinvests in capacity; a network that only rewards production
+overproduces. Adding both means the rebate is heaviest where the
+network is most needed.
+
+The monthly cadence is a deliberate compromise. Quarterly would
+be too long for the early-stage feedback loop; weekly would be
+operationally noisy and would surface every fluctuation in
+treasury balance to the user as a balance event. Monthly is
+enough time for averages to be meaningful, short enough to feel
+proximate.
+
+Distributions are atomic: the treasury balance, the
+`patronage_score` per DID, and the resulting per-recipient
+credit are all computed inside a single SQLite transaction, with
+a `processed_period` row that makes the operation idempotent on
+the `(start, end)` window. If the scheduler crashes mid-month
+the operator can replay the same month manually without
+double-paying anyone. Each distribution is recorded on the
+recipient's PDS as a `dev.cocore.account.tokenPatronage` record
+so the trail is durable beyond our DB.
+
+## What we explicitly don't do
+
+Choosing what's _not_ in the design matters as much as choosing
+what is. Three things we left out and why:
+
+**No speculation mechanism.** Tokens have no exchange rate to any
+outside unit and no secondary market. You can't accumulate them
+hoping it'll be worth something later. The economy only works
+if engaging with it is better than gaming it, and any speculation
+surface would put the unit-game ahead of the compute-game. (When
+we hit the scale where members might want fiat redemption, the
+right way to wrap the closed loop is with a regulated on-ramp,
+the WIR path, rather than letting a parallel-market price grow
+underneath us.)
+
+**No demurrage.** An earlier version of the design carried a soft
+demurrage on very large idle balances: above ~10× typical weekly
+spend, 90+ days idle, decay at 1%/month. We removed it. The
+mechanism would have worked correctly, but the cost wasn't worth
+it: a balance that quietly shrinks while you're not looking feels
+like the exchange is reaching into your wallet, and that breaks the
+basic trust the rest of the design depends on. Whatever
+hoarding-suppression argument you could make for keeping it, it's
+not worth telling members "you can save tokens here, but check on
+us regularly or we'll start clipping." The use-it-to-keep-it
+weekly refresh pulls in the same direction without ever taking
+something away from you.
+
+**No complex pricing curves.** Today the exchange pins a single
+uniform `tokenRate` and providers settling through cocore.dev
+must price at that rate. We deliberately didn't ship the
+provider-side discount knobs, demand-curve auto-pricing,
+priority-tier multipliers, or any other surface that would let
+two providers serving the same model converge on different
+prices. The uniform rate is calibrated against real-world
+indicative pricing for the model and lets every member compare
+"what did I pay for what I got" cleanly. Heterogeneous pricing
+is a thing we can earn later if it becomes obviously useful;
+heterogeneous pricing baked in from the start would have made
+verification a per-receipt judgment call instead of a structural
+property.
+
+## How it stays honest
+
+Three properties keep this design from drifting:
+
+**The lexicon is the spec.** Every parameter that affects
+settlement — the fee bps, the supported currencies, the grant
+size, the floor, the refresh rate, the patronage cadence, the
+treasury DID — is a field on the `dev.cocore.compute.exchangePolicy`
+record. The exchange publishes the record to its own PDS, signs
+it under the same DID a settlement record points back to, and
+links it from the active policy strong-ref on every settlement.
+A verifier with the lexicon plus the policy record plus the
+receipt can re-derive the split offline. We can't quietly change
+the rules without publishing a new policy record and bumping the
+`termsVersion`, which prompts every signed-in user to re-accept
+on their next page load.
+
+**The exchange is federable.** Receipts live on provider PDSes,
+not on a cocore-owned database; settlements live on the
+exchange's PDS, but the receipt is the canonical artifact and
+anyone can index the firehose and run a different exchange off
+the same receipts. The cocore.dev exchange isn't a chokepoint —
+it's a participant. A future competing exchange could publish a
+policy with a different `fee.bps`, a different `tokenRate`,
+different cadences, and providers could opt into settling
+through it. The protocol-level export tool
+(`com.atproto.sync.getRepo`) is the migration path for everyone
+involved.
+
+**Members own their data.** A DID is yours. If you stop liking
+how cocore.dev is run, your provider records, your jobs, your
+receipts, your token grants, and your patronage records all
+travel with your repo. Your token balance is the one piece that
+doesn't fork cleanly (it's a per-DID row on the exchange's
+ledger), but a future exchange can re-derive it from your event
+history if they want to honor it.
+
+## What changes when we scale
+
+Most of the design is reversible. A few things were calibrated
+for a small network and will need to change as it grows:
+
+The **weekly refresh amount** was sized for a network where 70K
+tokens per week is meaningful relative to a member's typical usage.
+If usage rises substantially the refresh should rise with it (or
+be replaced by a tenure-curved schedule with a higher floor for
+new members). The lazy implementation makes this cheap to
+change.
+
+The **patronage distribution fraction** sits at 80% retained-20%
+reserve as a starting point. The reserve grows when patronage is
+healthy and shrinks when it isn't; if it grows past a sensible
+target, the fraction goes up. If it shrinks below a buffer that
+makes the operator nervous, the fraction comes down. There's no
+automatic adjustment today — the operator publishes a new policy
+record when they want to change it.
+
+The **fee bps** at 5% is the rate where a patronage rebate feels
+substantial when it lands. Most established co-ops run their
+rebates against transaction volume in the 2–3% range; we're
+starting higher because the network is small and the absolute
+treasury inflow is correspondingly small. As the network grows the
+fee can come down without breaking conservation.
+
+The **identity layer** is currently founder-vouched: anyone with
+a verified bsky handle can sign in. That's enough for a network
+small enough that the founders know everyone. As the network
+scales we'll need to gate the onboarding grant against sybil. The
+most obvious surface is a `dev.cocore.account.vouch` record that
+says "I, an existing tenured member, vouch for this DID as a real
+person." That's not the only option — account age (PLC handle
+creation date), follow graph density on bsky, or any other
+network-wide reputation metric already exposed via ATProto records
+can all feed an admission gate. We'll likely use a mix. The rest
+of the design doesn't need to change to absorb it.
+
+The **fiat boundary** is deferred. If and when there's a
+compelling reason to let tokens convert to dollars — a member's
+company wants to pay for compute as a deductible expense; an
+investor wants to capitalize a treasury reserve in real currency
+— the right shape is a regulated on-ramp wrapped around the
+existing closed loop, not a redesign of the ledger underneath.
+The patronage rebate already maps cleanly to the cooperative-
+dividend tax treatment that mature co-ops use. The work to do
+when that day comes is regulatory and accounting work, not
+protocol work.
+
+## What we owe the people we borrowed from
+
+A closing acknowledgment. Most of what's interesting about this
+design isn't new — it's the result of squinting at a particular
+problem (how to settle compute work between strangers on the AT
+Protocol) and noticing that solved problems already exist for
+adjacent ones.
+
+The mutual credit shape comes from Sardex and WIR. The patronage
+rebate comes from the Rochdale Society of Equitable Pioneers via
+REI and the National Rural Electric Cooperative Association. The
+federable-not-coordinator posture comes from the broader AT
+Protocol design, which exists because the people who built it had
+already watched what happens when a single service ends up owning
+everyone's canonical state. Special thanks to
+[darkbloom.dev](https://www.darkbloom.dev/), who shipped an open
+source version of a similar system that we used as guidance while
+building an entirely new implementation from scratch — the
+"receipt on a self-verifying PDS" pattern lands closer to where we
+wanted it because their public work let us learn from what they'd
+already figured out. The user-facing framing ("compute, but
+shared") comes from the Silicon Florist post that named cocore in
+the first place.
+
+We don't think we've invented an economy. We've translated a
+working pattern from one domain into another and tried to keep
+the translation honest. The proof is on the firehose: every
+receipt, every settlement, every grant, every patronage payout
+is a public record, signed at the repo layer, that anyone with
+the lexicon can verify offline.
+
+If you find a place where the design isn't honest — where the
+numbers don't add up, or the published policy doesn't match the
+runtime behavior, or some piece of state is hiding on our side
+that shouldn't be — we want to hear about it. That's the only
+kind of bug we don't think we can engineer our way out of.

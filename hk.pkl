@@ -1,0 +1,78 @@
+amends "package://github.com/jdx/hk/releases/download/v1.45.0/hk@1.45.0#/Config.pkl"
+
+// Git hook + local lint orchestration — https://hk.jdx.dev/getting_started.html
+// Install hooks once globally (Git 2.54+): `hk install --global`
+// Repo-only alternative: `hk install` after `mise install`
+
+exclude = List(
+  "**/node_modules",
+  "**/dist",
+  "**/.next",
+  "**/.output",
+  "**/.tanstack",
+  "provider/target"
+)
+
+local js_ts_globs = List(
+  "packages/**/*.cjs",
+  "packages/**/*.js",
+  "packages/**/*.jsx",
+  "packages/**/*.mjs",
+  "packages/**/*.ts",
+  "packages/**/*.tsx",
+  "infra/**/*.cjs",
+  "infra/**/*.js",
+  "infra/**/*.jsx",
+  "infra/**/*.mjs",
+  "infra/**/*.ts",
+  "infra/**/*.tsx"
+)
+
+local linters_fast = new Mapping<String, Step> {
+  ["lexicons"] {
+    glob = List("lexicons/**/*.json")
+    check = "make lex-validate"
+  }
+  ["oxlint"] {
+    glob = js_ts_globs
+    check = "aube exec oxlint {{files}}"
+    fix = "aube exec oxlint --fix {{files}}"
+    batch = true
+  }
+  ["oxfmt"] {
+    glob = js_ts_globs
+    check = "aube exec oxfmt --check {{files}}"
+    fix = "aube exec oxfmt {{files}}"
+    batch = true
+  }
+  ["rustfmt"] {
+    glob = List("provider/**/*.rs", "provider/Cargo.toml")
+    check = "cd provider && cargo fmt --check"
+    fix = "cd provider && cargo fmt"
+  }
+}
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps {
+      ...linters_fast
+    }
+  }
+  ["fix"] {
+    fix = true
+    steps {
+      ...linters_fast
+    }
+  }
+  ["check"] {
+    steps {
+      ...linters_fast
+      ["clippy"] {
+        glob = List("provider/**/*.rs", "provider/Cargo.toml")
+        check = "cd provider && cargo clippy --locked --all-targets --all-features -- -D warnings"
+      }
+    }
+  }
+}

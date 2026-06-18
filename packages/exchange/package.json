@@ -1,0 +1,31 @@
+{
+  "name": "@cocore/exchange",
+  "version": "0.1.0",
+  "private": true,
+  "description": "cocore exchange: closed-loop CC ledger + settlement record publisher.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/exchange.ts",
+    "./bootstrap": "./src/bootstrap.ts",
+    "./publisher": "./src/publisher.ts",
+    "./signing": "./src/signing.ts",
+    "./token-balance": "./src/token-balance.ts"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "vitest run",
+    "typecheck": "tsc -p . --noEmit",
+    "start": "node --experimental-strip-types src/index.ts"
+  },
+  "dependencies": {
+    "@cocore/sdk": "workspace:*",
+    "better-sqlite3": "^11.5.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.5.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.4"
+  }
+}
