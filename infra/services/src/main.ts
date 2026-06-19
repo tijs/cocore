@@ -26,7 +26,7 @@ import Database from "better-sqlite3";
 import { Firehose, type IndexedRecord } from "@cocore/sdk";
 import { Indexer, RelayFirehose } from "@cocore/appview/indexer";
 import { Store } from "@cocore/appview/store";
-import { buildServer as buildAppviewApi } from "@cocore/appview/api";
+import { buildAppviewHandler } from "@cocore/appview/api";
 import { AccountStore } from "@cocore/appview/account-store";
 import { Exchange } from "@cocore/exchange";
 import { bootstrapExchangeRecords } from "@cocore/exchange/bootstrap";
@@ -414,12 +414,24 @@ async function main() {
   }
 
   const accountStore = APPVIEW_DID ? new AccountStore(ACCOUNT_DB) : undefined;
-  const appviewServer = buildAppviewApi(store, {
+  // Build the AppView request handler ONCE and share it across both the
+  // internal :8081 listener (kept for COCORE_APPVIEW_URL consumers) and the
+  // public bridge port below. One handler instance == one OAuth client over
+  // one session store; two would dual-refresh the same session.
+  const appviewHandle = buildAppviewHandler(store, {
     accountStore,
     appviewDid: APPVIEW_DID,
     // The bridge runs in this same process; mirror PDS writes to it.
     bridgeUrl: process.env["COCORE_BRIDGE_URL"] ?? `http://127.0.0.1:${PORT}`,
     internalSecret: process.env["COCORE_INTERNAL_SECRET"],
+  });
+  const appviewServer = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      if (!(await appviewHandle(req, res, url))) json(res, 404, { error: "no such route" });
+    } catch (e) {
+      json(res, 500, { error: (e as Error).message });
+    }
   });
   await new Promise<void>((r) => appviewServer.listen(APPVIEW_PORT, r));
   console.error(
@@ -741,6 +753,10 @@ async function main() {
           return json(res, 500, { error: (e as Error).message });
         }
       }
+      // Fall back to the AppView handler so the public bridge port also
+      // serves the AppView XRPC API (appview.* reads, account.*, /pds,
+      // /internal). Shares the single appviewHandle instance built above.
+      if (await appviewHandle(req, res, url)) return;
       json(res, 404, { error: "no such route" });
     } catch (e) {
       json(res, 500, { error: (e as Error).message });

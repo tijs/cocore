@@ -54,7 +54,14 @@ function secretEquals(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-export function buildServer(store: Store, opts: BuildServerOptions = {}) {
+/** Build the AppView request handler. Returns a function that handles one
+ *  request and resolves `true` when a route (or `/healthz`) matched and a
+ *  response was sent, or `false` when no route matched so the caller can
+ *  decide the 404. Sharing one handler instance (one OAuth client over one
+ *  session store) is required — two would dual-refresh the same session.
+ *  Used both standalone (see {@link buildServer}) and merged onto the
+ *  bridge's public port. */
+export function buildAppviewHandler(store: Store, opts: BuildServerOptions = {}) {
   const routes: Routes = {
     "/xrpc/dev.cocore.appview.listProviders": (_req, res) => {
       const items = store.listByCollection("dev.cocore.compute.provider", 100);
@@ -539,22 +546,32 @@ export function buildServer(store: Store, opts: BuildServerOptions = {}) {
     };
   }
 
+  return async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
+    // Liveness probe. Mirrors the bridge's /healthz so a deploy healthcheck
+    // works whichever port it targets — and probing this one confirms the
+    // read API itself (the part that went down) is serving.
+    if (url.pathname === "/healthz") {
+      json(res, 200, { ok: true });
+      return true;
+    }
+    const handler = routes[url.pathname];
+    if (!handler) return false;
+    await handler(req, res, url);
+    return true;
+  };
+}
+
+/** Standalone AppView HTTP server on its own port. For the merged
+ *  single-port deployment, callers use {@link buildAppviewHandler} and
+ *  delegate to it from the bridge instead. */
+export function buildServer(store: Store, opts: BuildServerOptions = {}) {
+  const handle = buildAppviewHandler(store, opts);
   return createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      // Liveness probe. Mirrors the bridge's /healthz so a deploy healthcheck
-      // works whichever of the two service ports it targets — and probing this
-      // one confirms the read API itself (the part that went down) is serving.
-      if (url.pathname === "/healthz") {
-        json(res, 200, { ok: true });
-        return;
-      }
-      const handler = routes[url.pathname];
-      if (!handler) {
+      if (!(await handle(req, res, url))) {
         json(res, 404, { error: "no such route" });
-        return;
       }
-      await handler(req, res, url);
     } catch (e) {
       json(res, 500, { error: (e as Error).message });
     }
