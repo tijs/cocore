@@ -17,7 +17,7 @@ import { ids, lexicons } from "@cocore/sdk/lex";
 import { accountRoutes } from "./account-routes.ts";
 import { AccountStore } from "../operational/account-store.ts";
 import { isOAuthConfigured, makeAppviewOAuth } from "../auth/oauth-client.ts";
-import { pdsRoutes } from "../pds/write.ts";
+import { internalPdsRoutes, pdsRoutes } from "../pds/write.ts";
 import type {
   AttestationRecord,
   JobRecord,
@@ -492,11 +492,15 @@ export function buildAppviewHandler(store: Store, opts: BuildServerOptions = {})
   if (opts.accountStore && isOAuthConfigured()) {
     try {
       const oauth = makeAppviewOAuth(opts.accountStore);
-      Object.assign(
-        routes,
-        pdsRoutes({ accounts: opts.accountStore, oauth, bridgeUrl: opts.bridgeUrl }),
+      const pctx = { accounts: opts.accountStore, oauth, bridgeUrl: opts.bridgeUrl };
+      Object.assign(routes, pdsRoutes(pctx));
+      // Internal trusted-DID write path (the console forwards key-resolved
+      // writes here so the OAuth session work lives only in the AppView).
+      // Private-network only; gated on the shared secret.
+      if (opts.internalSecret) Object.assign(routes, internalPdsRoutes(pctx, opts.internalSecret));
+      console.error(
+        `appview: /pds write endpoints enabled${opts.internalSecret ? " (+ /internal/pds)" : ""}`,
       );
-      console.error("appview: /pds write endpoints enabled");
     } catch (e) {
       // A misconfigured OAuth client (e.g. bad ATPROTO_PRIVATE_KEY_JWK)
       // must not take down the read API — disable /pds and keep serving.

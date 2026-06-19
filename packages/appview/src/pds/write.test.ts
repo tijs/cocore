@@ -3,9 +3,10 @@ import { createServer, type Server } from "node:http";
 
 import { AccountStore } from "../operational/account-store.ts";
 import type { AppviewOAuthClient } from "../auth/oauth-client.ts";
-import { pdsRoutes } from "./write.ts";
+import { internalPdsRoutes, pdsRoutes } from "./write.ts";
 
 const ALICE = "did:plc:alice";
+const INTERNAL_SECRET = "test-internal-secret";
 
 /** A fake OAuth client whose restored session echoes the repo call it
  *  received, so tests can assert what would have hit the PDS. `restore`
@@ -59,7 +60,8 @@ function mount(
   accounts: AccountStore,
   oauth: AppviewOAuthClient,
 ): Promise<{ base: string; server: Server }> {
-  const routes = pdsRoutes({ accounts, oauth });
+  const ctx = { accounts, oauth };
+  const routes = { ...pdsRoutes(ctx), ...internalPdsRoutes(ctx, INTERNAL_SECRET) };
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const h = routes[url.pathname];
@@ -169,5 +171,58 @@ describe("/pds/* write endpoints", () => {
   it("405s on the wrong method", async () => {
     const { base } = await setup();
     expect((await fetch(`${base}/pds/createRecord`)).status).toBe(405);
+  });
+});
+
+describe("/internal/pds/* (trusted-DID write)", () => {
+  function ipost(base: string, path: string, secret: string | null, b: unknown): Promise<Response> {
+    return fetch(`${base}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(secret ? { "x-cocore-internal-secret": secret } : {}),
+      },
+      body: JSON.stringify(b),
+    });
+  }
+
+  it("writes with the secret + an asserted did", async () => {
+    const { base } = await setup();
+    const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
+      did: ALICE,
+      collection: "dev.cocore.compute.receipt",
+      record: { x: 1 },
+    });
+    expect(r.status).toBe(200);
+    expect((await r.json()) as unknown).toMatchObject({ cid: "bafycid" });
+  });
+
+  it("403 without the internal secret", async () => {
+    const { base } = await setup();
+    const r = await ipost(base, "/internal/pds/createRecord", null, {
+      did: ALICE,
+      collection: "dev.cocore.compute.job",
+      record: {},
+    });
+    expect(r.status).toBe(403);
+  });
+
+  it("400 without an asserted did", async () => {
+    const { base } = await setup();
+    const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
+      collection: "dev.cocore.compute.job",
+      record: {},
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("401 when the session can't restore", async () => {
+    const { base } = await setup(fakeOauth({ nullFor: new Set([ALICE]) }));
+    const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
+      did: ALICE,
+      collection: "dev.cocore.compute.job",
+      record: {},
+    });
+    expect(r.status).toBe(401);
   });
 });
