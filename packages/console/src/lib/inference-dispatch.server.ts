@@ -23,6 +23,10 @@ import { submitJob } from "@cocore/sdk/publish";
 import { Effect } from "effect";
 import nacl from "tweetnacl";
 
+import {
+  AppviewForwardTransport,
+  isAppviewForwardConfigured,
+} from "@/lib/appview-pds-forward.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
 import { PdsPublishTransport } from "@/lib/pds-publish.server.ts";
 import { appviewGetProfileEffect } from "@/integrations/appview/appview.server.ts";
@@ -485,10 +489,17 @@ export async function* runDispatch(input: DispatchInputs): AsyncGenerator<Dispat
   //    mirror to the AppView indexer so dashboards see it.
   let submitted;
   try {
-    const transport = new PdsPublishTransport({
-      session: input.oauthSession,
-      bridgeUrl: config.bridgeUrl,
-    });
+    // Forward writes to the AppView when configured (so the AppView owns
+    // the session + its single-writer refresh); otherwise publish via the
+    // console's own OAuth session (legacy). Gated identically to the
+    // /api/pds path so both flip together — flipping only one would leave
+    // two processes refreshing the same session.
+    const transport = isAppviewForwardConfigured()
+      ? new AppviewForwardTransport()
+      : new PdsPublishTransport({
+          session: input.oauthSession,
+          bridgeUrl: config.bridgeUrl,
+        });
     submitted = await submitJob({
       transport,
       requesterDid: input.did,

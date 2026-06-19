@@ -19,6 +19,7 @@ import { Effect } from "effect";
 
 import { restoreAtprotoSessionEffect } from "@/integrations/auth/atproto.server.ts";
 import { resolveBearerKey } from "@/lib/api-keys.server.ts";
+import { forwardPdsWrite, isAppviewForwardConfigured } from "@/lib/appview-pds-forward.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
 
 /** Collection NSIDs these endpoints will write to a user's PDS. We allow
@@ -97,21 +98,41 @@ function jsonOk(body: unknown): Response {
   });
 }
 
-/** Resolve the bearer key → an authenticated, DPoP-capable OAuth session,
- *  or a `Response` describing the auth failure to return verbatim. The
- *  return type is inferred so `session` narrows to non-null past the guard. */
-async function authSession(request: Request) {
+/** Resolve the bearer key → the owning DID, or a `Response` describing the
+ *  auth failure. This stays on the console (the key store) regardless of
+ *  where the write executes. */
+function resolveCallerDid(request: Request): { did: Did } | Response {
   const bearer = readBearer(request);
   if (!bearer) return jsonError(401, "missing Authorization: Bearer header");
   const resolved = resolveBearerKey(bearer);
   if (!resolved) return jsonError(401, "invalid API key");
   if (!isDid(resolved.did)) return jsonError(500, "stored DID is malformed");
-  const did = resolved.did as Did;
+  return { did: resolved.did as Did };
+}
+
+/** Legacy path: restore the console-owned DPoP session for `did`, or a 401.
+ *  Used only when AppView forwarding is not configured. */
+async function restoreSessionOr401(did: Did) {
   const session = await Effect.runPromise(restoreAtprotoSessionEffect(did));
   if (!session) {
     return jsonError(401, "underlying ATProto session no longer valid; re-authenticate");
   }
-  return { did, session };
+  return session;
+}
+
+/** When AppView forwarding is configured, forward the write and return the
+ *  AppView's response verbatim; otherwise null so the caller runs the
+ *  legacy console-session path. */
+async function forwardOrNull(
+  op: "createRecord" | "putRecord" | "deleteRecord",
+  body: Record<string, unknown>,
+): Promise<Response | null> {
+  if (!isAppviewForwardConfigured()) return null;
+  const r = await forwardPdsWrite(op, body);
+  return new Response(await r.text(), {
+    status: r.status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 // ---- createRecord ---------------------------------------------------
@@ -128,7 +149,8 @@ interface CreateParsed {
 }
 
 function parseCreate(raw: CreateRaw): CreateParsed | string {
-  if (typeof raw.collection !== "string" || raw.collection.length === 0) return "collection required";
+  if (typeof raw.collection !== "string" || raw.collection.length === 0)
+    return "collection required";
   if (!raw.collection.startsWith(COLLECTION_PREFIX)) {
     return `collection must start with ${COLLECTION_PREFIX}`;
   }
@@ -146,9 +168,9 @@ function parseCreate(raw: CreateRaw): CreateParsed | string {
 }
 
 export async function pdsCreateRecord(request: Request): Promise<Response> {
-  const auth = await authSession(request);
-  if (auth instanceof Response) return auth;
-  const { did, session } = auth;
+  const caller = resolveCallerDid(request);
+  if (caller instanceof Response) return caller;
+  const { did } = caller;
 
   let raw: CreateRaw;
   try {
@@ -159,6 +181,16 @@ export async function pdsCreateRecord(request: Request): Promise<Response> {
   const parsed = parseCreate(raw);
   if (typeof parsed === "string") return jsonError(400, parsed);
 
+  const fwd = await forwardOrNull("createRecord", {
+    did,
+    collection: parsed.collection,
+    record: parsed.record,
+    ...(parsed.rkey ? { rkey: parsed.rkey } : {}),
+  });
+  if (fwd) return fwd;
+
+  const session = await restoreSessionOr401(did);
+  if (session instanceof Response) return session;
   const r = await session.handle(`/xrpc/com.atproto.repo.createRecord`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -171,18 +203,31 @@ export async function pdsCreateRecord(request: Request): Promise<Response> {
   });
   if (!r.ok) {
     const body = await r.text().catch(() => "");
-    return jsonError(r.status >= 500 ? 502 : r.status, `pds createRecord ${parsed.collection}: ${body.slice(0, 300)}`);
+    return jsonError(
+      r.status >= 500 ? 502 : r.status,
+      `pds createRecord ${parsed.collection}: ${body.slice(0, 300)}`,
+    );
   }
   // com.atproto.repo.createRecord returns `commit: { cid, rev }` — the
   // signed repo commit the record landed in. Forward it so the caller
   // (e.g. the provider, writing a receipt) can surface an inclusion
   // pointer into the provider's signed MST without the verifier having
   // to re-fetch the repo.
-  const out = (await r.json()) as { uri: string; cid: string; commit?: { cid: string; rev: string } };
+  const out = (await r.json()) as {
+    uri: string;
+    cid: string;
+    commit?: { cid: string; rev: string };
+  };
   // Mirror to the local AppView indexer so /machines, /jobs, and /models
   // see the record with low latency. The relay subscription is the
   // durable path; the bridge dispatch shortens the round-trip.
-  mirrorToBridge({ uri: out.uri, cid: out.cid, collection: parsed.collection, repo: did, record: parsed.record });
+  mirrorToBridge({
+    uri: out.uri,
+    cid: out.cid,
+    collection: parsed.collection,
+    repo: did,
+    record: parsed.record,
+  });
   return jsonOk({ uri: out.uri, cid: out.cid, commit: out.commit });
 }
 
@@ -202,7 +247,8 @@ interface PutParsed {
 }
 
 function parsePut(raw: PutRaw): PutParsed | string {
-  if (typeof raw.collection !== "string" || raw.collection.length === 0) return "collection required";
+  if (typeof raw.collection !== "string" || raw.collection.length === 0)
+    return "collection required";
   if (!raw.collection.startsWith(COLLECTION_PREFIX)) {
     return `collection must start with ${COLLECTION_PREFIX}`;
   }
@@ -224,9 +270,9 @@ function parsePut(raw: PutRaw): PutParsed | string {
 }
 
 export async function pdsPutRecord(request: Request): Promise<Response> {
-  const auth = await authSession(request);
-  if (auth instanceof Response) return auth;
-  const { did, session } = auth;
+  const caller = resolveCallerDid(request);
+  if (caller instanceof Response) return caller;
+  const { did } = caller;
 
   let raw: PutRaw;
   try {
@@ -237,6 +283,17 @@ export async function pdsPutRecord(request: Request): Promise<Response> {
   const parsed = parsePut(raw);
   if (typeof parsed === "string") return jsonError(400, parsed);
 
+  const fwd = await forwardOrNull("putRecord", {
+    did,
+    collection: parsed.collection,
+    rkey: parsed.rkey,
+    record: parsed.record,
+    ...(parsed.swapRecord ? { swapRecord: parsed.swapRecord } : {}),
+  });
+  if (fwd) return fwd;
+
+  const session = await restoreSessionOr401(did);
+  if (session instanceof Response) return session;
   const r = await session.handle(`/xrpc/com.atproto.repo.putRecord`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -250,10 +307,19 @@ export async function pdsPutRecord(request: Request): Promise<Response> {
   });
   if (!r.ok) {
     const body = await r.text().catch(() => "");
-    return jsonError(r.status >= 500 ? 502 : r.status, `pds putRecord ${parsed.collection}: ${body.slice(0, 300)}`);
+    return jsonError(
+      r.status >= 500 ? 502 : r.status,
+      `pds putRecord ${parsed.collection}: ${body.slice(0, 300)}`,
+    );
   }
   const out = (await r.json()) as { uri: string; cid: string };
-  mirrorToBridge({ uri: out.uri, cid: out.cid, collection: parsed.collection, repo: did, record: parsed.record });
+  mirrorToBridge({
+    uri: out.uri,
+    cid: out.cid,
+    collection: parsed.collection,
+    repo: did,
+    record: parsed.record,
+  });
   return jsonOk({ uri: out.uri, cid: out.cid });
 }
 
@@ -271,7 +337,8 @@ interface DeleteParsed {
 }
 
 function parseDelete(raw: DeleteRaw): DeleteParsed | string {
-  if (typeof raw.collection !== "string" || raw.collection.length === 0) return "collection required";
+  if (typeof raw.collection !== "string" || raw.collection.length === 0)
+    return "collection required";
   if (!raw.collection.startsWith(COLLECTION_PREFIX)) {
     return `collection must start with ${COLLECTION_PREFIX}`;
   }
@@ -287,9 +354,9 @@ function parseDelete(raw: DeleteRaw): DeleteParsed | string {
 }
 
 export async function pdsDeleteRecord(request: Request): Promise<Response> {
-  const auth = await authSession(request);
-  if (auth instanceof Response) return auth;
-  const { did, session } = auth;
+  const caller = resolveCallerDid(request);
+  if (caller instanceof Response) return caller;
+  const { did } = caller;
 
   let raw: DeleteRaw;
   try {
@@ -300,6 +367,16 @@ export async function pdsDeleteRecord(request: Request): Promise<Response> {
   const parsed = parseDelete(raw);
   if (typeof parsed === "string") return jsonError(400, parsed);
 
+  const fwd = await forwardOrNull("deleteRecord", {
+    did,
+    collection: parsed.collection,
+    rkey: parsed.rkey,
+    ...(parsed.swapRecord ? { swapRecord: parsed.swapRecord } : {}),
+  });
+  if (fwd) return fwd;
+
+  const session = await restoreSessionOr401(did);
+  if (session instanceof Response) return session;
   const r = await session.handle(`/xrpc/com.atproto.repo.deleteRecord`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -323,7 +400,10 @@ export async function pdsDeleteRecord(request: Request): Promise<Response> {
       mirrorDeleteToBridge(uri);
       return jsonOk({ uri, alreadyGone: true });
     }
-    return jsonError(r.status >= 500 ? 502 : r.status, `pds deleteRecord ${parsed.collection}: ${body.slice(0, 300)}`);
+    return jsonError(
+      r.status >= 500 ? 502 : r.status,
+      `pds deleteRecord ${parsed.collection}: ${body.slice(0, 300)}`,
+    );
   }
   mirrorDeleteToBridge(uri);
   return jsonOk({ uri });
