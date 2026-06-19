@@ -754,9 +754,11 @@ async function main() {
         }
       }
       // Fall back to the AppView handler so the public bridge port also
-      // serves the AppView XRPC API (appview.* reads, account.*, /pds,
-      // /internal). Shares the single appviewHandle instance built above.
-      if (await appviewHandle(req, res, url)) return;
+      // serves the AppView XRPC API (appview.* reads, account.*, /pds).
+      // /internal/* (session handoff, mint-key) is deliberately NOT
+      // exposed publicly — those are reachable only on the private :8081
+      // listener (the console reaches them over services.railway.internal).
+      if (!url.pathname.startsWith("/internal/") && (await appviewHandle(req, res, url))) return;
       json(res, 404, { error: "no such route" });
     } catch (e) {
       json(res, 500, { error: (e as Error).message });
