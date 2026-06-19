@@ -12,6 +12,7 @@ import {
   type MarketingSnapshot,
 } from "@/lib/marketing-snapshot.functions.ts";
 import { formatLatencyMs } from "@/lib/latency-display.ts";
+import { formatRamGB } from "@/lib/memory-display.ts";
 import { SITE_MARKETING_DESCRIPTION, SITE_MARKETING_TITLE } from "@/lib/site-marketing.shared.ts";
 import { Button } from "@/design-system/button";
 import { Flex } from "@/design-system/flex";
@@ -1427,6 +1428,7 @@ function personInitials(label: string): string {
 
 function MarketingPage() {
   const { marketing } = Route.useLoaderData();
+  const combinedMemory = formatRamGB(marketing.stats.totalRamGB);
 
   return (
     <Page.Root variant="large" style={styles.root}>
@@ -1504,8 +1506,8 @@ function MarketingPage() {
         <div {...stylex.props(styles.statItem)}>
           <div {...stylex.props(styles.statLabel)}>combined memory</div>
           <div {...stylex.props(styles.statValue)}>
-            {compactInt.format(marketing.stats.totalRamGB)}{" "}
-            <span {...stylex.props(styles.statUnit)}>GB RAM</span>
+            {combinedMemory.value}{" "}
+            <span {...stylex.props(styles.statUnit)}>{combinedMemory.unit}</span>
           </div>
         </div>
         <div {...stylex.props(styles.statItem)}>
