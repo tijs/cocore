@@ -86,11 +86,11 @@ function base64url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export function hashKey(full: string): string {
+function hashKey(full: string): string {
   return createHash("sha256").update(full).digest("hex");
 }
 
-export function generateApiKey(): { full: string; prefix: string; hash: string } {
+function generateApiKey(): { full: string; prefix: string; hash: string } {
   const body = base64url(randomBytes(32));
   const full = `${KEY_PREFIX}${body}`;
   return {
