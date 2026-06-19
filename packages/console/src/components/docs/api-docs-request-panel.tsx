@@ -12,7 +12,7 @@ import { runApiDocsExample } from "@/integrations/tanstack-query/api-docs.functi
 import { buildApiDocsCurl, resolveApiDocsExampleParams } from "@/lib/api-docs/build-curl.ts";
 import { apiDocsParamControls, apiDocsUsesSessionAuth } from "@/lib/api-docs/interactive-params";
 import { mergeApiDocsExampleParams } from "@/lib/api-docs/merge-example-params";
-import { appviewBaseUrlClient } from "@/lib/api-docs/discovery.ts";
+import { appviewBaseUrlClient, consoleBaseUrlClient } from "@/lib/api-docs/discovery.ts";
 import { Play } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 
@@ -74,14 +74,13 @@ export const ApiDocsRequestPanel = memo(function RequestPanel({
 
   const useSessionAuth = signedIn && apiDocsUsesSessionAuth(entry);
 
-  const curl = useMemo(
-    () =>
-      buildApiDocsCurl(entry, appviewBaseUrlClient(), fixtures, {
-        params: effectiveParams,
-        bearerPlaceholder: useSessionAuth,
-      }),
-    [entry, fixtures, effectiveParams, useSessionAuth],
-  );
+  const curl = useMemo(() => {
+    const base = entry.host === "console" ? consoleBaseUrlClient() : appviewBaseUrlClient();
+    return buildApiDocsCurl(entry, base, fixtures, {
+      params: effectiveParams,
+      bearerPlaceholder: useSessionAuth,
+    });
+  }, [entry, fixtures, effectiveParams, useSessionAuth]);
 
   const { mutate, isPending } = useMutation({
     mutationFn: () =>
@@ -106,10 +105,13 @@ export const ApiDocsRequestPanel = memo(function RequestPanel({
     setResult(undefined);
   }, []);
 
+  // The live runner targets the AppView; console-hosted methods can only
+  // show their curl, not run inline here.
   const canRun =
-    entry.example.autoRun ||
-    (useSessionAuth && entry.auth === "required") ||
-    (useSessionAuth && entry.method === "procedure");
+    entry.host !== "console" &&
+    (entry.example.autoRun ||
+      (useSessionAuth && entry.auth === "required") ||
+      (useSessionAuth && entry.method === "procedure"));
 
   const ok = result != null && result.status >= 200 && result.status < 300;
 

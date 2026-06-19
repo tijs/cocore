@@ -30,6 +30,9 @@ const SECTION_SUBTITLES: Record<(typeof API_DOCS_SECTIONS)[number], string> = {
   "Compute index": "no auth",
   Verification: "no auth",
   Analytics: "no auth",
+  "API keys": "service auth",
+  Inference: "session auth · console",
+  "Device pairing": "console",
 };
 
 export function apiDocsSectionSubtitle(section: string): string {

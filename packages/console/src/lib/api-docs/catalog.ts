@@ -9,6 +9,10 @@ export type ApiDocsCatalogEntry = {
   description: string;
   auth: ApiDocsAuthClass;
   status: "shipped" | "planned";
+  /** Which service hosts the method. "appview" → `<appview>/xrpc/<nsid>`
+   *  (the public AppView XRPC API); "console" → `<console>/api/xrpc/<nsid>`
+   *  (still served by the console). Defaults to "appview". */
+  host?: "appview" | "console";
   params: Array<{ name: string; type: string; required?: boolean }>;
   example: {
     autoRun: boolean;
@@ -21,6 +25,34 @@ export type ApiDocsCatalogEntry = {
   };
 };
 
+interface EntryOpts {
+  host?: "appview" | "console";
+  status?: "shipped" | "planned";
+}
+
+function makeEntry(
+  method: "query" | "procedure",
+  nsid: string,
+  section: string,
+  description: string,
+  auth: ApiDocsAuthClass,
+  params: ApiDocsCatalogEntry["params"],
+  example: ApiDocsCatalogEntry["example"],
+  opts?: EntryOpts,
+): ApiDocsCatalogEntry {
+  return {
+    nsid,
+    method,
+    section,
+    description,
+    auth,
+    status: opts?.status ?? "shipped",
+    params,
+    example,
+    ...(opts?.host ? { host: opts.host } : {}),
+  };
+}
+
 function q(
   nsid: string,
   section: string,
@@ -28,17 +60,21 @@ function q(
   auth: ApiDocsAuthClass,
   params: ApiDocsCatalogEntry["params"],
   example: ApiDocsCatalogEntry["example"],
+  opts?: EntryOpts,
 ): ApiDocsCatalogEntry {
-  return {
-    nsid,
-    method: "query",
-    section,
-    description,
-    auth,
-    status: "shipped",
-    params,
-    example,
-  };
+  return makeEntry("query", nsid, section, description, auth, params, example, opts);
+}
+
+function p(
+  nsid: string,
+  section: string,
+  description: string,
+  auth: ApiDocsAuthClass,
+  params: ApiDocsCatalogEntry["params"],
+  example: ApiDocsCatalogEntry["example"],
+  opts?: EntryOpts,
+): ApiDocsCatalogEntry {
+  return makeEntry("procedure", nsid, section, description, auth, params, example, opts);
 }
 
 export const API_DOCS_CATALOG: Array<ApiDocsCatalogEntry> = [
@@ -185,6 +221,101 @@ export const API_DOCS_CATALOG: Array<ApiDocsCatalogEntry> = [
     [],
     { autoRun: true, params: {} },
   ),
+
+  // --- API keys (AppView; AT Protocol service auth via #cocore_appview) ---
+  p(
+    "dev.cocore.account.createApiKey",
+    "API keys",
+    "Mint a new API key for the authenticated account. The full secret is returned exactly once. Authenticate via AT Protocol service auth — your PDS proxies the call to the AppView's `#cocore_appview` service.",
+    "required",
+    [
+      { name: "name", type: "string", required: true },
+      { name: "expiresAt", type: "datetime" },
+    ],
+    { autoRun: false, body: { name: "my-laptop" } },
+  ),
+  q(
+    "dev.cocore.account.listApiKeys",
+    "API keys",
+    "List the authenticated account's API keys, newest first. Secrets are never returned.",
+    "required",
+    [],
+    { autoRun: false },
+  ),
+  p(
+    "dev.cocore.account.revokeApiKey",
+    "API keys",
+    "Revoke one of your API keys. The key stops authenticating immediately but the row is kept (revoked) for audit.",
+    "required",
+    [{ name: "id", type: "string", required: true }],
+    { autoRun: false, body: { id: "<key-id>" } },
+  ),
+  p(
+    "dev.cocore.account.deleteApiKey",
+    "API keys",
+    "Hard-delete one of your API keys (no audit-trail recovery).",
+    "required",
+    [{ name: "id", type: "string", required: true }],
+    { autoRun: false, body: { id: "<key-id>" } },
+  ),
+
+  // --- Inference (currently served by the console at /api/xrpc) ---
+  p(
+    "dev.cocore.inference.dispatch",
+    "Inference",
+    "Submit an inference request and stream the result as Server-Sent Events: the job + payment authorization are published, then plaintext output chunks until completion.",
+    "required",
+    [
+      { name: "model", type: "string", required: true },
+      { name: "prompt", type: "string", required: true },
+      { name: "maxTokensOut", type: "integer", required: true },
+      { name: "priceCeiling", type: "object", required: true },
+      { name: "targetProviderDid", type: "did" },
+    ],
+    {
+      autoRun: false,
+      body: {
+        model: "llama3.2",
+        prompt: "Say hello.",
+        maxTokensOut: 256,
+        priceCeiling: { amount: 1000, currency: "CC" },
+      },
+    },
+    { host: "console" },
+  ),
+
+  // --- Device pairing (currently served by the console at /api/xrpc) ---
+  p(
+    "dev.cocore.devicePair.start",
+    "Device pairing",
+    "Begin a device-pairing flow (OAuth device-authorization style). Returns a `deviceId` plus a short `userCode` to approve at the verification URI.",
+    "none",
+    [],
+    { autoRun: false },
+    { host: "console" },
+  ),
+  q(
+    "dev.cocore.devicePair.poll",
+    "Device pairing",
+    "Poll a pairing attempt by `deviceId` until it is approved (then returns the granted session), denied, expired, or consumed.",
+    "none",
+    [{ name: "deviceId", type: "string", required: true }],
+    { autoRun: false, params: {} },
+    { host: "console" },
+  ),
+  p(
+    "dev.cocore.devicePair.confirm",
+    "Device pairing",
+    "Approve or deny a pending pairing attempt, identified by the `userCode` the device displayed. Called from the verification UI by a signed-in user.",
+    "required",
+    [
+      { name: "userCode", type: "string", required: true },
+      { name: "decision", type: "string", required: true },
+      { name: "session", type: "object" },
+    ],
+    { autoRun: false, body: { userCode: "ABCD-1234", decision: "approve" } },
+    { host: "console" },
+  ),
 ];
 
 export function catalogEntryByNsid(nsid: string): ApiDocsCatalogEntry | undefined {
@@ -201,4 +332,7 @@ export const API_DOCS_SECTIONS = [
   "Compute index",
   "Verification",
   "Analytics",
+  "API keys",
+  "Inference",
+  "Device pairing",
 ] as const;

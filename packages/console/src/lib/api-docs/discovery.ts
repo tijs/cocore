@@ -33,3 +33,17 @@ export function xrpcBaseUrlClient(): string {
 export function appviewBaseUrl(): string {
   return resolveAppviewBaseUrl();
 }
+
+/** Origin of the console itself (host of the `/api/xrpc/*` methods that
+ *  haven't moved to the AppView yet). Client-side that's the current
+ *  origin; server-side, the configured public URL. */
+export function consoleBaseUrlClient(): string {
+  if (globalThis.window !== undefined) {
+    return globalThis.window.location.origin;
+  }
+  return (
+    process.env["CONSOLE_PUBLIC_URL"] ||
+    process.env["BETTER_AUTH_URL"] ||
+    "http://localhost:3000"
+  ).replace(/\/$/, "");
+}
