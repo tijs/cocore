@@ -23,12 +23,13 @@ function isDiscoverPath(pathname: string, profilePath?: string): boolean {
 export function NavbarDiscoverMenu({ profileId }: { profileId?: string | null }) {
   const location = useLocation();
   const profilePath = profileId ? `/u/${profileId}` : undefined;
-  const isActive = isDiscoverPath(location.pathname, profilePath);
+  const isOnDiscoverPage = isDiscoverPath(location.pathname, profilePath);
 
   return (
     <NavbarMenu
+      defaultMobileExpanded={isOnDiscoverPage}
       trigger={
-        <NavbarMenuTrigger isActive={isActive}>
+        <NavbarMenuTrigger>
           <Flex align="center" gap="md">
             discover
             <ChevronDown size={16} aria-hidden />

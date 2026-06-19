@@ -526,12 +526,14 @@ export const Navbar = ({ style, size: sizeProp, children, ...props }: NavbarProp
     if (!nav) return;
 
     const handleClick = (e: MouseEvent) => {
-      // Close menu when any link or button inside navbar is clicked
-      // Exclude the hamburger button (it toggles the menu instead)
+      // Close menu when any link or button inside navbar is clicked.
+      // Exclude the hamburger (toggles the overlay) and in-nav disclosure
+      // triggers (they expand a subsection without navigating away).
       const target = e.target as HTMLElement;
       const link = target.closest("a, button");
       const hamburgerButton = target.closest('[aria-label="Open menu"]');
-      if (link && link !== nav && !hamburgerButton) {
+      const menuTrigger = target.closest("[data-navbar-menu-trigger]");
+      if (link && link !== nav && !hamburgerButton && !menuTrigger) {
         closeMenu();
       }
     };

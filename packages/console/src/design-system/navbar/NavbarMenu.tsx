@@ -2,7 +2,7 @@
 
 import * as stylex from "@stylexjs/stylex";
 import * as React from "react";
-import { use, useCallback, useMemo, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useState } from "react";
 import { mergeProps, useHover, usePress } from "react-aria";
 import { Button, Disclosure, DisclosurePanel } from "react-aria-components";
 
@@ -181,11 +181,32 @@ const styles = stylex.create({
     width: "100%",
   },
   menuTriggerButton: {
-    display: "contents",
+    alignItems: "center",
+    backgroundColor: "transparent",
+    borderStyle: "none",
+    borderWidth: 0,
+    color: "inherit",
+    cursor: "pointer",
+    display: "flex",
+    fontFamily: "inherit",
     fontSize: "inherit",
+    fontWeight: "inherit",
+    margin: 0,
+    padding: 0,
+    textAlign: "left",
+    width: "100%",
+  },
+  menuTriggerLink: {
+    "--underline-opacity": {
+      default: 0,
+      ":is([aria-expanded=true])": 0,
+      ":is([data-active])": 0,
+      ":is([data-hovered])": 0,
+    },
   },
   menuDisclosurePanel: {
-    paddingTop: gap["md"],
+    paddingTop: gap["5xl"],
+    paddingLeft: horizontalSpace["2xl"],
     width: "100%",
   },
   menuList: {
@@ -206,12 +227,30 @@ const styles = stylex.create({
   },
 });
 
-interface NavbarMenuProps extends HoverCardProps {}
+interface NavbarMenuProps extends HoverCardProps {
+  /** Expand the mobile disclosure when the nav overlay opens (e.g. current route is in this section). */
+  defaultMobileExpanded?: boolean;
+}
 
-export function NavbarMenu({ trigger, children, ...props }: NavbarMenuProps) {
+export function NavbarMenu({
+  trigger,
+  children,
+  defaultMobileExpanded = false,
+  ...props
+}: NavbarMenuProps) {
   const mobileMenu = useNavbarMobileMenu();
   const [isDesktopOpen, setIsDesktopOpen] = useState(false);
-  const [isMobileExpanded, setIsMobileExpanded] = useState(false);
+  const [isMobileExpanded, setIsMobileExpanded] = useState(defaultMobileExpanded);
+
+  useEffect(() => {
+    if (!mobileMenu?.isOpen) {
+      setIsMobileExpanded(defaultMobileExpanded);
+      return;
+    }
+    if (defaultMobileExpanded) {
+      setIsMobileExpanded(true);
+    }
+  }, [mobileMenu?.isOpen, defaultMobileExpanded]);
 
   const closeMenu = useCallback(() => {
     setIsDesktopOpen(false);
@@ -240,7 +279,7 @@ export function NavbarMenu({ trigger, children, ...props }: NavbarMenuProps) {
         isExpanded={isMobileExpanded}
         onExpandedChange={setIsMobileExpanded}
       >
-        <Button slot="trigger" {...stylex.props(styles.menuTriggerButton)}>
+        <Button slot="trigger" data-navbar-menu-trigger {...stylex.props(styles.menuTriggerButton)}>
           {trigger}
         </Button>
         <DisclosurePanel>
@@ -251,13 +290,11 @@ export function NavbarMenu({ trigger, children, ...props }: NavbarMenuProps) {
   );
 }
 
-export interface NavbarMenuTriggerProps extends StyleXComponentProps<React.ComponentProps<"div">> {
-  isActive?: boolean;
-}
+export interface NavbarMenuTriggerProps extends StyleXComponentProps<React.ComponentProps<"div">> {}
 
-export function NavbarMenuTrigger({ style, isActive, children, ...props }: NavbarMenuTriggerProps) {
+export function NavbarMenuTrigger({ style, children, ...props }: NavbarMenuTriggerProps) {
   return (
-    <div {...props} data-active={isActive || undefined} {...stylex.props(styles.link, style)}>
+    <div {...props} {...stylex.props(styles.link, styles.menuTriggerLink, style)}>
       <span {...stylex.props(styles.linkContent)}>{children}</span>
     </div>
   );
