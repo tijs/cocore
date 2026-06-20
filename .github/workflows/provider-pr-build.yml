@@ -1,0 +1,146 @@
+# Build the macOS arm64 `cocore` provider agent on every PR and attach it
+# as a downloadable artifact, so anyone reviewing a PR can grab a binary
+# built from that exact branch and test the agent end-to-end against the
+# backend changes the PR makes — without tagging a release.
+#
+# This mirrors the build half of release.yml (same target, same no-libpython
+# check, same tarball staging + install scripts) but, instead of publishing a
+# GitHub Release, uploads a workflow artifact and posts a sticky PR comment
+# with the direct download link + SHA-256.
+#
+# Deliberately a SEPARATE workflow from ci.yml: it runs on a macOS runner
+# (10x minute cost) independently of the Linux static-analysis job, and gets
+# its own cancel-in-progress concurrency so superseded pushes don't pile up
+# macOS minutes. No path filter — a provider binary is useful for testing
+# backend-only PRs too (the agent talks to the AppView/advisor those PRs
+# change), which is the whole point.
+
+name: provider-pr-build
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # post/update the sticky download comment
+
+jobs:
+  build-mac-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Short SHA + artifact name
+        id: vars
+        run: |
+          SHA_SHORT="$(git rev-parse --short HEAD)"
+          echo "sha_short=$SHA_SHORT" >> "$GITHUB_OUTPUT"
+          echo "artifact=cocore-mac-arm64-pr${{ github.event.pull_request.number }}-$SHA_SHORT" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            provider/target
+          key: cargo-mac-arm64-${{ hashFiles('provider/Cargo.lock') }}
+          restore-keys: cargo-mac-arm64-
+
+      - name: Build release binary
+        run: |
+          cd provider
+          cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Verify the binary has no Python linkage
+        # Same guard as release.yml: the v0.6.0+ agent spawns Python
+        # out-of-process and must not link libpython, or it dyld-aborts on
+        # users without brew python at the build runner's path.
+        run: |
+          BIN="provider/target/aarch64-apple-darwin/release/cocore"
+          otool -L "$BIN"
+          if otool -L "$BIN" | grep -qi 'python'; then
+            echo "::error::provider binary has a libpython load command — must not link libpython. Check for accidental PyO3 re-introduction in provider/Cargo.toml."
+            exit 1
+          fi
+
+      - name: Stage tarball contents
+        # Identical layout to a real release tarball so the bundled
+        # install.sh works the same way off a PR build.
+        run: |
+          STAGE="dist/cocore-mac-arm64"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/bin" "$STAGE/scripts"
+          cp provider/target/aarch64-apple-darwin/release/cocore  "$STAGE/bin/cocore"
+          cp scripts/install-mac-provider.sh                       "$STAGE/scripts/"
+          cp scripts/uninstall-mac-provider.sh                     "$STAGE/scripts/"
+          cp scripts/dev.cocore.provider.plist.template            "$STAGE/scripts/"
+          cp scripts/bootstrap-python-venv.sh                      "$STAGE/scripts/"
+          cp scripts/install-from-tarball.sh                       "$STAGE/install.sh"
+          chmod 755 "$STAGE/install.sh" "$STAGE/scripts/bootstrap-python-venv.sh"
+
+      - name: Tar + SHA-256
+        run: |
+          tar -C dist -czf "dist/${{ steps.vars.outputs.artifact }}.tar.gz" cocore-mac-arm64
+          shasum -a 256 "dist/${{ steps.vars.outputs.artifact }}.tar.gz" | tee "dist/${{ steps.vars.outputs.artifact }}.tar.gz.sha256"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.artifact }}
+          path: |
+            dist/${{ steps.vars.outputs.artifact }}.tar.gz
+            dist/${{ steps.vars.outputs.artifact }}.tar.gz.sha256
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Comment download link on the PR
+        # Skip on forked PRs (read-only token can't comment) and on
+        # workflow_dispatch (no PR to comment on).
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = '${{ steps.vars.outputs.sha_short }}';
+            const url = '${{ steps.upload.outputs.artifact-url }}';
+            const name = '${{ steps.vars.outputs.artifact }}';
+            const marker = '<!-- provider-pr-build -->';
+            const body = [
+              marker,
+              '### 🛠️ Provider agent build (macOS arm64)',
+              '',
+              `Built from \`${sha}\`. Download the tarball, then \`./install.sh\`:`,
+              '',
+              `**[⬇️ ${name}.tar.gz](${url})**`,
+              '',
+              '_(GitHub artifact — requires being signed in to this repo. The zip contains the `.tar.gz` + its `.sha256`.)_',
+              '',
+              'Pair + serve against an environment, e.g.:',
+              '```sh',
+              'tar -xzf cocore-mac-arm64*.tar.gz && cd cocore-mac-arm64 && ./install.sh',
+              'cocore agent pair  --console https://console-dev-7d3e.up.railway.app',
+              'cocore agent serve --advisor wss://advisor-dev.up.railway.app/v1/agent',
+              '```',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
