@@ -72,7 +72,7 @@ in the repo.
 
 ## The binding decision — RESOLVED: option (b), freshness-code binding
 
-The ACME `HardwareBound` flow attests a *new* SEP key (the ACME/profile key), not
+The ACME `HardwareBound` flow attests a _new_ SEP key (the ACME/profile key), not
 the agent's existing receipt-signing key. We bind via the **freshness-code OID**
 (`1.2.840.113635.100.8.11.1`) so the agent keeps its own stable signing identity,
 decoupled from the MDM/ACME key lifecycle (darkbloom's approach).
@@ -87,7 +87,7 @@ offline, from `publicKey` alone (invariant #2). Implemented + cross-language tes
 freshness-code (b) OR the legacy leaf==key (a) — and fail-closes if neither holds.
 
 **What this proves (and the platform ceiling):** binding ties the genuine-hardware
-attestation to *this* signer + device, defeating "staple someone else's Apple chain
+attestation to _this_ signer + device, defeating "staple someone else's Apple chain
 onto my key." It does NOT by itself prove the signing key is enclave-resident or
 that the measured binary is honest — the `cdHash`/posture gates carry that, and on
 Apple silicon the cdHash is necessarily self-measured (no Apple API attests a
@@ -110,7 +110,7 @@ there), added a volume (`/home/step`) + domain
 real blockers — resolve these on the next dedicated deploy pass:
 
 1. **step-ca volume permissions (crash-loop).** `/entrypoint.sh: /home/step/password:
-   Permission denied` — step-ca runs as a non-root user but the Railway volume
+Permission denied` — step-ca runs as a non-root user but the Railway volume
    mounts root-owned. Fix: run an init that `chown`s `/home/step`, set the volume
    ownership, or run step-ca as the matching uid. (For an initial attestation
    PROOF, persistence isn't required — dropping the volume lets step-ca init in
@@ -127,7 +127,7 @@ real blockers — resolve these on the next dedicated deploy pass:
    "Unauthorized." Either `railway login` (OAuth, then restart so the MCP reads
    the stored creds) or add the token to the MCP server's env in `~/.claude.json`.
    Until then, drive the CLI with `railway link --project <id> --environment <env>
-   --service <name>` (all three) in a single shell, then bare subcommands.
+--service <name>` (all three) in a single shell, then bare subcommands.
 
 ## ✅ PROVEN END-TO-END (2026-06-20) — real Apple hardware attestation
 
@@ -135,29 +135,30 @@ The full chain ran successfully on a real Apple-silicon Mac (M1, macOS 26.4.1,
 serial `H2WHW38LQ6NV`):
 
 1. **Enroll** — installed `enroll.mobileconfig`; NanoMDM logged `Authenticate
-   serial_number=H2WHW38LQ6NV` + `cert associated` + `TokenUpdate`.
+serial_number=H2WHW38LQ6NV` + `cert associated` + `TokenUpdate`.
 2. **Push** — `InstallProfile` (the attestation profile) enqueued + APNs-pushed.
 3. **Attest** — the Mac generated a hardware-bound SEP key + Apple attestation and
    ran ACME `device-attest-01`; step-ca validated it against Apple's attestation CA
    → **`challenge device-attest-01 status=valid`** (the attestation statement carried
    the real hardware ids `["00008103-001869192E20801E" (UDID), "H2WHW38LQ6NV"
-   (serial)]`).
+(serial)]`).
 4. **Issue** — finalize succeeded, step-ca issued the attestation cert; the device
    reported `status=Acknowledged`; the profile shows installed under "Device
    (Managed)".
 
 **Gotchas that each cost a full attempt (fix ALL of them):**
+
 - **PKCS12 identity MUST be `openssl pkcs12 -legacy`.** OpenSSL 3's default p12
   uses a SHA-256 MAC that Apple's keychain can't parse → the install fails with the
-  misleading *"The certificate could not be verified (authentication error)"*
+  misleading _"The certificate could not be verified (authentication error)"_
   (NanoMDM never even gets contacted). Verify with `security import test.p12` →
   "1 identity imported" before pushing to a device.
 - **The attestation profile is PER-DEVICE.** `ClientIdentifier` (ACME
   permanent-identifier) **and** the `Subject` CN must BOTH equal the device's
   hardware **serial** (or UDID). A literal id fails the challenge
   (`badAttestationStatement … doesn't match any of the attested hardware
-  identifiers`); a mismatched CN fails finalize (`badCSR … CSR Subject Common Name
-  does not match identifiers`). Template `__DEVICE_SERIAL__` in
+identifiers`); a mismatched CN fails finalize (`badCSR … CSR Subject Common Name
+does not match identifiers`). Template `__DEVICE_SERIAL__` in
   `profiles/cocore-attestation.mobileconfig` per enrollment (serial comes from the
   NanoMDM `Authenticate` check-in).
 - **Least-privilege `AccessRights`.** Use `3` (install + inspect configuration
@@ -210,12 +211,14 @@ is now proven; this is wiring.
   `step` CLI).
 
 ### step-ca provisioners — CONFIGURED (via `step` CLI + remote admin)
+
 `brew install step`; `STEPPATH=~/cocore-mdm/stepca-client step ca bootstrap --ca-url
 https://reseau.proxy.rlwy.net:43462 --fingerprint 6d7bcfec...`. Remote admin is on
 (super-admin subject `step`, JWK provisioner `admin`, password
 `~/cocore-mdm/stepca-password.txt`). Added two provisioners with
 `step ca provisioner add ... --admin-provisioner admin --admin-subject step
 --password-file ~/cocore-mdm/stepca-password.txt`:
+
 - **`cocore-attest`** (ACME, `--challenge device-attest-01 --attestation-format apple`)
   → directory `https://reseau.proxy.rlwy.net:43462/acme/cocore-attest/directory`
   (the attestation profile's `DirectoryURL`). VERIFIED serving correct URLs.
@@ -224,6 +227,7 @@ https://reseau.proxy.rlwy.net:43462 --fingerprint 6d7bcfec...`. Remote admin is 
   SCEP URL `https://reseau.proxy.rlwy.net:43462/scep/cocore-scep`.
 
 ### NanoMDM — DEPLOYED + push cert loaded
+
 Service `cocore-nanomdm` (id `277e36ce-8d93-4266-8960-ac0a83079b85`), domain
 `https://cocore-nanomdm-production.up.railway.app` (Railway-terminated TLS =
 publicly trusted — what MDM enrollment needs). Distroless image has no shell, so a
@@ -236,18 +240,21 @@ nanomdm:<key> https://.../v1/pushcert` → 200, topic confirmed. API key in
 
 **Railway gotchas for HTTP services (BOTH bit us — fix BOTH or you get edge 502s
 with zero request logs in the container):**
+
 1. **Bind `[::]` not `0.0.0.0`.** Railway's edge proxies over its internal IPv6
    network; an IPv4-only listener is unreachable → 502. (`0.0.0.0:9000` failed,
    `[::]:9000` works; Go `[::]` is dual-stack.)
 2. **`railway domain --port 9000` does NOT set the domain target port** — it stayed
    `null`, so Railway auto-detected the wrong port → 502. Set it explicitly via the
    GraphQL `serviceDomainUpdate(input:{serviceDomainId, domain, environmentId,
-   serviceId, targetPort:9000})` mutation (the token works for GraphQL even though
+serviceId, targetPort:9000})` mutation (the token works for GraphQL even though
    the Railway MCP returns Unauthorized). Verify with the `domains(...){
-   serviceDomains{ targetPort } }` query.
+serviceDomains{ targetPort } }` query.
+
 - `RAILWAY_RUN_UID=0` so file-storage `./db` is writable (same as step-ca).
 
 ### Enrollment profile — BUILT (`~/cocore-mdm/enroll.mobileconfig`)
+
 **GOTCHA: step-ca only mounts the `/scep` HTTP route for SCEP provisioners that
 exist AT BOOT** — a runtime-added one 404s, and restarting re-inits our ephemeral
 CA. So the proof uses an **embedded PKCS12 device identity** instead of SCEP:
@@ -265,6 +272,7 @@ didn't set `-cert-header`). For production, switch back to SCEP by stabilizing
 step-ca persistence and booting it WITH the SCEP provisioner.
 
 ### Remaining (needs the user present — GUI approval + Touch ID, do today)
+
 1. **Enroll this Mac:** install `~/cocore-mdm/enroll.mobileconfig` → approve the MDM
    enrollment in System Settings ▸ General ▸ Device Management (authenticate). Confirm
    check-in in NanoMDM logs.
@@ -273,6 +281,7 @@ step-ca persistence and booting it WITH the SCEP provisioner.
    `cocore-attest` → step-ca captures the Apple attestation chain.
 3. **Capture + verify** the Apple chain off step-ca → `mda::verify_chain` → resolve the
    binding (leaf==signing-key vs freshness-code) → flip the provider to hardware-attested.
+
 - **EPHEMERAL warning:** step-ca + NanoMDM lose all state on redeploy (step-ca
   re-inits its root → breaks NanoMDM's baked `-ca` AND the device's trust + identity).
   Don't redeploy either between now and capturing the chain; stabilize persistence

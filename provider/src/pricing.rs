@@ -354,10 +354,7 @@ pub struct BudgetReport {
 /// overlapping hour's set. Off-catalog models contribute 0 (unknown
 /// footprint) and never trip the guard on their own.
 pub fn budget_report(models: &[String], total_ram_gb: u32) -> BudgetReport {
-    let used_gb: u32 = models
-        .iter()
-        .map(|m| min_ram_gb(m).unwrap_or(0))
-        .sum();
+    let used_gb: u32 = models.iter().map(|m| min_ram_gb(m).unwrap_or(0)).sum();
     let reserve_gb = user_reserve_gb(total_ram_gb);
     let (status, dropped) = if used_gb > total_ram_gb {
         let (_, dropped) = fit_within_budget(models, total_ram_gb);

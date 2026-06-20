@@ -269,8 +269,8 @@ pub fn load_from_url(url: &str) -> Result<Vec<Vec<u8>>> {
 pub fn parse_chain_response(body: &str) -> Result<Vec<Vec<u8>>> {
     let trimmed = body.trim_start();
     if trimmed.starts_with('{') {
-        let v: serde_json::Value =
-            serde_json::from_str(trimmed).context("MDA chain response looked like JSON but didn't parse")?;
+        let v: serde_json::Value = serde_json::from_str(trimmed)
+            .context("MDA chain response looked like JSON but didn't parse")?;
         match v.get("chain") {
             Some(serde_json::Value::Array(arr)) => {
                 let joined = arr
@@ -383,10 +383,7 @@ mod tests {
     #[test]
     fn parse_chain_response_accepts_json_chain_array() {
         let bodies: &[&[u8]] = &[b"leaf bytes", b"intermediate bytes"];
-        let pems: Vec<String> = bodies
-            .iter()
-            .map(|b| synthetic_pem(&[b]))
-            .collect();
+        let pems: Vec<String> = bodies.iter().map(|b| synthetic_pem(&[b])).collect();
         let json = serde_json::json!({ "status": "ok", "chain": pems }).to_string();
         let parsed = parse_chain_response(&json).unwrap();
         assert_eq!(parsed.len(), 2);
@@ -399,7 +396,9 @@ mod tests {
         let json = r#"{"status":"pending","chain":null}"#;
         assert!(parse_chain_response(json).unwrap().is_empty());
         // missing field too
-        assert!(parse_chain_response(r#"{"status":"pending"}"#).unwrap().is_empty());
+        assert!(parse_chain_response(r#"{"status":"pending"}"#)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

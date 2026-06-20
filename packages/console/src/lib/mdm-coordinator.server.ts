@@ -53,9 +53,7 @@ import { resolveBearerKey, type ResolvedKey } from "@/lib/api-keys.server.ts";
 // Auth — same bearer-API-key surface every other /api/agent/* route uses.
 // ---------------------------------------------------------------------------
 
-export type MdmAuthResult =
-  | { ok: true; caller: ResolvedKey }
-  | { ok: false; response: Response };
+export type MdmAuthResult = { ok: true; caller: ResolvedKey } | { ok: false; response: Response };
 
 function readBearer(request: Request): string | null {
   const h = request.headers.get("authorization");
@@ -98,7 +96,8 @@ const SERIAL_RE = /^[A-Za-z0-9]{8,24}$/;
 
 /** A UDID is a 40-hex string (legacy) or a UUID-shaped string on newer
  *  hardware. Accept both forms. */
-const UDID_RE = /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+const UDID_RE =
+  /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 
 export function isValidSerial(v: unknown): v is string {
   return typeof v === "string" && SERIAL_RE.test(v);
@@ -536,9 +535,10 @@ export async function fetchAttestationChain(serial: string): Promise<Attestation
       };
     }
     const body = (await resp.json()) as { chain?: unknown };
-    const chain = Array.isArray(body.chain) && body.chain.every((c) => typeof c === "string")
-      ? (body.chain as string[])
-      : null;
+    const chain =
+      Array.isArray(body.chain) && body.chain.every((c) => typeof c === "string")
+        ? (body.chain as string[])
+        : null;
     return {
       chain,
       status: chain ? "captured" : "pending",

@@ -1347,7 +1347,9 @@ fn build_engines(
                 model = %model,
                 "native MLX engine loaded but metallib not located; not registering (confidential tier unavailable)"
             ),
-            Err(e) => tracing::warn!(error = %e, model = %model, "failed to load native MLX engine"),
+            Err(e) => {
+                tracing::warn!(error = %e, model = %model, "failed to load native MLX engine")
+            }
         }
     }
 
@@ -1457,10 +1459,7 @@ fn build_engines(
     // owner's own work; surface that the same way the tray meter does.
     if !ignore_ram_floor {
         let report = cocore_provider::pricing::budget_report(&configured, ram_gb);
-        if matches!(
-            report.status,
-            cocore_provider::pricing::BudgetStatus::Tight
-        ) {
+        if matches!(report.status, cocore_provider::pricing::BudgetStatus::Tight) {
             tracing::warn!(
                 used_gb = report.used_gb,
                 reserve_gb = report.reserve_gb,

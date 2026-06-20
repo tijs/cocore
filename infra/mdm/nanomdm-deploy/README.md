@@ -1,6 +1,6 @@
 # NanoMDM Railway deploy context
 
-This is a *template*. The real build context lives outside the repo at
+This is a _template_. The real build context lives outside the repo at
 `~/cocore-mdm/nanomdm-deploy/` with the secrets filled in:
 
 - `ca.pem` — step-ca's `roots.pem` (`curl -k https://<step-ca>/roots.pem`). The MDM

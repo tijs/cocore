@@ -28,8 +28,10 @@ use std::path::PathBuf;
 mod ffi {
     use std::os::raw::{c_char, c_int, c_void};
     extern "C" {
-        pub fn cocore_mlx_load_model(model_dir: *const c_char, out_handle: *mut *mut c_void)
-            -> c_int;
+        pub fn cocore_mlx_load_model(
+            model_dir: *const c_char,
+            out_handle: *mut *mut c_void,
+        ) -> c_int;
         pub fn cocore_mlx_generate(
             handle: *mut c_void,
             prompt: *const c_char,
@@ -40,7 +42,8 @@ mod ffi {
             out_tokens_in: *mut i32,
             out_tokens_out: *mut i32,
         ) -> c_int;
-        pub fn cocore_mlx_metallib_hash(handle: *mut c_void, out: *mut c_char, len: usize) -> c_int;
+        pub fn cocore_mlx_metallib_hash(handle: *mut c_void, out: *mut c_char, len: usize)
+            -> c_int;
         pub fn cocore_mlx_release(handle: *mut c_void);
     }
 }
@@ -73,13 +76,20 @@ impl NativeMlxEngine {
         let mut handle: *mut std::os::raw::c_void = std::ptr::null_mut();
         let rc = unsafe { ffi::cocore_mlx_load_model(c_dir.as_ptr(), &mut handle) };
         if rc != 0 || handle.is_null() {
-            anyhow::bail!("cocore_mlx_load_model failed (rc={rc}) for {}", model_dir.display());
+            anyhow::bail!(
+                "cocore_mlx_load_model failed (rc={rc}) for {}",
+                model_dir.display()
+            );
         }
         // Read the metallib hash MLX actually loaded (None if it couldn't be
         // located — the confidential tier then won't qualify, which is correct).
         let mut buf = [0u8; 65];
         let hrc = unsafe {
-            ffi::cocore_mlx_metallib_hash(handle, buf.as_mut_ptr() as *mut std::os::raw::c_char, buf.len())
+            ffi::cocore_mlx_metallib_hash(
+                handle,
+                buf.as_mut_ptr() as *mut std::os::raw::c_char,
+                buf.len(),
+            )
         };
         let metallib_hash = if hrc == 0 {
             let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
@@ -113,7 +123,9 @@ fn dylib_hash() -> Option<String> {
     if unsafe { libc::dladdr(sym, &mut info) } == 0 || info.dli_fname.is_null() {
         return None;
     }
-    let path = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) }.to_str().ok()?;
+    let path = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) }
+        .to_str()
+        .ok()?;
     let mut h = Sha256::new();
     let mut f = std::fs::File::open(path).ok()?;
     std::io::copy(&mut f, &mut h).ok()?;
@@ -195,7 +207,10 @@ impl Engine for NativeMlxEngine {
             }
         }
 
-        let mut ctx = Ctx { cb: on_delta, err: None };
+        let mut ctx = Ctx {
+            cb: on_delta,
+            err: None,
+        };
         let mut tin: i32 = 0;
         let mut tout: i32 = 0;
         let guard = self
@@ -260,7 +275,10 @@ mod tests {
         };
         let eng = NativeMlxEngine::load(dir, None).expect("load model");
         assert!(eng.in_process());
-        assert!(eng.ready(), "metallib must be located for the engine to be ready");
+        assert!(
+            eng.ready(),
+            "metallib must be located for the engine to be ready"
+        );
         assert_eq!(eng.metallib_hash().map(|h| h.len()), Some(64));
 
         let req = GenerateRequest {
@@ -281,6 +299,9 @@ mod tests {
             })
             .expect("generate");
         assert!(!streamed.is_empty(), "expected streamed tokens");
-        assert!(resp.tokens_out > 0 && resp.tokens_in > 0, "expected real token counts");
+        assert!(
+            resp.tokens_out > 0 && resp.tokens_in > 0,
+            "expected real token counts"
+        );
     }
 }

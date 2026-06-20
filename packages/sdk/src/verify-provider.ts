@@ -251,7 +251,10 @@ export async function verifyProviderForSeal(
     if (!attestation.metallibHash) {
       block("no-metallib-hash", "attestation has no measured metallibHash");
     } else if (!knownGoodMetallibs.has(attestation.metallibHash.toLowerCase())) {
-      block("metallib-unknown", `metallibHash ${attestation.metallibHash} is not in the known-good set`);
+      block(
+        "metallib-unknown",
+        `metallibHash ${attestation.metallibHash} is not in the known-good set`,
+      );
     }
   }
 
@@ -261,7 +264,10 @@ export async function verifyProviderForSeal(
     if (!attestation.engineLibHash) {
       block("no-engine-lib-hash", "attestation has no measured engineLibHash");
     } else if (!knownGoodEngineLibs.has(attestation.engineLibHash.toLowerCase())) {
-      block("engine-lib-unknown", `engineLibHash ${attestation.engineLibHash} is not in the known-good set`);
+      block(
+        "engine-lib-unknown",
+        `engineLibHash ${attestation.engineLibHash} is not in the known-good set`,
+      );
     }
   }
 
@@ -350,7 +356,10 @@ export async function verifyProviderForSeal(
       sigOk = false;
     }
     if (!sigOk) {
-      block("session-signature-invalid", "session key signature did not verify against attestation.publicKey");
+      block(
+        "session-signature-invalid",
+        "session key signature did not verify against attestation.publicKey",
+      );
     }
   } else if (opts.requireSessionKey) {
     block(
