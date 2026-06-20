@@ -24,7 +24,8 @@ import {
   WellKnownHandleResolver,
 } from "@atcute/identity-resolver";
 import { NodeDnsHandleResolver } from "@atcute/identity-resolver-node";
-import { MemoryStore, OAuthClient, scope as atprotoScope } from "@atcute/oauth-node-client";
+import { MemoryStore, OAuthClient } from "@atcute/oauth-node-client";
+import { oauthScopes } from "@cocore/sdk/oauth-scope";
 
 import type { AccountStore } from "../operational/account-store.ts";
 import { AccountOauthSessionStore } from "./oauth-session-store.ts";
@@ -62,34 +63,9 @@ function getPrivateKey(): ClientAssertionPrivateJwk {
   return JSON.parse(keyJson) as ClientAssertionPrivateJwk;
 }
 
-// MUST stay in sync with the console's scope list
-// (packages/console/src/integrations/auth/scope.ts) — both the minting
-// client (console) and this restoring client should present the same
-// grant. The AppView never calls authorize(), so this is low-impact for
-// restore/refresh, but matching avoids any client-metadata mismatch.
-const oauthScopes = [
-  atprotoScope.account({ attr: "email", action: "read" }),
-  atprotoScope.blob({ accept: ["image/*", "video/*"] }),
-  atprotoScope.repo({
-    collection: [
-      "dev.cocore.compute.provider",
-      "dev.cocore.compute.job",
-      "dev.cocore.compute.paymentAuthorization",
-      "dev.cocore.compute.attestation",
-      "dev.cocore.compute.receipt",
-      "dev.cocore.compute.settlement",
-      "dev.cocore.compute.exchangePolicy",
-      "dev.cocore.compute.exchangeAttestation",
-      "dev.cocore.compute.termsAcceptance",
-      "dev.cocore.compute.dispute",
-      "dev.cocore.account.profile",
-      "dev.cocore.account.friend",
-      "dev.cocore.account.tokenGrant",
-      "dev.cocore.account.tokenPatronage",
-    ],
-    action: ["create", "update", "delete"],
-  }),
-];
+// Shared with the console's minting client via `@cocore/sdk/oauth-scope` —
+// both the minting client (console) and this restoring client present the
+// same grant, so the client-metadata matches at restore/refresh.
 
 function actorResolver(): LocalActorResolver {
   return new LocalActorResolver({

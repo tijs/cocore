@@ -11,6 +11,7 @@
     "./firehose": "./src/firehose.ts",
     "./lex": "./src/lex-runtime.ts",
     "./mda": "./src/mda.ts",
+    "./oauth-scope": "./src/oauth-scope.ts",
     "./p256": "./src/p256.ts",
     "./publish": "./src/publish.ts",
     "./resolve": "./src/resolve.ts",
@@ -23,6 +24,7 @@
     "typecheck": "tsc -p . --noEmit"
   },
   "dependencies": {
+    "@atcute/oauth-types": "^0.1.1",
     "@atproto/lexicon": "^0.5.2"
   },
   "devDependencies": {
