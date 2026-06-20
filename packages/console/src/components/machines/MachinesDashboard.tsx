@@ -1115,7 +1115,7 @@ function PairMachineDialogContent({
     <>
       <DialogHeader>Add a machine</DialogHeader>
       <DialogDescription>
-        Download the cocore app, drag it to Applications, and open it — it walks you through
+        Download the co/core app, drag it to Applications, and open it — it walks you through
         sign-in, picking a model, and serving. No terminal needed.
       </DialogDescription>
       <DialogBody>

@@ -311,7 +311,7 @@ async fn cmd_pair(console: &str) -> Result<()> {
     let pair = oauth::start_pair(console).await;
     match pair {
         Ok(p) => {
-            println!("Open this URL in any browser signed into the cocore console:");
+            println!("Open this URL in any browser signed into the co/core console:");
             println!("  {}", p.verification_uri);
             println!("Code (auto-filled by the URL above): {}", p.user_code);
             let session = oauth::poll_pair(console, &p.device_id).await?;

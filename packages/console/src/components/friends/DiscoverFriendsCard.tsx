@@ -232,7 +232,7 @@ export function DiscoverFriendsCard({ onFriendIntent }: DiscoverFriendsCardProps
   return (
     <Card size="md">
       <CardHeader hasBorder>
-        <CardTitle style={styles.cardTitleMono}>Discover cocore members</CardTitle>
+        <CardTitle style={styles.cardTitleMono}>Discover co/core members</CardTitle>
       </CardHeader>
       <CardBody>
         <Flex direction="column" gap="2xl">

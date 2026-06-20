@@ -989,7 +989,7 @@ function ModelsPage() {
               {isStub(selected.modelId) ? (
                 <Body variant="secondary">
                   <strong>This is not a real model.</strong> <InlineCode>stub</InlineCode> is
-                  cocore&apos;s hello-world end-to-end test — every paired machine advertises it,
+                  co/core&apos;s hello-world end-to-end test — every paired machine advertises it,
                   every request routes through the exchange, every receipt gets signed, and you get
                   a canned response back. It exists so a new provider can pair, dispatch one
                   request, and confirm that their box is alive on the network without burning tokens

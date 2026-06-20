@@ -230,7 +230,7 @@ export function StartGuide() {
               <CardHeader hasBorder>
                 <CardTitle style={styles.cardTitleMono}>Run a machine</CardTitle>
                 <CardDescription style={styles.cardDescription}>
-                  Download the cocore app for your Apple Silicon Mac — it pairs with this account
+                  Download the co/core app for your Apple Silicon Mac — it pairs with this account
                   and serves inference.
                 </CardDescription>
               </CardHeader>

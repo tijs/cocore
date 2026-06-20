@@ -2,13 +2,13 @@
 title: "Hello, world"
 summary: "Our first attempt at a shared compute environment on top of the AT Protocol — what it is, how the exchange works, and what we owe to the people who got here before us."
 date: "2026-05-10"
-author: "cocore"
+author: "co/core"
 ---
 
-This is the first post on the cocore blog. It'll be one of the only
+This is the first post on the co/core blog. It'll be one of the only
 ones for a while.
 
-cocore is our first attempt at a shared compute environment on top of
+co/core is our first attempt at a shared compute environment on top of
 the AT Protocol. It's heavily influenced by two pieces of writing
 that showed up at the right moment:
 
@@ -27,7 +27,7 @@ building and why the exchange is the only piece of state we own.
 
 ## The shape of the thing
 
-cocore has three kinds of participants:
+co/core has three kinds of participants:
 
 - **Requesters** want compute done — an LLM inference, a render job,
   a training step. They sign in with their AT Protocol identity
@@ -36,7 +36,7 @@ cocore has three kinds of participants:
 - **Providers** have hardware that can do compute — a Mac mini under
   someone's desk, a homelab GPU rig, an idle server in a closet
   (today only Apple Silicon Macs run the agent, but the protocol
-  isn't picky about what's on the other end). They run the cocore
+  isn't picky about what's on the other end). They run the co/core
   agent, attest their environment, and publish
   `dev.cocore.compute.receipt` records on their own PDS for every
   job they complete.
@@ -71,7 +71,7 @@ net out who owes whom and hold the state.
 
 Four things move your balance, all in tokens:
 
-1. **Initial grant.** Every DID that interacts with cocore for the
+1. **Initial grant.** Every DID that interacts with co/core for the
    first time gets **1,000,000 tokens on the house** — enough to run
    a few thousand small completions and form an opinion of the
    network before contributing compute. Issued exactly once per DID;
@@ -135,4 +135,4 @@ receipts and offer a different settlement model. We can't quietly
 edit history or revoke receipts after the fact.
 
 We also don't own identity. Your DID is yours; if you stop liking
-cocore, you can take your PDS data anywhere AT Protocol is spoken.
+co/core, you can take your PDS data anywhere AT Protocol is spoken.

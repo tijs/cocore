@@ -1461,7 +1461,7 @@ function MarketingPage() {
             <span {...stylex.props(styles.installPrompt)}>↓</span>
             <span>
               Have compute to share? Get the{" "}
-              <span {...stylex.props(styles.installCmd)}>cocore app</span> — macOS, Apple Silicon
+              <span {...stylex.props(styles.installCmd)}>co/core app</span> — macOS, Apple Silicon
             </span>
           </a>
         </div>
@@ -1542,7 +1542,7 @@ function MarketingPage() {
         <div {...stylex.props(styles.liveGrid)}>
           {/* People */}
           <div {...stylex.props(styles.liveCol)}>
-            <div {...stylex.props(styles.liveColTitle)}>some cocore members</div>
+            <div {...stylex.props(styles.liveColTitle)}>some co/core members</div>
             {marketing.live.people.length > 0 ? (
               <div {...stylex.props(styles.liveList)}>
                 {marketing.live.people.map((p) => {
@@ -1647,7 +1647,7 @@ function MarketingPage() {
             </div>
             <Heading2 style={styles.sectionH2}>Just change three lines.</Heading2>
             <Body style={[styles.sectionSub, styles.dropInSub]}>
-              Cocore speaks the same API language as everybody else. Point your existing SDK at{" "}
+              co/core speaks the same API language as everybody else. Point your existing SDK at{" "}
               <InlineCode>console.cocore.dev/v1</InlineCode>, drop in a{" "}
               <InlineCode>cocore-…</InlineCode> key, and keep going — streaming, tool calls, and the
               usual <InlineCode>chat/completions</InlineCode> shape all work, no code changes. Host
@@ -1925,7 +1925,7 @@ function MarketingPage() {
                   </div>
                   <div {...stylex.props(styles.atpFeatureBody)}>
                     A receipt plus our public spec plus the signer's identity is all you need to
-                    confirm a job happened — offline, with no cocore API in the loop.
+                    confirm a job happened — offline, with no co/core API in the loop.
                   </div>
                 </div>
               </div>
@@ -2131,14 +2131,14 @@ function MarketingPage() {
             <div {...stylex.props(styles.providerEyebrow)}>share your compute</div>
             <h2 {...stylex.props(styles.providerTitle)}>Share your compute. Help run the co-op.</h2>
             <p {...stylex.props(styles.providerBody)}>
-              Download the cocore app, sign in, pick a model or two, and your computer joins the
+              Download the co/core app, sign in, pick a model or two, and your computer joins the
               network — running jobs for other members while you're not using it. No Terminal,
               nothing to babysit; it updates itself. Every job it runs adds to your balance, and a
               share of everything the co-op does comes back to members each month.
             </p>
             <div {...stylex.props(styles.providerInstall)}>
               <span {...stylex.props(styles.providerInstallPrompt)}>↓</span>
-              <span {...stylex.props(styles.providerInstallCmd)}>download the cocore app</span>
+              <span {...stylex.props(styles.providerInstallCmd)}>download the co/core app</span>
               <span {...stylex.props(styles.providerInstallNote)}>→ open · sign in · serve</span>
             </div>
             <Flex gap="md" wrap>

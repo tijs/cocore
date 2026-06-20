@@ -802,7 +802,7 @@ export function ProfilePage({ identifier }: { identifier: string }) {
           <Heading1 style={styles.headingMono}>profile</Heading1>
         </Page.Header>
         <div {...stylex.props(styles.emptyState)}>
-          Could not resolve <InlineCode>{identifier}</InlineCode> to a cocore account.
+          Could not resolve <InlineCode>{identifier}</InlineCode> to a co/core account.
         </div>
       </Page.Root>
     );

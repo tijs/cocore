@@ -2,7 +2,7 @@
   "name": "@cocore/exchange",
   "version": "0.1.0",
   "private": true,
-  "description": "cocore exchange: closed-loop CC ledger + settlement record publisher.",
+  "description": "co/core exchange: closed-loop CC ledger + settlement record publisher.",
   "license": "MIT",
   "type": "module",
   "exports": {

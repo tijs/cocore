@@ -2,7 +2,7 @@
   "name": "@cocore/appview",
   "version": "0.1.0",
   "private": true,
-  "description": "cocore AppView: firehose indexer + read API over dev.cocore.compute.* records.",
+  "description": "co/core AppView: firehose indexer + read API over dev.cocore.compute.* records.",
   "license": "MIT",
   "type": "module",
   "exports": {

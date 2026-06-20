@@ -2,7 +2,7 @@
   "name": "@cocore/sdk",
   "version": "0.1.0",
   "private": true,
-  "description": "cocore TypeScript SDK: lexicon types, canonical-JSON, validators, and helpers shared across appview, exchange, and console.",
+  "description": "co/core TypeScript SDK: lexicon types, canonical-JSON, validators, and helpers shared across appview, exchange, and console.",
   "license": "MIT",
   "type": "module",
   "exports": {
