@@ -263,6 +263,66 @@ step-ca persistence and booting it WITH the SCEP provisioner.
   Don't redeploy either between now and capturing the chain; stabilize persistence
   before any real rollout.
 
+## Productionization — from the one-shot proof to a fleet (WS-B)
+
+The proof above ran EPHEMERAL on purpose. A real Secure Mode rollout (the tray
+wizard → coordinator endpoints → captured chain) needs these turned durable. The
+coordinator HTTP surface that the wizard calls lives in the console
+(`/agent/mdm/enroll-profile`, `/agent/mdm/push-attestation`,
+`/agent/mdm/attestation-chain`); this section is the infra it sits on.
+
+1. **Persist step-ca.** Re-attach a volume at `/home/step` and let step-ca init
+   ONCE into it (with `DOCKER_STEPCA_INIT_DNS_NAMES` = the TCP-proxy host and
+   `DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT=true`), then never re-init. The root +
+   provisioners (`cocore-attest` ACME-with-apple, `cocore-scep`) then survive
+   restarts, so the **root fingerprint is stable** and the SCEP `/scep` route is
+   mounted at boot (the runtime-add limitation goes away once it's persisted). Bake
+   the CA password as a Railway secret, not a file the volume can clobber.
+
+2. **Persist NanoMDM.** Move off the ephemeral file store onto a database
+   (`-storage mysql|pgsql -dsn …` against a Railway Postgres/MySQL plugin) so the
+   **APNs push cert + enrollments survive restarts** (we watched the push cert get
+   wiped on every redeploy). Upload the push cert once after the DB is attached.
+   Keep `-ca` = step-ca root+intermediate bundle; refresh it if the CA root ever
+   rotates.
+
+3. **Per-device enrollment minting** (`POST /agent/mdm/enroll-profile`). The
+   wizard sends `{serial, udid}`; the coordinator mints a `.mobileconfig` templated
+   to that serial: root+intermediate trust + a device identity (prefer **SCEP** now
+   that the CA is persistent — each device gets its own key — over the embedded
+   legacy-PKCS12 we used in the proof) + the MDM payload (`SignMessage=true`,
+   `AccessRights=3`). Required env on the coordinator: `COCORE_MDM_SERVER_URL`,
+   `COCORE_MDM_TOPIC`, `COCORE_STEPCA_*` (CA URL + roots + SCEP challenge or the
+   admin creds to issue an identity).
+
+4. **Attestation push + capture** (`POST /agent/mdm/push-attestation`,
+   `GET /agent/mdm/attestation-chain`). Push enqueues the ACME attestation profile
+   (ClientIdentifier + Subject CN = the device **serial** — the per-device
+   requirement we learned) to NanoMDM (`/v1/enqueue` + `/v1/push`, env
+   `COCORE_NANOMDM_URL` + `COCORE_NANOMDM_API_KEY`). step-ca runs
+   `device-attest-01` and issues the cert; the coordinator must then **read the
+   Apple x5c chain out of step-ca and store it by serial** so the chain endpoint can
+   return it. (step-ca exposes the validated attestation on the order/challenge; the
+   clean path is a small step-ca webhook or an admin-API poll keyed by the order's
+   permanent-identifier = serial. Marked TODO in the endpoint until the persistent
+   CA is up.)
+
+5. **Agent pickup.** The wizard writes `COCORE_MDA_CHAIN_URL` =
+   `…/agent/mdm/attestation-chain?serial=<serial>` into the LaunchAgent plist. The
+   Rust agent (`mda_loader`) curls it each attestation refresh and embeds the chain
+   in its `dev.cocore.compute.attestation` record; the verifier then binds it and
+   the provider flips to `attested-confidential`. A `null` chain (not captured yet)
+   keeps it self-attested — no outage.
+
+6. **Binding decision** stays as in "The binding decision" above: the ACME-attested
+   SEP key must equal the agent's receipt-signing key (submit the signing key's
+   pubkey as the attested key) OR bind via the freshness-code OID. Resolve on the
+   first fleet device before rollout.
+
+**Net:** items 1–2 are Railway/persistence ops; 3–5 are the coordinator endpoints
+(scaffolded in the console with env + TODOs for the live CA calls) plus the agent's
+already-shipped `COCORE_MDA_CHAIN_URL` fetch; 6 is a one-time verification.
+
 ## Files
 
 - `profiles/cocore-attestation.mobileconfig` — the ACME attestation profile
