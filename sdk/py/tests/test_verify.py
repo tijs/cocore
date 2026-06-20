@@ -1,0 +1,121 @@
+"""Cross-language parity tests for the Python verifier.
+
+The DEFINITIVE test loads the SAME Rust-generated fixtures the TS suite uses
+(target/confidential-attestation-fixture.json, written by the provider's
+cross_lang_fixture test) and asserts the Python verifier reaches
+attested-confidential end-to-end — proving Rust producer ↔ Python verifier
+parity on canonical bytes, P-256, and the MDA chain.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+from datetime import datetime, timezone
+
+import pytest
+
+from cocore import canonicalize, verify_provider_for_seal
+from cocore.canonical import canonical_bytes
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+CONF_FIXTURE = os.path.join(REPO, "target", "confidential-attestation-fixture.json")
+
+
+def test_canonical_matches_spec():
+    # Sorted keys, no whitespace, integers only.
+    assert canonicalize({"b": 1, "a": 2}) == '{"a":2,"b":1}'
+    assert canonicalize({"x": [1, 2], "y": True, "z": None}) == '{"x":[1,2],"y":true,"z":null}'
+    assert canonical_bytes({"k": "v"}) == b'{"k":"v"}'
+
+
+def test_floats_rejected():
+    import pytest as _pytest
+
+    with _pytest.raises(Exception):
+        canonicalize({"x": 1.5})
+
+
+@pytest.mark.skipif(not os.path.exists(CONF_FIXTURE), reason="Rust fixture not generated")
+def test_cross_language_confidential_pass():
+    with open(CONF_FIXTURE) as fh:
+        f = json.load(fh)
+    att = f["attestation"]
+    root_der = base64.b64decode(f["rootDerB64"])
+    now = datetime.now(timezone.utc)
+
+    # (a) advisor-trustless mode: full chain + session key.
+    with_key = verify_provider_for_seal(
+        att,
+        att["mdaCertChain"],
+        require_confidential=True,
+        require_session_key=True,
+        known_good_cdhashes=[f["knownGoodCdHash"]],
+        known_good_metallib_hashes=[f["knownGoodMetallibHash"]],
+        os_floor=f["osFloor"],
+        trust_anchor_der=root_der,
+        attestation_cid=f["attestationCid"],
+        nonce=f["nonce"],
+        session_key=f["sessionKey"],
+        now=now,
+    )
+    assert with_key.tier == "attested-confidential", with_key.findings
+    assert with_key.ok
+    assert with_key.seal_to_key == f["sessionKey"]["ephemeralPubKey"]
+
+    # (b) advisor-vouched mode: no session key → seal to encryptionPubKey.
+    no_key = verify_provider_for_seal(
+        att,
+        att["mdaCertChain"],
+        require_confidential=True,
+        known_good_cdhashes=[f["knownGoodCdHash"]],
+        known_good_metallib_hashes=[f["knownGoodMetallibHash"]],
+        os_floor=f["osFloor"],
+        trust_anchor_der=root_der,
+        now=now,
+    )
+    assert no_key.tier == "attested-confidential", no_key.findings
+    assert no_key.seal_to_key == att["encryptionPubKey"]
+
+    # (c) tampered posture → selfSignature gate catches it, fail-closed.
+    tampered = dict(att)
+    tampered["getTaskAllow"] = True
+    bad = verify_provider_for_seal(
+        tampered,
+        att["mdaCertChain"],
+        require_confidential=True,
+        known_good_cdhashes=[f["knownGoodCdHash"]],
+        trust_anchor_der=root_der,
+        now=now,
+    )
+    assert "attestation-signature-invalid" in bad.codes()
+    assert not bad.ok
+
+
+@pytest.mark.skipif(not os.path.exists(CONF_FIXTURE), reason="Rust fixture not generated")
+def test_posture_gates_fail_closed():
+    with open(CONF_FIXTURE) as fh:
+        f = json.load(fh)
+    att = f["attestation"]
+    root_der = base64.b64decode(f["rootDerB64"])
+    now = datetime.now(timezone.utc)
+
+    # A self-attested provider (no chain) is best-effort, not confidential.
+    r = verify_provider_for_seal(
+        att, None, known_good_cdhashes=[f["knownGoodCdHash"]], trust_anchor_der=root_der, now=now
+    )
+    assert r.tier == "best-effort"
+    assert "no-mda-chain" in r.codes()
+
+    # require_confidential without a known-good set fails closed.
+    r2 = verify_provider_for_seal(
+        att,
+        att["mdaCertChain"],
+        require_confidential=True,
+        known_good_cdhashes=[],
+        trust_anchor_der=root_der,
+        now=now,
+    )
+    assert not r2.ok
+    assert "no-known-good-set" in r2.codes()
