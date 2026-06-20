@@ -50,7 +50,7 @@ final class VenvBootstrapper: ObservableObject {
                 let pipe = Pipe()
                 p.standardOutput = pipe
                 p.standardError = pipe
-                pipe.fileHandleForReading.readabilityHandler = { h in
+                pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
                     guard let chunk = String(data: h.availableData, encoding: .utf8) else { return }
                     NSLog("cocore venv: %@", chunk)
                     let latest = chunk
@@ -59,7 +59,7 @@ final class VenvBootstrapper: ObservableObject {
                         .last(where: { !$0.isEmpty })
                     guard let latest else { return }
                     let clean = latest.replacingOccurrences(of: "==> ", with: "")
-                    Task { @MainActor in
+                    Task { @MainActor [weak self] in
                         if case .running = self?.state { self?.state = .running(clean) }
                     }
                 }

@@ -282,7 +282,7 @@ final class AgentSupervisor {
         p.standardError = errPipe
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             guard let line = String(data: h.availableData, encoding: .utf8), !line.isEmpty else { return }
-            Task { @MainActor in self?.onLine?(line) }
+            Task { @MainActor [weak self] in self?.onLine?(line) }
         }
         errPipe.fileHandleForReading.readabilityHandler = { h in
             if let s = String(data: h.availableData, encoding: .utf8), !s.isEmpty {
@@ -298,7 +298,7 @@ final class AgentSupervisor {
             }
         }
         p.terminationHandler = { [weak self] proc in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.process = nil
                 NSLog("cocore agent exited with %d", proc.terminationStatus)

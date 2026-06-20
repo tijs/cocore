@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // MenuBarController.needsAttention).
         Task { await updater.check() }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.updater.check() }
+            Task { @MainActor [weak self] in await self?.updater.check() }
         }
         Task { @MainActor in
             await state.refreshSession()
