@@ -114,6 +114,49 @@ real blockers — resolve these on the next dedicated deploy pass:
    Until then, drive the CLI with `railway link --project <id> --environment <env>
    --service <name>` (all three) in a single shell, then bare subcommands.
 
+## LIVE DEPLOYMENT STATE (2026-06-20) — step-ca is UP
+
+`cocore-step-ca` is deployed + serving in co/core **production**. The hard part
+(step-ca's TLS architecture on Railway) is SOLVED and verified:
+
+- **Image:** smallstep/step-ca, service id `4de1dff8-3abb-4427-a117-1696a67e2719`.
+- **Volume-perm crash → fixed** with `RAILWAY_RUN_UID=0` (run container as root so
+  step-ca can write the volume). Without this it crash-loops on `/home/step/password`.
+- **TLS termination → fixed** with a **Railway TCP proxy**:
+  `reseau.proxy.rlwy.net:43462` → step-ca:9000. (An HTTP domain 502s — Railway's
+  HTTP edge can't talk to step-ca's HTTPS upstream.) step-ca generates ACME URLs
+  from the request **Host header**, so the proxy-port mapping is a non-issue — the
+  directory at `https://reseau.proxy.rlwy.net:43462/acme/acme/directory` returns
+  correct URLs.
+- **Cert SAN → fixed.** The serving cert must cover the proxy host. Set
+  `DOCKER_STEPCA_INIT_DNS_NAMES=reseau.proxy.rlwy.net,...` and force a re-init.
+  Re-init gotcha: the API `volumeDelete` did NOT empty it; what worked is
+  `railway volume detach --volume <name> -y` then `railway redeploy -y` → step-ca
+  re-inits (ephemeral) with the new dnsNames. Cert SAN now includes
+  `reseau.proxy.rlwy.net`. (NOTE: it's now EPHEMERAL — volume detached — so a
+  redeploy re-inits + changes the root. Re-attach persistence carefully before
+  enrolling anything for real, or bake config via a custom image.)
+- **Root CA:** fingerprint `6d7bcfec517aab89e3e14ec8f60a43529c9c40c2c2e963e982040e9aa77dffe7`,
+  saved to `~/cocore-mdm/stepca-root.pem`. **Push this to the provider Mac via an
+  MDM root-cert profile** so the Mac trusts step-ca's TLS for ACME.
+- **CA admin:** user `step`, password in `~/cocore-mdm/stepca-password.txt`;
+  `DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT=true` (admin the CA remotely with the
+  `step` CLI).
+
+### Remaining (clear continuation)
+1. **Configure the Apple ACME provisioner:** `brew install step`; `step ca bootstrap
+   --ca-url https://reseau.proxy.rlwy.net:43462 --fingerprint 6d7bcfec...`;
+   `step ca provisioner update acme --x509-challenge device-attest-01
+   --attestation-format apple` (auth with the admin creds). Point the
+   `.mobileconfig` `DirectoryURL` at `https://reseau.proxy.rlwy.net:43462/acme/acme/directory`.
+2. **Stabilize persistence** (re-attach a volume + init once, or a custom image).
+3. **Deploy NanoMDM** (+ a Postgres plugin): push cert `~/cocore-mdm/push.p12`,
+   topic `com.apple.mgmt.External.7e4125e2-8e2b-4a0d-a148-23c33073bc61`, API key,
+   public domain, enrollment profile.
+4. **Enroll this Mac** (computer-use → Touch ID), push the step-ca root +
+   `profiles/cocore-attestation.mobileconfig`.
+5. **Capture + verify** the Apple chain → resolve binding → hardware-attested.
+
 ## Files
 
 - `profiles/cocore-attestation.mobileconfig` — the ACME attestation profile
