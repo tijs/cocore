@@ -143,19 +143,54 @@ real blockers — resolve these on the next dedicated deploy pass:
   `DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT=true` (admin the CA remotely with the
   `step` CLI).
 
-### Remaining (clear continuation)
-1. **Configure the Apple ACME provisioner:** `brew install step`; `step ca bootstrap
-   --ca-url https://reseau.proxy.rlwy.net:43462 --fingerprint 6d7bcfec...`;
-   `step ca provisioner update acme --x509-challenge device-attest-01
-   --attestation-format apple` (auth with the admin creds). Point the
-   `.mobileconfig` `DirectoryURL` at `https://reseau.proxy.rlwy.net:43462/acme/acme/directory`.
-2. **Stabilize persistence** (re-attach a volume + init once, or a custom image).
-3. **Deploy NanoMDM** (+ a Postgres plugin): push cert `~/cocore-mdm/push.p12`,
-   topic `com.apple.mgmt.External.7e4125e2-8e2b-4a0d-a148-23c33073bc61`, API key,
-   public domain, enrollment profile.
-4. **Enroll this Mac** (computer-use → Touch ID), push the step-ca root +
-   `profiles/cocore-attestation.mobileconfig`.
-5. **Capture + verify** the Apple chain → resolve binding → hardware-attested.
+### step-ca provisioners — CONFIGURED (via `step` CLI + remote admin)
+`brew install step`; `STEPPATH=~/cocore-mdm/stepca-client step ca bootstrap --ca-url
+https://reseau.proxy.rlwy.net:43462 --fingerprint 6d7bcfec...`. Remote admin is on
+(super-admin subject `step`, JWK provisioner `admin`, password
+`~/cocore-mdm/stepca-password.txt`). Added two provisioners with
+`step ca provisioner add ... --admin-provisioner admin --admin-subject step
+--password-file ~/cocore-mdm/stepca-password.txt`:
+- **`cocore-attest`** (ACME, `--challenge device-attest-01 --attestation-format apple`)
+  → directory `https://reseau.proxy.rlwy.net:43462/acme/cocore-attest/directory`
+  (the attestation profile's `DirectoryURL`). VERIFIED serving correct URLs.
+- **`cocore-scep`** (SCEP, `--challenge <secret>` in `~/cocore-mdm/scep-challenge.txt`,
+  `--encryption-algorithm-identifier 2`) → device-identity enrollment for MDM.
+  SCEP URL `https://reseau.proxy.rlwy.net:43462/scep/cocore-scep`.
+
+### NanoMDM — DEPLOYED + push cert loaded
+Service `cocore-nanomdm` (id `277e36ce-8d93-4266-8960-ac0a83079b85`), domain
+`https://cocore-nanomdm-production.up.railway.app` (Railway-terminated TLS =
+publicly trusted — what MDM enrollment needs). Distroless image has no shell, so a
+tiny custom Dockerfile (`~/cocore-mdm/nanomdm-deploy/`, template in
+`infra/mdm/nanomdm-deploy/Dockerfile`) bakes the step-ca root as `-ca` and runs
+`/app/nanomdm -ca /app/ca.pem -api <key> -listen [::]:9000 -debug`. Deployed with
+`railway up`. Push cert uploaded: `cat apns_push.pem push.key | curl -T - -u
+nanomdm:<key> https://.../v1/pushcert` → 200, topic confirmed. API key in
+`~/cocore-mdm/nanomdm-api-key.txt`.
+
+**Railway gotchas for HTTP services (BOTH bit us — fix BOTH or you get edge 502s
+with zero request logs in the container):**
+1. **Bind `[::]` not `0.0.0.0`.** Railway's edge proxies over its internal IPv6
+   network; an IPv4-only listener is unreachable → 502. (`0.0.0.0:9000` failed,
+   `[::]:9000` works; Go `[::]` is dual-stack.)
+2. **`railway domain --port 9000` does NOT set the domain target port** — it stayed
+   `null`, so Railway auto-detected the wrong port → 502. Set it explicitly via the
+   GraphQL `serviceDomainUpdate(input:{serviceDomainId, domain, environmentId,
+   serviceId, targetPort:9000})` mutation (the token works for GraphQL even though
+   the Railway MCP returns Unauthorized). Verify with the `domains(...){
+   serviceDomains{ targetPort } }` query.
+- `RAILWAY_RUN_UID=0` so file-storage `./db` is writable (same as step-ca).
+
+### Remaining (clear continuation — needs the user present for enrollment)
+1. **Build the enrollment profile** (SCEP payload → `cocore-scep`, MDM payload →
+   `.../mdm` with `SignMessage=true` so it works behind the TLS-terminating proxy,
+   + step-ca root as a trusted cert payload). `infra/mdm/profiles/enroll.mobileconfig`.
+2. **Stabilize persistence** (step-ca + NanoMDM are EPHEMERAL — a redeploy of
+   step-ca re-inits the root, invalidating NanoMDM's baked `-ca` AND the device
+   trust. Do the enrollment proof in one sitting, or bake persistence first.)
+3. **Enroll this Mac** (computer-use → user approves MDM in System Settings + Touch
+   ID), then push `profiles/cocore-attestation.mobileconfig` via NanoMDM.
+4. **Capture + verify** the Apple chain off step-ca → resolve binding → hardware-attested.
 
 ## Files
 

@@ -17,8 +17,8 @@
       <key>PayloadIdentifier</key><string>dev.cocore.attestation.acme</string>
       <key>PayloadUUID</key><string>70F86723-D87F-43C2-9ED2-0C3533167C59</string>
       <key>PayloadDisplayName</key><string>cocore Device Attestation (ACME)</string>
-      <!-- step-ca ACME directory (set to the deployed step-ca host). -->
-      <key>DirectoryURL</key><string>https://ca.cocore.dev/acme/cocore-attest/directory</string>
+      <!-- step-ca ACME directory (live: co/core step-ca behind a Railway TCP proxy). -->
+      <key>DirectoryURL</key><string>https://reseau.proxy.rlwy.net:43462/acme/cocore-attest/directory</string>
       <key>ClientIdentifier</key><string>cocore-provider</string>
       <!-- Hardware-bound P-384 SEP key + Apple attestation. -->
       <key>KeyType</key><string>ECSECPrimeRandom</string>
