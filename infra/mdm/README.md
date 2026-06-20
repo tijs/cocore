@@ -181,16 +181,36 @@ with zero request logs in the container):**
    serviceDomains{ targetPort } }` query.
 - `RAILWAY_RUN_UID=0` so file-storage `./db` is writable (same as step-ca).
 
-### Remaining (clear continuation — needs the user present for enrollment)
-1. **Build the enrollment profile** (SCEP payload → `cocore-scep`, MDM payload →
-   `.../mdm` with `SignMessage=true` so it works behind the TLS-terminating proxy,
-   + step-ca root as a trusted cert payload). `infra/mdm/profiles/enroll.mobileconfig`.
-2. **Stabilize persistence** (step-ca + NanoMDM are EPHEMERAL — a redeploy of
-   step-ca re-inits the root, invalidating NanoMDM's baked `-ca` AND the device
-   trust. Do the enrollment proof in one sitting, or bake persistence first.)
-3. **Enroll this Mac** (computer-use → user approves MDM in System Settings + Touch
-   ID), then push `profiles/cocore-attestation.mobileconfig` via NanoMDM.
-4. **Capture + verify** the Apple chain off step-ca → resolve binding → hardware-attested.
+### Enrollment profile — BUILT (`~/cocore-mdm/enroll.mobileconfig`)
+**GOTCHA: step-ca only mounts the `/scep` HTTP route for SCEP provisioners that
+exist AT BOOT** — a runtime-added one 404s, and restarting re-inits our ephemeral
+CA. So the proof uses an **embedded PKCS12 device identity** instead of SCEP:
+issue a leaf with `STEPPATH=~/cocore-mdm/stepca-client step ca certificate
+cocore-provider-mdm mdm-id.crt mdm-id.key --provisioner admin
+--provisioner-password-file ~/cocore-mdm/stepca-password.txt -f` (CA caps duration
+at **24h** — reissue same-day or raise the provisioner's `x509-max-dur`), pack it
+PKCS12, and embed it as a `com.apple.security.pkcs12` payload referenced by the MDM
+payload's `IdentityCertificateUUID`. NanoMDM's `-ca` is the step-ca **root +
+intermediate** bundle (the leaf is issued by the intermediate; root-only fails to
+verify). The profile also installs the step-ca root (`com.apple.security.root`) and
+sets `SignMessage=true` (device signs check-ins via the `Mdm-Signature` header —
+required since we don't pass client certs through the TLS-terminating proxy and
+didn't set `-cert-header`). For production, switch back to SCEP by stabilizing
+step-ca persistence and booting it WITH the SCEP provisioner.
+
+### Remaining (needs the user present — GUI approval + Touch ID, do today)
+1. **Enroll this Mac:** install `~/cocore-mdm/enroll.mobileconfig` → approve the MDM
+   enrollment in System Settings ▸ General ▸ Device Management (authenticate). Confirm
+   check-in in NanoMDM logs.
+2. **Push the attestation profile** `profiles/cocore-attestation.mobileconfig` via the
+   NanoMDM API (InstallProfile command) → the Mac runs ACME `device-attest-01` against
+   `cocore-attest` → step-ca captures the Apple attestation chain.
+3. **Capture + verify** the Apple chain off step-ca → `mda::verify_chain` → resolve the
+   binding (leaf==signing-key vs freshness-code) → flip the provider to hardware-attested.
+- **EPHEMERAL warning:** step-ca + NanoMDM lose all state on redeploy (step-ca
+  re-inits its root → breaks NanoMDM's baked `-ca` AND the device's trust + identity).
+  Don't redeploy either between now and capturing the chain; stabilize persistence
+  before any real rollout.
 
 ## Files
 
