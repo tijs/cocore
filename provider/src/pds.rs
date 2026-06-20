@@ -246,10 +246,7 @@ impl PdsClient {
         record: &R,
         swap_record: Option<&str>,
     ) -> Result<PublishedRecord> {
-        let url = format!(
-            "{}/api/pds/putRecord",
-            self.api_base.trim_end_matches('/')
-        );
+        let url = format!("{}/api/pds/putRecord", self.api_base.trim_end_matches('/'));
         let body = match swap_record {
             Some(swap) => serde_json::json!({
                 "collection": collection,

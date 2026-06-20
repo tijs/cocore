@@ -31,6 +31,14 @@ import provider from "../../../lexicons/dev/cocore/compute/provider.json" with {
 import receipt from "../../../lexicons/dev/cocore/compute/receipt.json" with { type: "json" };
 import settlement from "../../../lexicons/dev/cocore/compute/settlement.json" with { type: "json" };
 import termsAcceptance from "../../../lexicons/dev/cocore/compute/termsAcceptance.json" with { type: "json" };
+import latency from "../../../lexicons/dev/cocore/compute/latency.json" with { type: "json" };
+import listJobs from "../../../lexicons/dev/cocore/compute/listJobs.json" with { type: "json" };
+import listProviders from "../../../lexicons/dev/cocore/compute/listProviders.json" with { type: "json" };
+import listReceipts from "../../../lexicons/dev/cocore/compute/listReceipts.json" with { type: "json" };
+import listSettlements from "../../../lexicons/dev/cocore/compute/listSettlements.json" with { type: "json" };
+import modelActivity from "../../../lexicons/dev/cocore/compute/modelActivity.json" with { type: "json" };
+import verifyReceiptLex from "../../../lexicons/dev/cocore/compute/verifyReceipt.json" with { type: "json" };
+import verifySettlementLex from "../../../lexicons/dev/cocore/compute/verifySettlement.json" with { type: "json" };
 
 const COCORE_LEXICONS: LexiconDoc[] = [
   attestation as LexiconDoc,
@@ -44,6 +52,14 @@ const COCORE_LEXICONS: LexiconDoc[] = [
   receipt as LexiconDoc,
   settlement as LexiconDoc,
   termsAcceptance as LexiconDoc,
+  latency as LexiconDoc,
+  listJobs as LexiconDoc,
+  listProviders as LexiconDoc,
+  listReceipts as LexiconDoc,
+  listSettlements as LexiconDoc,
+  modelActivity as LexiconDoc,
+  verifyReceiptLex as LexiconDoc,
+  verifySettlementLex as LexiconDoc,
 ];
 
 // com.atproto.repo.strongRef schema, copied verbatim from
@@ -79,6 +95,14 @@ export const ids = {
   DevCocoreComputeReceipt: "dev.cocore.compute.receipt",
   DevCocoreComputeSettlement: "dev.cocore.compute.settlement",
   DevCocoreComputeTermsAcceptance: "dev.cocore.compute.termsAcceptance",
+  DevCocoreComputeLatency: "dev.cocore.compute.latency",
+  DevCocoreComputeListJobs: "dev.cocore.compute.listJobs",
+  DevCocoreComputeListProviders: "dev.cocore.compute.listProviders",
+  DevCocoreComputeListReceipts: "dev.cocore.compute.listReceipts",
+  DevCocoreComputeListSettlements: "dev.cocore.compute.listSettlements",
+  DevCocoreComputeModelActivity: "dev.cocore.compute.modelActivity",
+  DevCocoreComputeVerifyReceipt: "dev.cocore.compute.verifyReceipt",
+  DevCocoreComputeVerifySettlement: "dev.cocore.compute.verifySettlement",
 } as const;
 
 export const schemas: LexiconDoc[] = [...COCORE_LEXICONS, STRONG_REF];
