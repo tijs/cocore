@@ -13,6 +13,9 @@ export type ApiDocsPageContextValue = {
   tagOptions: Array<ApiDocsTagOption>;
   signedIn: boolean;
   sessionDid: string | null;
+  /** Server-resolved public origins for curl examples. */
+  appviewBaseUrl: string;
+  consoleBaseUrl: string;
 };
 
 const ApiDocsPageContext = createContext<ApiDocsPageContextValue | null>(null);
@@ -20,10 +23,14 @@ const ApiDocsPageContext = createContext<ApiDocsPageContextValue | null>(null);
 export function ApiDocsPageProvider({
   fixtures,
   tagOptions,
+  appviewBaseUrl,
+  consoleBaseUrl,
   children,
 }: {
   fixtures: ApiDocsFixtures;
   tagOptions: Array<ApiDocsTagOption>;
+  appviewBaseUrl: string;
+  consoleBaseUrl: string;
   children: ReactNode;
 }) {
   const { data: session } = useQuery(getSessionQueryOptions);
@@ -34,8 +41,10 @@ export function ApiDocsPageProvider({
       tagOptions,
       signedIn: Boolean(sessionDid),
       sessionDid,
+      appviewBaseUrl,
+      consoleBaseUrl,
     }),
-    [fixtures, tagOptions, sessionDid],
+    [fixtures, tagOptions, sessionDid, appviewBaseUrl, consoleBaseUrl],
   );
 
   return <ApiDocsPageContext.Provider value={value}>{children}</ApiDocsPageContext.Provider>;
