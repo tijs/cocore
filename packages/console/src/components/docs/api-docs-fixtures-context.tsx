@@ -16,6 +16,8 @@ export type ApiDocsPageContextValue = {
   /** Server-resolved public origins for curl examples. */
   appviewBaseUrl: string;
   consoleBaseUrl: string;
+  /** Server-resolved AppView service DID. */
+  appviewDid: string;
 };
 
 const ApiDocsPageContext = createContext<ApiDocsPageContextValue | null>(null);
@@ -25,12 +27,14 @@ export function ApiDocsPageProvider({
   tagOptions,
   appviewBaseUrl,
   consoleBaseUrl,
+  appviewDid,
   children,
 }: {
   fixtures: ApiDocsFixtures;
   tagOptions: Array<ApiDocsTagOption>;
   appviewBaseUrl: string;
   consoleBaseUrl: string;
+  appviewDid: string;
   children: ReactNode;
 }) {
   const { data: session } = useQuery(getSessionQueryOptions);
@@ -43,8 +47,9 @@ export function ApiDocsPageProvider({
       sessionDid,
       appviewBaseUrl,
       consoleBaseUrl,
+      appviewDid,
     }),
-    [fixtures, tagOptions, sessionDid, appviewBaseUrl, consoleBaseUrl],
+    [fixtures, tagOptions, sessionDid, appviewBaseUrl, consoleBaseUrl, appviewDid],
   );
 
   return <ApiDocsPageContext.Provider value={value}>{children}</ApiDocsPageContext.Provider>;

@@ -19,7 +19,7 @@ import { docsStyles } from "./docs-page.stylex";
 import { DocsRefShell } from "./docs-ref-shell";
 
 export function ApiDocsPage() {
-  const { fixtures, tagOptions, appviewBaseUrl, consoleBaseUrl } = useLoaderData({
+  const { fixtures, tagOptions, appviewBaseUrl, consoleBaseUrl, appviewDid } = useLoaderData({
     from: "/_docs-header-layout/docs/api",
   });
 
@@ -29,6 +29,7 @@ export function ApiDocsPage() {
       tagOptions={tagOptions}
       appviewBaseUrl={appviewBaseUrl}
       consoleBaseUrl={consoleBaseUrl}
+      appviewDid={appviewDid}
     >
       <DocsRefShell
         scrollSpyIds={API_DOCS_SCROLL_SPY_IDS}
