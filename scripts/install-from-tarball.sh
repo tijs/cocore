@@ -22,7 +22,17 @@ set -euo pipefail
 readonly STAGE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LABEL="dev.cocore.provider"
 
+# Console / advisor default to whatever the bundled menu-bar app was built for
+# — its Info.plist CocoreConsoleURL / CocoreAdvisorURL, stamped by
+# scripts/build-mac-app.sh. A PR build bakes its PR stack there; a plain
+# release leaves them unset and we fall through to prod. This keeps the CLI
+# pair + LaunchAgent on the SAME stack the app targets, instead of pairing a
+# PR/dev build against prod. An explicit COCORE_CONSOLE / COCORE_ADVISOR env
+# still wins.
+_baked() { /usr/libexec/PlistBuddy -c "Print :$1" "$STAGE/cocore.app/Contents/Info.plist" 2>/dev/null || true; }
+COCORE_CONSOLE="${COCORE_CONSOLE:-$(_baked CocoreConsoleURL)}"
 COCORE_CONSOLE="${COCORE_CONSOLE:-https://console.cocore.dev}"
+COCORE_ADVISOR="${COCORE_ADVISOR:-$(_baked CocoreAdvisorURL)}"
 COCORE_ADVISOR="${COCORE_ADVISOR:-wss://advisor.cocore.dev/v1/agent}"
 COCORE_PREFIX="${COCORE_PREFIX:-$HOME/.local}"
 COCORE_LOG="${COCORE_LOG:-info}"
