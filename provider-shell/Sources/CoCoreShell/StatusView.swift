@@ -101,8 +101,7 @@ struct StatusView: View {
 
     private func openProfile() {
         guard let handle = state.session?.handle else { return }
-        let console = UserDefaults.standard.string(forKey: "consoleBaseUrl")
-            ?? "https://console.cocore.dev"
+        let console = Endpoints.consoleURL
         guard let url = URL(string: "\(console)/u/\(handle)") else { return }
         NSWorkspace.shared.open(url)
     }

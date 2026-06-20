@@ -57,6 +57,20 @@ pb "Add :CFBundleExecutable string $EXEC_NAME" || pb "Set :CFBundleExecutable $E
 pb "Add :CFBundlePackageType string APPL"      || pb "Set :CFBundlePackageType APPL"
 pb "Add :CFBundleIconFile string AppIcon"      || pb "Set :CFBundleIconFile AppIcon"
 
+# Build-time endpoint targeting. When COCORE_CONSOLE_URL / COCORE_ADVISOR_URL
+# are set (a PR build wired to its stack, or a dev build), bake them into the
+# bundle so the app defaults to that environment's console + advisor. Absent →
+# the app falls back to prod at runtime (see Endpoints.swift). Settings →
+# Network still overrides either way.
+if [[ -n "${COCORE_CONSOLE_URL:-}" ]]; then
+  pb "Add :CocoreConsoleURL string $COCORE_CONSOLE_URL" || pb "Set :CocoreConsoleURL $COCORE_CONSOLE_URL"
+  note "baked CocoreConsoleURL=$COCORE_CONSOLE_URL"
+fi
+if [[ -n "${COCORE_ADVISOR_URL:-}" ]]; then
+  pb "Add :CocoreAdvisorURL string $COCORE_ADVISOR_URL" || pb "Set :CocoreAdvisorURL $COCORE_ADVISOR_URL"
+  note "baked CocoreAdvisorURL=$COCORE_ADVISOR_URL"
+fi
+
 bold "==> render app icon (Finder/Spotlight/dock)"
 # Master 1024 PNG from brand geometry, then sips → iconset → iconutil.
 MASTER="$OUT_DIR/icon_master.png"

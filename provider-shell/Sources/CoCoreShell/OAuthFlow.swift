@@ -48,8 +48,7 @@ enum PairFlow {
         guard let bin = AgentSupervisor.locateBinary() else {
             throw PairError.binaryNotFound
         }
-        let console = UserDefaults.standard.string(forKey: "consoleBaseUrl")
-            ?? "https://console.cocore.dev"
+        let console = Endpoints.consoleURL
 
         let status = try await runPair(bin: bin, console: console, onPrompt: onPrompt)
         guard status == 0 else { throw PairError.pairFailed(status) }

@@ -473,8 +473,7 @@ final class MenuBarController {
 
     @objc private func openProfile() {
         guard let handle = state.session?.handle else { return }
-        let console = UserDefaults.standard.string(forKey: "consoleBaseUrl")
-            ?? "https://console.cocore.dev"
+        let console = Endpoints.consoleURL
         guard let url = URL(string: "\(console)/u/\(handle)") else { return }
         NSWorkspace.shared.open(url)
     }
@@ -543,8 +542,7 @@ final class MenuBarController {
 
         Task {
             await supervisor.stop()
-            let console = UserDefaults.standard.string(forKey: "consoleBaseUrl")
-                ?? "https://console.cocore.dev"
+            let console = Endpoints.consoleURL
             await Uninstaller.run(console: console)
             // Move our own .app to the Trash (the hosted uninstaller wipes
             // the agent, not the GUI bundle), then quit.

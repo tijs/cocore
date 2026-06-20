@@ -38,7 +38,7 @@ final class Updater: ObservableObject {
     }
 
     private var consoleBase: String {
-        UserDefaults.standard.string(forKey: "consoleBaseUrl") ?? "https://console.cocore.dev"
+        Endpoints.consoleURL
     }
 
     /// Fetch the policy and update status. If we're below minSupported,
