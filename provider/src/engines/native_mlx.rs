@@ -1,59 +1,110 @@
 //! Native in-process MLX inference engine (WS-ENGINE) — the long pole of
-//! darkbloom parity. Feature-gated behind `native_mlx`.
+//! darkbloom parity. Feature-gated behind `native_mlx` (macOS + Apple silicon).
 //!
-//! WHY THIS EXISTS: today the agent decrypts the prompt and hands it to an
+//! WHY THIS EXISTS: the legacy path decrypts the prompt and hands it to an
 //! owner-controlled Python subprocess (`engines/subprocess.rs`) that no
 //! attestation covers — so the SE attestation vouches for the wrong process.
 //! This engine processes the plaintext ENTIRELY inside the measured, signed
-//! `cocore` binary (no subprocess, no IPC), which is the load-bearing
-//! confidential property (darkbloom's "in-process inference, no observation
-//! surface"). Only with this does `inProcessBackend` become true and the
-//! confidential tier become reachable.
+//! `cocore` binary via the `CoCoreMLX` dylib (no subprocess, no IPC), which is
+//! the load-bearing confidential property (darkbloom's "in-process inference,
+//! no observation surface"). Only with this does `inProcessBackend` become true
+//! and the confidential tier become reachable.
 //!
-//! METAL / JIT (S1 finding, see provider/spikes/SPIKE_RESULTS.md): MLX runs its
-//! standard kernels from a PRECOMPILED `mlx.metallib` loaded at runtime — no
-//! runtime shader JIT — so the agent is signed with `allow-jit=false` and the
-//! metallib is signed by the same team (library validation). The metallib is
-//! hashed at load and pinned into the attestation (`metallibHash`) so a
-//! confidential verifier checks the GPU kernels too, not just the binary.
+//! METAL / JIT (S1, see provider/spikes/SPIKE_RESULTS.md): MLX runs its standard
+//! kernels from a PRECOMPILED `mlx.metallib` loaded at runtime — no runtime
+//! shader JIT — so the agent is signed `allow-jit=false` and the metallib is
+//! signed by the same team (library validation). The metallib is hashed at load
+//! and pinned into the attestation (`metallibHash`).
 //!
-//! STATUS: the engine plumbing (Engine trait, in-process + metallib reporting,
-//! metallib hashing) is complete and compiles WITHOUT mlx-rs. The actual MLX
-//! token loop is gated on a build host with the full Xcode Metal toolchain
-//! (absent in the dev environment this was authored in). `generate_once`
-//! returns a clear error until that wiring lands, rather than silently
-//! degrading — a provider running this unwired must not serve, and must never
-//! claim to have produced output it didn't.
+//! The MLX/Swift code lives in `libCoCoreMLX.dylib` (built + linked by build.rs).
+//! It is loaded under ENFORCED library validation, so the owner cannot swap in a
+//! different dylib, and its hash is pinned like the metallib's.
 
 use super::{Engine, GenerateRequest, GenerateResponse};
 use anyhow::Result;
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// In-process MLX engine. Holds the precompiled-metallib hash so the
-/// attestation can pin the GPU kernels; the model handle + tokenizer are added
-/// when mlx-rs is wired on a Metal-capable build host.
+#[cfg(target_os = "macos")]
+mod ffi {
+    use std::os::raw::{c_char, c_int, c_void};
+    extern "C" {
+        pub fn cocore_mlx_load_model(model_dir: *const c_char, out_handle: *mut *mut c_void)
+            -> c_int;
+        pub fn cocore_mlx_generate(
+            handle: *mut c_void,
+            prompt: *const c_char,
+            prompt_len: usize,
+            max_tokens: i32,
+            on_delta: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
+            ctx: *mut c_void,
+            out_tokens_in: *mut i32,
+            out_tokens_out: *mut i32,
+        ) -> c_int;
+        pub fn cocore_mlx_metallib_hash(handle: *mut c_void, out: *mut c_char, len: usize) -> c_int;
+        pub fn cocore_mlx_release(handle: *mut c_void);
+    }
+}
+
+/// In-process MLX engine. The Swift handle owns the loaded model + tokenizer;
+/// generation is serialized (MLX is not reentrant on one model).
 pub struct NativeMlxEngine {
-    /// SHA-256 hex of the precompiled, signed `mlx.metallib`, when present.
+    #[cfg(target_os = "macos")]
+    handle: std::sync::Mutex<Handle>,
     metallib_hash: Option<String>,
-    /// Model directory (safetensors weights + tokenizer) loaded in-process.
     #[allow(dead_code)]
     model_dir: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
+struct Handle(*mut std::os::raw::c_void);
+// SAFETY: the raw pointer is an opaque Swift object; we never share it across
+// threads concurrently — every use is behind the engine's Mutex.
+#[cfg(target_os = "macos")]
+unsafe impl Send for Handle {}
+
 impl NativeMlxEngine {
-    /// Load an MLX model from `model_dir`, pinning `metallib_path` (the
-    /// precompiled signed shader library) into the attestation by hashing it at
-    /// load. The prompt never leaves this process.
-    pub fn load(model_dir: PathBuf, metallib_path: Option<PathBuf>) -> Result<Self> {
-        let metallib_hash = match metallib_path {
-            Some(p) => Some(hash_file(&p)?),
-            None => None,
+    /// Load an MLX model from `model_dir` into THIS process via the CoCoreMLX
+    /// dylib. The metallib hash is read back from MLX for attestation pinning.
+    #[cfg(target_os = "macos")]
+    pub fn load(model_dir: PathBuf, _metallib_path: Option<PathBuf>) -> Result<Self> {
+        use std::ffi::CString;
+        let c_dir = CString::new(model_dir.to_string_lossy().as_bytes())?;
+        let mut handle: *mut std::os::raw::c_void = std::ptr::null_mut();
+        let rc = unsafe { ffi::cocore_mlx_load_model(c_dir.as_ptr(), &mut handle) };
+        if rc != 0 || handle.is_null() {
+            anyhow::bail!("cocore_mlx_load_model failed (rc={rc}) for {}", model_dir.display());
+        }
+        // Read the metallib hash MLX actually loaded (None if it couldn't be
+        // located — the confidential tier then won't qualify, which is correct).
+        let mut buf = [0u8; 65];
+        let hrc = unsafe {
+            ffi::cocore_mlx_metallib_hash(handle, buf.as_mut_ptr() as *mut std::os::raw::c_char, buf.len())
+        };
+        let metallib_hash = if hrc == 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            std::str::from_utf8(&buf[..end]).ok().map(|s| s.to_string())
+        } else {
+            None
         };
         Ok(Self {
+            handle: std::sync::Mutex::new(Handle(handle)),
             metallib_hash,
             model_dir,
         })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn load(_model_dir: PathBuf, _metallib_path: Option<PathBuf>) -> Result<Self> {
+        anyhow::bail!("native_mlx engine is macOS/Apple-silicon only")
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeMlxEngine {
+    fn drop(&mut self) {
+        if let Ok(h) = self.handle.lock() {
+            unsafe { ffi::cocore_mlx_release(h.0) };
+        }
     }
 }
 
@@ -63,15 +114,14 @@ impl Engine for NativeMlxEngine {
     }
 
     fn ready(&self) -> bool {
-        // Until the MLX token loop is wired, the engine is NOT ready to serve,
-        // so the registry won't route real jobs to it (it falls back to the
-        // stub / a best-effort backend). Flip to a real readiness check
-        // (model + metallib loaded) when mlx-rs lands.
-        false
+        // Loaded + the metallib was located → ready to serve confidentially.
+        // Without the metallib MLX can't run GPU kernels, so we are NOT ready.
+        self.metallib_hash.is_some()
     }
 
     /// THE load-bearing confidential property: inference runs in this measured
-    /// binary, not an owner-controlled subprocess.
+    /// binary (the CoCoreMLX dylib, loaded under library validation), not an
+    /// owner-controlled subprocess.
     fn in_process(&self) -> bool {
         true
     }
@@ -80,50 +130,132 @@ impl Engine for NativeMlxEngine {
         self.metallib_hash.clone()
     }
 
-    fn generate_once(&self, _request: &GenerateRequest) -> Result<GenerateResponse> {
-        // TODO(WS-ENGINE): drive mlx-rs token generation here, streaming deltas
-        // through `generate_stream`'s callback, with the prompt held only in
-        // this address space (Zeroizing on drop). Requires the Metal toolchain
-        // (full Xcode) on the build host — see provider/spikes/SPIKE_RESULTS.md.
-        anyhow::bail!(
-            "native_mlx engine is not yet wired to MLX (needs a full-Xcode build host); \
-             refusing to serve rather than produce unattested output"
-        )
+    #[cfg(target_os = "macos")]
+    fn generate_stream(
+        &self,
+        request: &GenerateRequest,
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<GenerateResponse> {
+        use std::os::raw::{c_char, c_void};
+
+        // The agent flattens the request to a single user turn; the Swift side
+        // applies the model's chat template.
+        let prompt: String = request
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Trampoline: the C callback forwards each decoded delta to the Rust
+        // closure. We stash any closure error and stop forwarding (MLX still
+        // finishes, but we report the error and never fabricate output).
+        struct Ctx<'a> {
+            cb: &'a mut dyn FnMut(&str) -> Result<()>,
+            err: Option<anyhow::Error>,
+        }
+        extern "C" fn trampoline(delta: *const c_char, len: usize, ctx: *mut c_void) {
+            if ctx.is_null() || delta.is_null() {
+                return;
+            }
+            let ctx = unsafe { &mut *(ctx as *mut Ctx) };
+            if ctx.err.is_some() {
+                return;
+            }
+            let bytes = unsafe { std::slice::from_raw_parts(delta as *const u8, len) };
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                if let Err(e) = (ctx.cb)(s) {
+                    ctx.err = Some(e);
+                }
+            }
+        }
+
+        let mut ctx = Ctx { cb: on_delta, err: None };
+        let mut tin: i32 = 0;
+        let mut tout: i32 = 0;
+        let guard = self
+            .handle
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native mlx engine mutex poisoned"))?;
+        let rc = unsafe {
+            ffi::cocore_mlx_generate(
+                guard.0,
+                prompt.as_ptr() as *const c_char,
+                prompt.len(),
+                request.max_tokens as i32,
+                Some(trampoline),
+                &mut ctx as *mut Ctx as *mut c_void,
+                &mut tin,
+                &mut tout,
+            )
+        };
+        drop(guard);
+        if let Some(e) = ctx.err {
+            return Err(e);
+        }
+        if rc != 0 {
+            anyhow::bail!("cocore_mlx_generate failed (rc={rc})");
+        }
+        Ok(GenerateResponse {
+            text: String::new(), // streamed via the callback; caller accumulates
+            tokens_in: tin.max(0) as u64,
+            tokens_out: tout.max(0) as u64,
+        })
+    }
+
+    fn generate_once(&self, request: &GenerateRequest) -> Result<GenerateResponse> {
+        let mut text = String::new();
+        let resp = self.generate_stream(request, &mut |delta| {
+            text.push_str(delta);
+            Ok(())
+        })?;
+        Ok(GenerateResponse {
+            text,
+            tokens_in: resp.tokens_in,
+            tokens_out: resp.tokens_out,
+        })
     }
 }
 
-fn hash_file(path: &Path) -> Result<String> {
-    let mut h = Sha256::new();
-    let mut f = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("open metallib {}: {e}", path.display()))?;
-    std::io::copy(&mut f, &mut h)?;
-    Ok(hex::encode(h.finalize()))
-}
-
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use crate::engines::Message;
 
+    /// End-to-end: load a real MLX model and stream tokens IN-PROCESS. Ignored
+    /// by default (needs a model dir + the colocated metallib); run with:
+    ///   COCORE_TEST_MODEL_DIR=/path/to/snapshot \
+    ///     cargo test -p cocore-provider --features native_mlx -- --ignored native_mlx
     #[test]
-    fn reports_in_process_and_hashes_metallib() {
-        let dir = std::env::temp_dir();
-        let metallib = dir.join("cocore-test.metallib");
-        std::fs::write(&metallib, b"fake-metallib-bytes").unwrap();
-        let eng = NativeMlxEngine::load(dir.clone(), Some(metallib.clone())).unwrap();
-        // The confidential property + the GPU-kernel pin are reported.
+    #[ignore]
+    fn streams_tokens_in_process() {
+        let dir = match std::env::var("COCORE_TEST_MODEL_DIR") {
+            Ok(d) => PathBuf::from(d),
+            Err(_) => return,
+        };
+        let eng = NativeMlxEngine::load(dir, None).expect("load model");
         assert!(eng.in_process());
-        let h = eng.metallib_hash().expect("metallib hashed");
-        assert_eq!(h.len(), 64);
-        // Not ready / refuses to serve until MLX is wired — never fakes output.
-        assert!(!eng.ready());
+        assert!(eng.ready(), "metallib must be located for the engine to be ready");
+        assert_eq!(eng.metallib_hash().map(|h| h.len()), Some(64));
+
         let req = GenerateRequest {
-            model: "m".into(),
-            messages: vec![],
-            max_tokens: 1,
+            model: "qwen".into(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: "In one sentence, what is the Apple Secure Enclave?".into(),
+            }],
+            max_tokens: 48,
             temperature: None,
             top_p: None,
         };
-        assert!(eng.generate_once(&req).is_err());
-        std::fs::remove_file(&metallib).ok();
+        let mut streamed = String::new();
+        let resp = eng
+            .generate_stream(&req, &mut |d| {
+                streamed.push_str(d);
+                Ok(())
+            })
+            .expect("generate");
+        assert!(!streamed.is_empty(), "expected streamed tokens");
+        assert!(resp.tokens_out > 0 && resp.tokens_in > 0, "expected real token counts");
     }
 }

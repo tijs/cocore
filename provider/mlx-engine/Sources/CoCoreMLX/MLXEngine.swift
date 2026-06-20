@@ -73,21 +73,34 @@ public final class MLXEngine {
         {
             return URL(fileURLWithPath: env)
         }
-        let exe = URL(fileURLWithPath: CommandLine.arguments.first ?? "")
-            .resolvingSymlinksInPath()
-        let dir = exe.deletingLastPathComponent()
-        let candidates = [
-            dir.appendingPathComponent("mlx.metallib"),
-            dir.appendingPathComponent("default.metallib"),
-        ]
-        for c in candidates where fm.fileExists(atPath: c.path) { return c }
-        // Fall back to scanning bundled resources (SwiftPM places Cmlx's
-        // metallib under a *.bundle next to the binary during dev builds).
-        if let en = fm.enumerator(at: dir, includingPropertiesForKeys: nil) {
-            for case let u as URL in en where u.pathExtension == "metallib" {
-                return u
+        // Search directories in MLX's own load order: next to THIS dylib (the
+        // image that contains the MLX code — found via #dsohandle, exactly how
+        // MLX's device.cpp locates it), then next to the executable.
+        var dirs: [URL] = []
+        if let dy = currentDylibDir() { dirs.append(dy) }
+        dirs.append(
+            URL(fileURLWithPath: CommandLine.arguments.first ?? "")
+                .resolvingSymlinksInPath().deletingLastPathComponent())
+        for dir in dirs {
+            for name in ["mlx.metallib", "default.metallib"] {
+                let c = dir.appendingPathComponent(name)
+                if fm.fileExists(atPath: c.path) { return c }
+            }
+            // Fall back to any *.metallib bundled under this directory tree
+            // (SwiftPM/Xcode place Cmlx's metallib in a *.bundle).
+            if let en = fm.enumerator(at: dir, includingPropertiesForKeys: nil) {
+                for case let u as URL in en where u.pathExtension == "metallib" {
+                    return u
+                }
             }
         }
         return nil
+    }
+
+    /// Directory containing THIS dylib, via `dladdr(#dsohandle)`.
+    private static func currentDylibDir() -> URL? {
+        var info = Dl_info()
+        guard dladdr(#dsohandle, &info) != 0, let fname = info.dli_fname else { return nil }
+        return URL(fileURLWithPath: String(cString: fname)).deletingLastPathComponent()
     }
 }

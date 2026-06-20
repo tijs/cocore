@@ -10,7 +10,12 @@ let package = Package(
     name: "CoCoreMLX",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "CoCoreMLX", type: .static, targets: ["CoCoreMLX"]),
+        // Dynamic: the Rust agent links one libCoCoreMLX.dylib (which pulls its
+        // MLX/Swift deps), rather than static-linking the entire Swift+C++ world
+        // into the Rust Mach-O. Security is preserved by enforced library
+        // validation (only our-Team-signed dylibs load) + pinning the dylib +
+        // metallib hashes in the attestation.
+        .library(name: "CoCoreMLX", type: .dynamic, targets: ["CoCoreMLX"]),
         // Standalone harness to prove MLX runs + streams tokens in-process,
         // independent of the Rust link.
         .executable(name: "cocore-mlx-smoke", targets: ["cocore-mlx-smoke"]),

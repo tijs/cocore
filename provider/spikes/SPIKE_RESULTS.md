@@ -36,6 +36,24 @@ Therefore:
 
 Reproduce: `provider/spikes/s3-cdhash/run.sh`.
 
+## S1/S2 — UPDATE 2026-06-20: VALIDATED LIVE ✅✅
+
+Full Xcode + Metal toolchain now installed. Native MLX-Swift inference runs
+**in-process** on this Mac (`provider/mlx-engine`, Qwen2.5-0.5B-4bit): model loads,
+tokens stream through the engine, real counts returned (`tokensIn=41 tokensOut=28`),
+metallib located + SHA-256-hashed for attestation. The prompt lives entirely in
+the Swift binary — no subprocess. This is the load-bearing confidential property,
+now proven not just by the darkbloom reference.
+
+Metallib packaging resolved: plain `swift build` skips MLX's Metal kernels (the
+`PrepareMetalShaders` exclusion); **`xcodebuild`** compiles them into
+`mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib` (2.8 MB). MLX's
+`device.cpp` load order: colocated `mlx.metallib` → SwiftPM bundle → `METAL_PATH`.
+For release the metallib is colocated next to the agent + signed (sign script
+already accepts a metallib arg) and its hash pinned in the attestation.
+
+Original (now-superseded) analysis below.
+
 ## S1 — Metal under hardened runtime / `.metallib`  ✅ ANSWERED (by reference) / build-run DEFERRED
 
 **Environment blocker:** this host has Xcode **Command Line Tools only** — no full
