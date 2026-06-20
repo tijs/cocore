@@ -18,6 +18,8 @@ import { accountRoutes } from "./account-routes.ts";
 import { AccountStore } from "../operational/account-store.ts";
 import { isOAuthConfigured, makeAppviewOAuth } from "../auth/oauth-client.ts";
 import { internalPdsRoutes, pdsRoutes } from "../pds/write.ts";
+import { PairStore } from "../devicepair/pair-store.ts";
+import { devicePairRoutes } from "../devicepair/routes.ts";
 import type {
   AttestationRecord,
   JobRecord,
@@ -493,7 +495,11 @@ export function buildAppviewHandler(store: Store, opts: BuildServerOptions = {})
     try {
       const oauth = makeAppviewOAuth(opts.accountStore);
       const pctx = { accounts: opts.accountStore, oauth, bridgeUrl: opts.bridgeUrl };
-      Object.assign(routes, pdsRoutes(pctx));
+      const pds = pdsRoutes(pctx);
+      Object.assign(routes, pds);
+      // Alias at /api/pds/* so a paired agent whose apiBase is the AppView
+      // (baked-in path `${apiBase}/api/pds/...`) reaches the same handlers.
+      for (const [path, h] of Object.entries(pds)) routes[`/api${path}`] = h;
       // Internal trusted-DID write path (the console forwards key-resolved
       // writes here so the OAuth session work lives only in the AppView).
       // Private-network only; gated on the shared secret.
@@ -581,6 +587,32 @@ export function buildAppviewHandler(store: Store, opts: BuildServerOptions = {})
       const out = accountStore.createKey({ did: body.did, name });
       json(res, 200, { key: out.key, secret: out.secret });
     };
+  }
+
+  // Device pairing: in-memory pair-store + start/poll (public, agent-facing)
+  // and confirm (internal — the console authenticates the browser, mints the
+  // scoped API key, and forwards the approval). Gated on the shared secret.
+  if (opts.accountStore && opts.appviewDid) {
+    const verificationBase = (
+      process.env["CONSOLE_PUBLIC_URL"] ||
+      process.env["ATPROTO_BASE_URL"] ||
+      process.env["BETTER_AUTH_URL"] ||
+      "http://localhost:3000"
+    ).replace(/\/$/, "");
+    // The agent posts records to the AppView's own public origin (derived
+    // from its did:web), which serves the /api/pds alias above.
+    const apiBase = opts.appviewDid.startsWith("did:web:")
+      ? `https://${opts.appviewDid.slice("did:web:".length)}`
+      : verificationBase;
+    Object.assign(
+      routes,
+      devicePairRoutes(new PairStore(verificationBase), {
+        accountStore: opts.accountStore,
+        appviewDid: opts.appviewDid,
+        apiBase,
+      }),
+    );
+    console.error("appview: device-pair endpoints enabled");
   }
 
   // did:web DID document, so a requester's PDS can resolve this AppView's

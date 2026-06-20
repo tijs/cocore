@@ -1,4 +1,3 @@
-import type { Did } from "@atcute/lexicons";
 import { mutationOptions, queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest, setCookie } from "@tanstack/react-start/server";
@@ -11,10 +10,6 @@ import { readAuthSessionToken } from "@/integrations/auth/cookie-parse.ts";
 import { ensureMyProfile } from "@/lib/account-profile.server.ts";
 import { deriveChatStorageKey } from "@/lib/chat-storage-key.server.ts";
 import { fetchBlueskyPublicProfileFieldsEffect } from "@/lib/bluesky-public-profile.server.ts";
-import {
-  type ProviderSessionWire,
-  providerSessionForDidEffect,
-} from "@/lib/provider-session-from-oauth.server.ts";
 import { atprotoSessionForRequestEffect } from "@/middleware/auth.server.ts";
 
 const getSessionServerFn = createServerFn({ method: "GET" }).handler(() =>
@@ -100,27 +95,7 @@ export const signOutMutationOptions = mutationOptions({
   mutationFn: () => signOutServerFn(),
 });
 
-// Used by /devices/new — converts the cookie's OAuth session into the
-// JSON-serializable ProviderSession shape that
-// `dev.cocore.devicePair.confirm` expects. Returns null if the user
-// is not signed in.
-const getProviderSessionForPairingServerFn = createServerFn({ method: "GET" }).handler(
-  (): Promise<ProviderSessionWire | null> =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        const request = getRequest();
-        const ctx = yield* atprotoSessionForRequestEffect(request);
-        if (!ctx) return null;
-        return yield* providerSessionForDidEffect(ctx.did as Did);
-      }),
-    ),
-);
-
-export const getProviderSessionForPairingQueryOptions = queryOptions({
-  queryKey: ["session", "provider-for-pairing"] as const,
-  queryFn: getProviderSessionForPairingServerFn,
-  // Always refetch — the access token rotates on use; we want the
-  // freshest one stamped into the agent's session.json.
-  staleTime: 0,
-  gcTime: 0,
-});
+// The device-pair ProviderSession is now minted on the server side of
+// `dev.cocore.devicePair.confirm` (AppView path: from the verified
+// service-auth DID; legacy path: from the request's OAuth session), so the
+// browser no longer pre-derives it.
