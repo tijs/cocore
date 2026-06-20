@@ -855,6 +855,7 @@ export const docsStyles = stylex.create({
     opacity: 0.65,
   },
   reqCode: {
+    flexShrink: 0,
     boxSizing: "border-box",
     color: docsCodeColors.fg,
     fontFamily: fontFamily.mono,
