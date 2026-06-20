@@ -292,6 +292,11 @@ export function handleConnection(
           return close(1008, "attestation-bad-signature");
         }
         registry.markAttested(registeredDid, registeredMachineId);
+        // darkbloom-parity continuous SIP check: a verified challenge that
+        // reports SIP off immediately drops the machine from confidential
+        // routing. (`sip_enabled` is part of the signed challenge payload, so
+        // a provider can't claim SIP-on without holding the attestation key.)
+        registry.recordChallengeSip(registeredDid, registeredMachineId, msg.sip_enabled === true);
         console.error(`[ws] attestation OK did=${registeredDid} machine=${registeredMachineId}`);
         pendingChallenge = null;
         clearResponseTimer();

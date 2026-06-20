@@ -23,6 +23,7 @@ import { WebSocketServer } from "ws";
 
 import { handleConnection } from "./connection.ts";
 import { handleJobsRequest } from "./jobs.ts";
+import { KnownGoodSet } from "./known-good.ts";
 import { ProviderRegistry } from "./registry.ts";
 import { SessionManager } from "./sessions.ts";
 import { TtftWindow } from "./ttft.ts";
@@ -99,7 +100,10 @@ const REPROBE_TIMEOUT_MS = Number(process.env["COCORE_ADVISOR_REPROBE_TIMEOUT_MS
 const TTFT_WINDOW_SAMPLES = Number(process.env["COCORE_ADVISOR_TTFT_SAMPLES"] ?? 100);
 
 async function main(): Promise<void> {
-  const registry = new ProviderRegistry();
+  // Known-good build set for confidential-tier routing hints (WS-COORDINATOR).
+  // Empty unless COCORE_KNOWN_GOOD_CDHASHES is set → fail-closed (no machine is
+  // advertised confidential-eligible until a blessed-build set is configured).
+  const registry = new ProviderRegistry(KnownGoodSet.fromEnv());
   // Rolling time-to-first-token window (received → first chunk relayed),
   // surfaced at GET /ttft for the console's public latency stat.
   const ttft = new TtftWindow(TTFT_WINDOW_SAMPLES);
@@ -168,6 +172,33 @@ async function main(): Promise<void> {
           // Machine has been handed jobs but produced no completions —
           // it's failing silently (vs. openly crash-looping).
           silentFailure: p.silentFailure,
+          // Confidential-tier routing hint (WS-COORDINATOR). `trustTier` is what
+          // the advisor computed; `cdHash` is the measured identity it checked.
+          trustTier: p.confidentialEligible ? "attested-confidential" : "best-effort",
+          confidentialEligible: p.confidentialEligible,
+          cdHash: p.cdHash,
+          challengeVerifiedSip: p.challengeVerifiedSip,
+        })),
+      );
+    }
+    if (url.pathname === "/verified-providers" && req.method === "GET") {
+      // Read-only feed of confidential-eligible machines (accelerator over the
+      // providers' signed PDS attestations — a requester still re-verifies the
+      // attestation at seal time before trusting the tier).
+      return json(
+        res,
+        200,
+        registry.listConfidential().map((p) => ({
+          did: p.did,
+          machineId: p.machineId,
+          machineLabel: p.machineLabel,
+          chip: p.chip,
+          supportedModels: p.supportedModels,
+          encryptionPubKey: p.encryptionPubKey,
+          attestationUri: p.attestationUri,
+          cdHash: p.cdHash,
+          trustTier: "attested-confidential",
+          attestedAt: p.attestedAt ? new Date(p.attestedAt).toISOString() : null,
         })),
       );
     }

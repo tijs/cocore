@@ -136,6 +136,17 @@ pub struct Register {
     /// advisors ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_fault: Option<crate::pds::EngineFault>,
+    /// Measured cdHash of the running binary, echoed from the signed
+    /// attestation so the advisor can check it against its known-good set when
+    /// computing confidential eligibility (an accelerator only — a confidential
+    /// requester re-verifies the PDS attestation at seal time). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cd_hash: Option<String>,
+    /// Provider's self-asserted tier (`attested-confidential` | `best-effort`),
+    /// echoed from the signed attestation. Advisory — the advisor recomputes
+    /// eligibility from cdHash ∈ known-good + challenge-verified SIP. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

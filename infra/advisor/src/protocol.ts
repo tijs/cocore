@@ -39,6 +39,14 @@ export interface Register {
   attestation_uri: string;
   /** Optional / additive — absent on a healthy serve. */
   engine_fault?: EngineFault;
+  /** Measured cdHash echoed from the signed attestation — the advisor checks
+   *  it against its known-good set when computing confidential eligibility.
+   *  Additive. */
+  cd_hash?: string;
+  /** Provider's self-asserted tier (`attested-confidential` | `best-effort`),
+   *  echoed from the signed attestation. Advisory — the advisor recomputes.
+   *  Additive. */
+  tier?: string;
 }
 
 /** Content-free crash signature the provider folds into its heartbeat

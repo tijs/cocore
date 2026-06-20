@@ -909,21 +909,30 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
     let mut attestation_inputs =
         attestation::build_stub_inputs(&session.did, &enc.public_key_b64());
     attestation_inputs.mda_cert_chain = cocore_provider::mda_loader::try_load();
+    // Echo the signed attestation's measured identity + tier on the Register
+    // frame so the advisor can compute confidential eligibility (accelerator
+    // only — the PDS attestation stays authoritative for client verification).
+    let mut register_cd_hash: Option<String> = None;
+    let mut register_tier: Option<String> = None;
     let attestation_ref: Option<StrongRef> = match attestation::build(attestation_inputs, &*signer)
     {
-        Ok(record) => match pds.publish_attestation(&record).await {
-            Ok(published) => {
-                tracing::info!(uri = %published.uri, "published attestation");
-                Some(StrongRef {
-                    uri: published.uri,
-                    cid: published.cid,
-                })
+        Ok(record) => {
+            register_cd_hash = record.cdHash.clone();
+            register_tier = Some(record.tier.clone());
+            match pds.publish_attestation(&record).await {
+                Ok(published) => {
+                    tracing::info!(uri = %published.uri, "published attestation");
+                    Some(StrongRef {
+                        uri: published.uri,
+                        cid: published.cid,
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to publish attestation; receipts disabled");
+                    None
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to publish attestation; receipts disabled");
-                None
-            }
-        },
+        }
         Err(e) => {
             tracing::warn!(error = %e, "failed to build attestation; receipts disabled");
             None
@@ -954,6 +963,8 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
         // engine failed to load, so the central matchmaker can note a
         // degraded machine instead of just seeing a short supportedModels.
         engine_fault: provider_record.engineFault.clone(),
+        cd_hash: register_cd_hash,
+        tier: register_tier,
     };
     let attestation = attestation_ref.as_ref();
 

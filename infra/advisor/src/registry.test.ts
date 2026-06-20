@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { KnownGoodSet } from "./known-good.ts";
 import {
   CRASH_LOOP_THRESHOLD,
   ProviderRegistry,
@@ -25,6 +26,62 @@ const baseReg = {
 // The single-machine baseReg's identity, spelled out for the common case.
 const DID = baseReg.provider_did;
 const MID = baseReg.machine_id;
+
+describe("ProviderRegistry confidential eligibility (WS-COORDINATOR)", () => {
+  const GOOD_CD = "abc123".padEnd(40, "0");
+  const confReg = { ...baseReg, cd_hash: GOOD_CD, tier: "attested-confidential" };
+
+  it("is fail-closed: empty known-good set → never eligible", () => {
+    const r = new ProviderRegistry(); // empty known-good
+    r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    r.recordChallengeSip(DID, MID, true);
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(false);
+  });
+
+  it("grants eligibility only with known-good cdHash + tier + challenge-verified SIP", () => {
+    const r = new ProviderRegistry(new KnownGoodSet([GOOD_CD]));
+    r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    // Before any challenge, SIP is unverified → not eligible.
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(false);
+    // A challenge verifying SIP grants it.
+    r.recordChallengeSip(DID, MID, true);
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(true);
+    expect(r.listConfidential().map((e) => e.machineId)).toEqual([MID]);
+  });
+
+  it("a challenge reporting SIP off immediately drops eligibility", () => {
+    const r = new ProviderRegistry(new KnownGoodSet([GOOD_CD]));
+    r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    r.recordChallengeSip(DID, MID, true);
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(true);
+    r.recordChallengeSip(DID, MID, false); // SIP toggled off
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(false);
+    expect(r.listConfidential()).toEqual([]);
+  });
+
+  it("an unknown cdHash is never eligible even with a confidential tier claim", () => {
+    const r = new ProviderRegistry(new KnownGoodSet(["a-different-known-hash"]));
+    r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    r.recordChallengeSip(DID, MID, true);
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(false);
+  });
+
+  it("a best-effort tier is never confidential-eligible", () => {
+    const r = new ProviderRegistry(new KnownGoodSet([GOOD_CD]));
+    r.upsert({ ...confReg, tier: "best-effort" }, noop, noopSend, noopPing, 1000);
+    r.recordChallengeSip(DID, MID, true);
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(false);
+  });
+
+  it("setKnownGood re-evaluates connected machines", () => {
+    const r = new ProviderRegistry(); // empty
+    r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    r.recordChallengeSip(DID, MID, true);
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(false);
+    r.setKnownGood(new KnownGoodSet([GOOD_CD]));
+    expect(r.get(DID, MID)?.confidentialEligible).toBe(true);
+  });
+});
 
 describe("ProviderRegistry", () => {
   it("upsert + touch + remove + list", () => {
