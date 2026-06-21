@@ -1133,6 +1133,8 @@ struct ModelsView: View {
                                 .lineLimit(1).truncationMode(.middle)
                             Spacer()
                             Button("Add exactly") { Task { await manager.add(q) } }
+                                .buttonStyle(.bordered)
+                                .tint(Color(nsColor: .controlAccentColor))
                                 .disabled(manager.busy || manager.models.contains(q))
                         }
                     }
@@ -1196,7 +1198,10 @@ struct ModelsView: View {
     @ViewBuilder private func confidentialBadge(_ nsid: String) -> some View {
         switch ModelManager.confidentialCompat(nsid) {
         case .capable:
-            Text("Confidential ✓")
+            // 🔒 to match the running-confidential indicator in Status → Security
+            // (not a ✓), so "this model can serve confidentially" reads as the
+            // same lock the user sees when the tier is actually live.
+            Text("🔒 Confidential")
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .background(Brand.success.opacity(0.18))
@@ -1430,6 +1435,8 @@ struct ModelsView: View {
             }
             Spacer()
             Button("Add") { Task { await manager.add(item.nsid) } }
+                .buttonStyle(.bordered)
+                .tint(Color(nsColor: .controlAccentColor))
                 .disabled(manager.busy || !fits || manager.models.contains(item.nsid))
         }
         .opacity(fits ? 1 : 0.65)
@@ -1462,6 +1469,8 @@ struct ModelsView: View {
             }
             Spacer()
             Button("Add") { Task { await manager.add(r.id) } }
+                .buttonStyle(.bordered)
+                .tint(Color(nsColor: .controlAccentColor))
                 .disabled(manager.busy || !fits || manager.models.contains(r.id))
         }
         .opacity(fits ? 1 : 0.65)
