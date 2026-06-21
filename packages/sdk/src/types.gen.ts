@@ -190,6 +190,7 @@ export interface ProviderRecord {
   attestationPubKey: string;
   trustLevel: TrustLevel;
   tier?: Tier;
+  desiredTier?: Tier;
   acceptedExchanges?: string[];
   contactEndpoint?: string;
   active?: boolean;

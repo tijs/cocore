@@ -41,9 +41,10 @@ describe("ProviderRegistry confidential eligibility (WS-COORDINATOR)", () => {
   it("grants eligibility only with known-good cdHash + tier + challenge-verified SIP", () => {
     const r = new ProviderRegistry(new KnownGoodSet([GOOD_CD]));
     r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    r.markCodeAttested(DID, MID); // the always-required code-identity leg
     // Before any challenge, SIP is unverified → not eligible.
     expect(r.get(DID, MID)?.confidentialEligible).toBe(false);
-    // A challenge verifying SIP grants it.
+    // A challenge verifying SIP grants it (all legs now earned).
     r.recordChallengeSip(DID, MID, true);
     expect(r.get(DID, MID)?.confidentialEligible).toBe(true);
     expect(r.listConfidential().map((e) => e.machineId)).toEqual([MID]);
@@ -52,6 +53,7 @@ describe("ProviderRegistry confidential eligibility (WS-COORDINATOR)", () => {
   it("a challenge reporting SIP off immediately drops eligibility", () => {
     const r = new ProviderRegistry(new KnownGoodSet([GOOD_CD]));
     r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    r.markCodeAttested(DID, MID);
     r.recordChallengeSip(DID, MID, true);
     expect(r.get(DID, MID)?.confidentialEligible).toBe(true);
     r.recordChallengeSip(DID, MID, false); // SIP toggled off
@@ -76,6 +78,7 @@ describe("ProviderRegistry confidential eligibility (WS-COORDINATOR)", () => {
   it("setKnownGood re-evaluates connected machines", () => {
     const r = new ProviderRegistry(); // empty
     r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    r.markCodeAttested(DID, MID);
     r.recordChallengeSip(DID, MID, true);
     expect(r.get(DID, MID)?.confidentialEligible).toBe(false);
     r.setKnownGood(new KnownGoodSet([GOOD_CD]));

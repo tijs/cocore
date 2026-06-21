@@ -130,12 +130,12 @@ describe("verifyCodeAttestation", () => {
   });
 });
 
-describe("confidential gate requires code-attestation when enforced", () => {
+describe("confidential gate is per-machine earned — ALWAYS requires code-attestation", () => {
   const cd = "a".repeat(64);
   const reg = register({ cd_hash: cd, tier: "attested-confidential", apns_device_token: "tok" });
 
-  it("gated false until code-attested, true after (enforcement on)", () => {
-    const r = new ProviderRegistry(new KnownGoodSet([cd]), true);
+  it("gated false until code-attested, true after, false when dropped", () => {
+    const r = new ProviderRegistry(new KnownGoodSet([cd]));
     r.upsert(
       reg,
       () => {},
@@ -151,8 +151,12 @@ describe("confidential gate requires code-attestation when enforced", () => {
     expect(r.get(reg.provider_did, reg.machine_id!)!.confidentialEligible).toBe(false);
   });
 
-  it("not gated on code-attestation when enforcement off (rollout safety)", () => {
-    const r = new ProviderRegistry(new KnownGoodSet([cd]), false);
+  it("never confidential without code-attestation, even with known-good cdHash + SIP", () => {
+    // No global "enforcement off" escape: cdHash ∈ known-good + SIP verified is
+    // NOT enough — a self-reported cdHash is forgeable. The machine must answer
+    // the live code-identity challenge. (Without APNs configured it never can,
+    // so confidential is simply unavailable — fail-closed.)
+    const r = new ProviderRegistry(new KnownGoodSet([cd]));
     r.upsert(
       reg,
       () => {},
@@ -160,7 +164,6 @@ describe("confidential gate requires code-attestation when enforced", () => {
       async () => true,
     );
     r.recordChallengeSip(reg.provider_did, reg.machine_id!, true);
-    // Confidential without any code-attestation — preserves pre-APNs behavior.
-    expect(r.get(reg.provider_did, reg.machine_id!)!.confidentialEligible).toBe(true);
+    expect(r.get(reg.provider_did, reg.machine_id!)!.confidentialEligible).toBe(false);
   });
 });

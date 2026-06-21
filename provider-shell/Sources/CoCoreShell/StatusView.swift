@@ -35,16 +35,31 @@ struct StatusRows: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            LabeledContent("Trust level", value: state.trustLevel.rawValue)
+            LabeledContent("Attestation") {
+                Text(state.trustLevel == .hardwareAttested
+                    ? "Hardware-attested"
+                    : "Self-attested (software)")
+                    .foregroundStyle(state.trustLevel == .hardwareAttested ? .green : .secondary)
+            }
             LabeledContent("Confidential tier") {
                 if state.confidential {
-                    Text("🔒 Verified")
+                    // The honest, stronger claim: the operator can't read prompts.
+                    Text("🔒 Confidential")
                         .foregroundStyle(.green)
                 } else {
                     Text("Best-effort")
                         .foregroundStyle(.secondary)
                 }
             }
+            // Honest one-liner so nobody mistakes hardware-attested (genuine Mac,
+            // SIP verified) for confidential (operator can't read prompts).
+            Text(state.confidential
+                ? "Your prompts run inside the measured, signed agent — the operator can't read them."
+                : state.trustLevel == .hardwareAttested
+                    ? "Genuine Apple hardware, SIP verified. Inference still runs in a helper the operator can read — upgrade to confidential to seal it."
+                    : "Fast best-effort serving. The operator can read prompts. Upgrade in the console to go confidential.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if let exp = state.attestationExpiresAt {
                 LabeledContent("Attestation expires", value: exp.formatted(.dateTime))
             }

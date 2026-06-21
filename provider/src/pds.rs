@@ -58,6 +58,13 @@ pub struct ProviderRecord {
     pub encryptionPubKey: String,
     pub attestationPubKey: String,
     pub trustLevel: TrustLevel,
+    /// Agent-published ACHIEVED confidentiality tier (`attested-confidential` |
+    /// `best-effort`), derived from the signed attestation's evidence — NEVER
+    /// self-declared. Absent ≡ best-effort. The agent only publishes
+    /// `attested-confidential` once the measured native engine is serving under
+    /// a hardware-attested posture. See `desiredTier` for the owner's intent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub acceptedExchanges: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +103,17 @@ pub struct ProviderRecord {
     /// re-publish, or each serve would clobber the owner's choice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desiredModels: Option<Vec<String>>,
+    /// The confidentiality tier the OWNER opted this machine into (the console /
+    /// tray "Upgrade security" action), `attested-confidential` | `best-effort`.
+    /// Owner-written INTENT, like `desiredModels`/`active`: the agent reconciles
+    /// toward it (switches to the measured native engine, earns the posture) but
+    /// NEVER authors it, so it must PRESERVE whatever it finds on every
+    /// re-publish. Setting it never fakes the achieved `tier`/`trustLevel` —
+    /// those only rise once actually earned; a machine that can't (e.g. a
+    /// non-native build) stays best-effort. Absent / `best-effort` = not opted
+    /// in, serves exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desiredTier: Option<String>,
     /// True while the agent is still loading its inference engine. Set on
     /// the early "provisioning" publish at serve start so the machine
     /// appears on the console immediately; cleared (set false) on the

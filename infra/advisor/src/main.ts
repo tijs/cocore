@@ -159,19 +159,23 @@ async function main(): Promise<void> {
   // `makeNodeHandler`; both export under serviceName "cocore-advisor".
   const runtime = makeRuntime(SERVICE);
 
-  // APNs code-identity sender config (APNS_AUTH_KEY/KEY_ID/TEAM_ID/TOPIC).
-  // Null when unset → the code-identity challenge is disabled AND confidential
-  // eligibility is NOT gated on it (pre-APNs behavior, no hard cutover).
+  // APNs code-identity sender config (APNS_AUTH_KEY/KEY_ID/TEAM_ID/TOPIC). This
+  // is the *capability* that lets a machine prove its code identity — not a
+  // fleet on/off. Confidential is ALWAYS earned per-machine (a machine must
+  // answer the challenge); without APNs configured, no machine can earn the
+  // code-identity leg, so confidential is simply unavailable (fail-closed).
   const apnsConfig = loadApnsConfig();
   if (apnsConfig) {
-    console.error(`[advisor] APNs code-identity enabled topic=${apnsConfig.topic}`);
+    console.error(`[advisor] APNs code-identity capability ON topic=${apnsConfig.topic}`);
   } else {
-    console.error("[advisor] APNs code-identity disabled (APNS_* env not set)");
+    console.error(
+      "[advisor] APNs code-identity capability OFF (APNS_* unset) — confidential tier unavailable",
+    );
   }
-  // Known-good cdHash set (WS-COORDINATOR) + APNs enforcement (P2). Empty unless
-  // COCORE_KNOWN_GOOD_CDHASHES is set → fail-closed (no machine is confidential-
-  // eligible until a blessed-build set is configured).
-  const registry = new ProviderRegistry(KnownGoodSet.fromEnv(), apnsConfig !== null);
+  // Known-good cdHash set (WS-COORDINATOR). Empty unless COCORE_KNOWN_GOOD_CDHASHES
+  // is set → fail-closed (no machine is confidential-eligible until a blessed-
+  // build set is configured). Confidential eligibility is computed per-machine.
+  const registry = new ProviderRegistry(KnownGoodSet.fromEnv());
   // Rolling time-to-first-token window (received → first chunk relayed),
   // surfaced at GET /ttft for the console's public latency stat.
   const ttft = new TtftWindow(TTFT_WINDOW_SAMPLES);

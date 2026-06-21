@@ -43,6 +43,8 @@ type ProviderRecordBody = {
   provisioning?: boolean;
   serving?: boolean;
   trustLevel?: string;
+  tier?: string;
+  desiredTier?: string;
   supportedModels?: string[];
   desiredModels?: string[];
   engineFault?: EngineFaultBody;
@@ -86,6 +88,8 @@ function parseProviderBody(body: unknown): ProviderRecordBody {
     provisioning: typeof o.provisioning === "boolean" ? o.provisioning : undefined,
     serving: typeof o.serving === "boolean" ? o.serving : undefined,
     trustLevel: typeof o.trustLevel === "string" ? o.trustLevel : undefined,
+    tier: typeof o.tier === "string" ? o.tier : undefined,
+    desiredTier: typeof o.desiredTier === "string" ? o.desiredTier : undefined,
     supportedModels: Array.isArray(o.supportedModels)
       ? o.supportedModels.filter((m): m is string => typeof m === "string")
       : undefined,
@@ -643,6 +647,8 @@ export function providerRowsToMachines(
       earningsLifetime: earnLife,
       jobsCompleted: jobs,
       trustLevel: body.trustLevel,
+      tier: typeof body.tier === "string" ? body.tier : undefined,
+      desiredTier: typeof body.desiredTier === "string" ? body.desiredTier : undefined,
       supportedModels: Array.isArray(body.supportedModels)
         ? body.supportedModels.filter((m): m is string => typeof m === "string")
         : undefined,
