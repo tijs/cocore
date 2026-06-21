@@ -394,8 +394,8 @@ fn kickstart_launchagent_if_installed() {
 }
 
 /// Overlay the owner/console-authored fields (`active`, `payoutsEnabled`,
-/// `desiredModels`) from an existing PDS record onto a record the agent is
-/// about to (re-)publish.
+/// `desiredModels`, `desiredTier`) from an existing PDS record onto a record the
+/// agent is about to (re-)publish.
 ///
 /// The agent NEVER authors these — the console writes them (the start/stop
 /// switch, Stripe-Connect payouts eligibility, the model picker). They are
@@ -417,6 +417,13 @@ fn preserve_console_fields(record: &mut ProviderRecord, existing: &serde_json::V
                 .filter_map(|m| m.as_str().map(str::to_string))
                 .collect::<Vec<_>>()
         });
+    // The owner's confidential opt-in (console/tray "Upgrade security"). Like
+    // the others it's console-written and the agent must carry it through, or a
+    // serve restart would silently drop the owner's choice to go confidential.
+    record.desiredTier = existing
+        .get("desiredTier")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 }
 
 /// Find this machine's existing provider record (if any) on the
@@ -666,7 +673,10 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
             priceList: vec![],
             encryptionPubKey: enc.public_key_b64(),
             attestationPubKey: attestation_pub_key.clone(),
+            // Provisioning: engine not up yet, so honestly self-attested /
+            // best-effort. The real publish below sets the earned values.
             trustLevel: TrustLevel::SelfAttested,
+            tier: None,
             acceptedExchanges: vec![],
             contactEndpoint: None,
             binaryVersion: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -674,6 +684,7 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
             // Preserved from the existing record by dedup, like payoutsEnabled.
             active: None,
             desiredModels: None,
+            desiredTier: None,
             provisioning: Some(true),
             // NOT serving yet: this record is published immediately (so the
             // machine is visible) while the engine is still loading/downloading.
@@ -830,6 +841,41 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
         })
         .collect();
 
+    // Build the signed attestation BEFORE the provider record so the record can
+    // publish the ACHIEVED trustLevel/tier derived from its evidence — never a
+    // self-declared value. trustLevel rises to hardware-attested only with a real
+    // Apple MDA chain (COCORE_MDA_CERT_CHAIN_PATH / _CHAIN_URL / _ATTEST_BINARY)
+    // bound to this machine's signing key; `tier` is the attestation's own
+    // evidence-gated computation, which stays best-effort until the measured
+    // native engine serves under a hardened-attested posture.
+    let mut attestation_inputs =
+        attestation::build_stub_inputs(&session.did, &enc.public_key_b64());
+    let mda_cert_chain = cocore_provider::mda_loader::try_load();
+    let has_mda_chain = !mda_cert_chain.is_empty();
+    attestation_inputs.mda_cert_chain = mda_cert_chain;
+    attestation_inputs.in_process_backend = engines.entries().iter().any(|(_, e)| e.in_process());
+    attestation_inputs.metallib_hash = engines
+        .entries()
+        .iter()
+        .find_map(|(_, e)| e.metallib_hash());
+    attestation_inputs.engine_lib_hash = engines
+        .entries()
+        .iter()
+        .find_map(|(_, e)| e.engine_lib_hash());
+    let built_attestation = attestation::build(attestation_inputs, &*signer);
+    let (achieved_trust_level, achieved_tier) = match &built_attestation {
+        Ok(rec) => (
+            if has_mda_chain {
+                TrustLevel::HardwareAttested
+            } else {
+                TrustLevel::SelfAttested
+            },
+            Some(rec.tier.clone()),
+        ),
+        // Build failed → fall back to the honest floor; the publish below logs it.
+        Err(_) => (TrustLevel::SelfAttested, None),
+    };
+
     let provider_record = ProviderRecord {
         machineLabel: profile.machine_label,
         chip: profile.chip,
@@ -845,7 +891,11 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
         priceList: price_list,
         encryptionPubKey: enc.public_key_b64(),
         attestationPubKey: attestation_pub_key.clone(),
-        trustLevel: TrustLevel::SelfAttested,
+        // ACHIEVED trust, derived from the attestation evidence built above —
+        // never self-declared. hardware-attested only with a bound Apple MDA
+        // chain; tier is the attestation's own evidence-gated value.
+        trustLevel: achieved_trust_level,
+        tier: achieved_tier,
         acceptedExchanges: vec![],
         contactEndpoint: None,
         binaryVersion: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -860,6 +910,8 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
         // never clobbers a "stopped" machine back to serving.
         active: None,
         desiredModels: None,
+        // Owner's confidential opt-in — preserved by dedup like the others.
+        desiredTier: None,
         // Engine is loaded by this point — clear the provisioning flag we
         // set on the early publish above, so the console flips the row
         // from "provisioning" to live.
@@ -905,42 +957,16 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
         }
     };
 
-    // Publish a fresh self-attested attestation so receipts emitted
-    // during this `serve` lifetime have a real strong-ref. If the
-    // PDS publish fails (network, auth, schema), continue with no
-    // attestation: the InferenceRequest stub still answers; receipts
-    // just won't be published.
-    //
-    // If COCORE_MDA_CERT_CHAIN_PATH or COCORE_MDA_ATTEST_BINARY is
-    // set and resolves to a valid PEM chain, the resulting record
-    // carries `mdaCertChain` and the AppView's verifier promotes
-    // receipts to `trustLevel: hardware-attested`. Failure here
-    // returns an empty chain (NOT an error) — see the loader's
-    // module doc for the rationale.
-    let mut attestation_inputs =
-        attestation::build_stub_inputs(&session.did, &enc.public_key_b64());
-    attestation_inputs.mda_cert_chain = cocore_provider::mda_loader::try_load();
-    // Reflect the serving engine's confidential properties honestly: the
-    // confidential tier requires inference to run inside THIS measured binary
-    // (an in-process native engine), and pins the metallib the GPU kernels load.
-    // The subprocess/stub backends report neither, so this stays false/None
-    // until the native engine ships (WS-ENGINE).
-    attestation_inputs.in_process_backend = engines.entries().iter().any(|(_, e)| e.in_process());
-    attestation_inputs.metallib_hash = engines
-        .entries()
-        .iter()
-        .find_map(|(_, e)| e.metallib_hash());
-    attestation_inputs.engine_lib_hash = engines
-        .entries()
-        .iter()
-        .find_map(|(_, e)| e.engine_lib_hash());
-    // Echo the signed attestation's measured identity + tier on the Register
-    // frame so the advisor can compute confidential eligibility (accelerator
-    // only — the PDS attestation stays authoritative for client verification).
+    // Publish the attestation we built above (its evidence already set the
+    // provider record's trustLevel/tier). On PDS publish failure (network,
+    // auth, schema) continue with no attestation: the InferenceRequest stub
+    // still answers; receipts just won't be published. Echo the measured
+    // identity + tier on the Register frame so the advisor can compute
+    // confidential eligibility (accelerator only — the PDS attestation stays
+    // authoritative for client verification).
     let mut register_cd_hash: Option<String> = None;
     let mut register_tier: Option<String> = None;
-    let attestation_ref: Option<StrongRef> = match attestation::build(attestation_inputs, &*signer)
-    {
+    let attestation_ref: Option<StrongRef> = match built_attestation {
         Ok(record) => {
             register_cd_hash = record.cdHash.clone();
             register_tier = Some(record.tier.clone());
@@ -1723,12 +1749,14 @@ mod offline_marker_tests {
             encryptionPubKey: "enc".into(),
             attestationPubKey: "att".into(),
             trustLevel: TrustLevel::SelfAttested,
+            tier: None,
             acceptedExchanges: vec![],
             contactEndpoint: None,
             binaryVersion: Some("0.9.13".into()),
             payoutsEnabled: None,
             active: None,
             desiredModels: None,
+            desiredTier: None,
             provisioning: Some(false),
             serving: Some(true),
             engineFault: None,
@@ -1779,7 +1807,8 @@ mod offline_marker_tests {
         let live = serde_json::json!({
             "active": false,
             "payoutsEnabled": true,
-            "desiredModels": ["mlx-community/Qwen2.5-3B-Instruct-4bit", "stub"]
+            "desiredModels": ["mlx-community/Qwen2.5-3B-Instruct-4bit", "stub"],
+            "desiredTier": "attested-confidential"
         });
 
         preserve_console_fields(&mut offline, &live);
@@ -1791,6 +1820,11 @@ mod offline_marker_tests {
                 "mlx-community/Qwen2.5-3B-Instruct-4bit".to_string(),
                 "stub".to_string()
             ])
+        );
+        // The owner's confidential opt-in survives a re-publish.
+        assert_eq!(
+            offline.desiredTier,
+            Some("attested-confidential".to_string())
         );
     }
 
@@ -1806,5 +1840,6 @@ mod offline_marker_tests {
         assert_eq!(offline.active, None);
         assert_eq!(offline.payoutsEnabled, None);
         assert_eq!(offline.desiredModels, None);
+        assert_eq!(offline.desiredTier, None);
     }
 }

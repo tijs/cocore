@@ -133,6 +133,29 @@ export async function setProviderRecordActive(
   await putMyProviderRecord(session, rkey, { ...value, active }, cid);
 }
 
+/** Opt a machine into (or out of) the confidential tier by writing
+ *  `desiredTier` onto its provider record — the owner's INTENT. The agent reads
+ *  it, reconciles toward it (the measured native engine + hardware-attested
+ *  posture), and only publishes the higher ACHIEVED `tier`/`trustLevel` once it
+ *  actually earns them. Writing `attested-confidential` NEVER fakes the achieved
+ *  state. `best-effort` (or any non-confidential value) DELETES the key, opting
+ *  the machine back out — it then serves exactly as before. Same
+ *  get→put-with-swap→bridge-mirror path as {@link setProviderRecordActive}. */
+export async function setProviderRecordDesiredTier(
+  session: OAuthSession,
+  rkey: string,
+  tier: "attested-confidential" | "best-effort",
+): Promise<void> {
+  const { cid, value } = await getMyProviderRecord(session, rkey);
+  const next = { ...value };
+  if (tier === "attested-confidential") {
+    next["desiredTier"] = tier;
+  } else {
+    delete next["desiredTier"];
+  }
+  await putMyProviderRecord(session, rkey, next, cid);
+}
+
 /** Pin the set of models a machine serves by writing `desiredModels` onto
  *  its provider record. The agent reads/reconciles this field and (re)loads
  *  the listed models. An empty selection DELETES the key, reverting the

@@ -35,8 +35,14 @@ export interface ProviderRecord {
   attestationPubKey: string;
   trustLevel: TrustLevel;
   /** Highest confidentiality tier this machine advertises. Advisory; a
-   *  confidential requester still verifies per-job. Absent = best-effort. */
+   *  confidential requester still verifies per-job. Absent = best-effort.
+   *  Agent-published ACHIEVED tier (evidence-derived, never self-declared). */
   tier?: Tier;
+  /** The tier the OWNER opted this machine into (console/tray "Upgrade
+   *  security"). Owner-written INTENT; the agent reconciles toward it and only
+   *  publishes a higher `tier`/`trustLevel` once earned. Absent/best-effort =
+   *  not opted in (serves exactly as before). Mirrors `desiredModels`. */
+  desiredTier?: Tier;
   acceptedExchanges?: string[];
   contactEndpoint?: string;
   active?: boolean;

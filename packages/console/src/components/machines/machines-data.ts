@@ -26,7 +26,23 @@ export interface Machine {
   /** The configured model ids that failed to load, if the agent
    *  reported them. */
   faultModels?: string[];
+  /** How the machine's environment is attested (from the provider record):
+   *  `self-attested` (software) or `hardware-attested` (genuine Apple hardware +
+   *  SIP, via a bound MDA chain). Evidence-derived; the UI humanizes it. */
   trustLevel?: string;
+  /** The machine's ACHIEVED confidentiality tier from its provider record
+   *  (`attested-confidential` | `best-effort`). Evidence-derived; absent =
+   *  best-effort. Distinct from {@link desiredTier} (the owner's intent). */
+  tier?: string;
+  /** The tier the OWNER opted this machine into via "Upgrade security" (written
+   *  to the provider record's `desiredTier`). The agent reconciles toward it;
+   *  the achieved {@link tier} only rises once earned. Absent = not opted in. */
+  desiredTier?: string;
+  /** The advisor's VERIFIED confidential standing — the machine passed every
+   *  earned leg (known-good cdHash + challenge-verified SIP + code-identity).
+   *  This is the honest "operator cannot read your prompt" signal, stricter
+   *  than the self-asserted {@link tier}. Absent/false otherwise. */
+  confidential?: boolean;
   chipMeta?: string;
   /** Model NSIDs the agent advertises in its provider record's
    *  `supportedModels` field. Mirrors what the engine registry
