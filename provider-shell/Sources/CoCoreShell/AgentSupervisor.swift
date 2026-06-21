@@ -225,7 +225,12 @@ final class AgentSupervisor {
         // A fresh deliberate start clears the stop latch so a later
         // unexpected exit is treated as a crash and respawned.
         intentionalStop = false
-        guard let bin = Self.serveBinary() else {
+        // Probe the owner's trust tier ONCE: it selects the worker binary AND
+        // gates the inference-model env below (a confidential machine is
+        // native-only, so we must not inject subprocess models).
+        let tier = Self.probeTier()
+        let confidential = (tier == "attested-confidential")
+        guard let bin = Self.serveBinary(tier: tier) else {
             NSLog("cocore: provider binary not found")
             return
         }
@@ -250,9 +255,13 @@ final class AgentSupervisor {
             // but this also enriches the stderr line we persist below.
             "RUST_BACKTRACE": "full",
         ]
+        // Best-effort machines serve the owner's subprocess models; a
+        // confidential machine is native-only (inference stays in the measured
+        // binary), so never inject subprocess models there — the agent also
+        // clears them defensively, but not passing them avoids the spawn churn.
         let models = (UserDefaults.standard.string(forKey: "inferenceModels") ?? "")
             .trimmingCharacters(in: .whitespaces)
-        if !models.isEmpty { env["COCORE_INFERENCE_MODELS"] = models }
+        if !confidential, !models.isEmpty { env["COCORE_INFERENCE_MODELS"] = models }
         // Owner-chosen display name (set in the tray during setup), so the
         // provider record shows that instead of the raw `.local` hostname.
         let label = (UserDefaults.standard.string(forKey: "machineLabel") ?? "")
@@ -680,8 +689,8 @@ final class AgentSupervisor {
     /// Every other machine runs the default `cocore`: no provisioning profile
     /// to expire, behaviour identical to a normal release. Falls back to the
     /// default binary when the worker bundle isn't present (a non-apns build).
-    nonisolated static func serveBinary() -> URL? {
-        if probeTier() == "attested-confidential" {
+    nonisolated static func serveBinary(tier: String) -> URL? {
+        if tier == "attested-confidential" {
             let worker = Bundle.main.bundleURL
                 .appendingPathComponent(
                     "Contents/CoCoreProvider.app/Contents/MacOS/cocore-provider")

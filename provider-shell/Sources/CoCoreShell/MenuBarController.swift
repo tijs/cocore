@@ -265,7 +265,10 @@ final class MenuBarController {
         // up to date, a routine "Check for updates…" (also in the Help tab).
         addUpdateItems(to: menu)
         menu.addItem(.separator())
-        menu.addItem(action(title: "Enable Secure Mode…", #selector(openSecureModeWizard)))
+        // Secure Mode + Confidential live inside "Open co/core…" → Status now,
+        // not at the tray's top level — they're explained side-by-side there so
+        // the two postures aren't confused. The tray stays short: serving,
+        // updates, open, quit.
         menu.addItem(action(title: "Open co/core…", #selector(openMainWindow)))
         if let err = state.lastError, !err.isEmpty {
             // Catch-all for a surfaced error (e.g. a failed sign-in). Clip it
@@ -550,6 +553,7 @@ final class MenuBarController {
         onOpenProfile: { [weak self] in self?.openProfile() },
         onOpenSetupGuide: { [weak self] in self?.openWelcome() },
         onSignOut: { [weak self] in self?.signOut() },
+        onEnableSecureMode: { [weak self] in self?.secureModeWizard.show() },
         onSendBugReport: { [weak self] in self?.sendBugReport() },
         onCheckUpdates: { [weak self] in self?.checkUpdates() },
         onInstallUpdate: { [weak self] in self?.installUpdate() },
@@ -559,14 +563,15 @@ final class MenuBarController {
 
     /// The guided (manual) Secure Mode hardening wizard — MDM enrollment +
     /// step-ca attestation chain, then a recommended-models pin. Additive and
-    /// best-effort: nothing here gates serving.
+    /// best-effort: nothing here gates serving. Launched from "Open co/core…" →
+    /// Status → Security (via the mainWindow's `onEnableSecureMode` closure),
+    /// no longer a top-level tray item.
     private lazy var secureModeWizard: SecureModeWizardController = SecureModeWizardController(
         state: state,
         supervisor: supervisor,
         updater: updater,
         modelManager: modelManager
     )
-    @objc private func openSecureModeWizard() { secureModeWizard.show() }
 
     /// Public entry point so the AppDelegate can surface the main window when
     /// the app is re-launched (the dock/Finder "reopen" path) — the safety net

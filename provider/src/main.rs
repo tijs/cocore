@@ -1015,9 +1015,31 @@ async fn cmd_serve(
             }
             Err(_) => (Vec::new(), None),
         };
-    if !desired_at_start.is_empty() && !confidential {
-        tracing::info!(models = ?desired_at_start, "loading owner-selected models from the console");
-        std::env::set_var("COCORE_INFERENCE_MODELS", desired_at_start.join(","));
+    match inference_models_action(confidential, &desired_at_start) {
+        InferenceModelsAction::Clear => {
+            // Confidential = native-only. Inference MUST stay inside the
+            // measured binary, so the subprocess engine serves nothing — clear
+            // `COCORE_INFERENCE_MODELS` (both spellings) regardless of who set
+            // it. The macOS tray injects it from its `inferenceModels`
+            // preference and a launchd plist can set it too; without this clear,
+            // a confidential machine would spawn a Python child for that model,
+            // both leaking plaintext out of the measured binary and piling load
+            // onto small machines (enough to starve the advisor WS loop so
+            // code-attestation never sticks). `build_engines` then registers the
+            // native engine + `stub` only.
+            tracing::info!(
+                "confidential tier — serving the in-process native engine only (cleared COCORE_INFERENCE_MODELS)"
+            );
+            std::env::remove_var("COCORE_INFERENCE_MODELS");
+            std::env::remove_var("COCORE_INFERENCE_MODEL");
+        }
+        InferenceModelsAction::Set(models) => {
+            tracing::info!(models = %models, "loading owner-selected models from the console");
+            std::env::set_var("COCORE_INFERENCE_MODELS", models);
+        }
+        // No console selection on a best-effort machine: leave whatever the
+        // environment / install default already provides, exactly as before.
+        InferenceModelsAction::Leave => {}
     }
 
     // Per-model schedules + the full configured set they apply to. The serve
@@ -1607,6 +1629,34 @@ fn clear_provision_status() {
     }
 }
 
+/// What a serve should do with `COCORE_INFERENCE_MODELS` (the subprocess
+/// engine's model set) before building engines.
+#[derive(Debug, PartialEq, Eq)]
+enum InferenceModelsAction {
+    /// Clear the var (both spellings) — confidential = native-only, inference
+    /// stays in the measured binary, so the subprocess engine serves nothing.
+    Clear,
+    /// Set it to this CSV — the owner picked models on the console (best-effort).
+    Set(String),
+    /// Leave the existing env / install default untouched — best-effort machine
+    /// with no console selection.
+    Leave,
+}
+
+/// Decide the `COCORE_INFERENCE_MODELS` action for a serve. A confidential
+/// machine ALWAYS clears it (native-only — never a subprocess child, no matter
+/// what the supervisor injected); a best-effort machine sets the owner's
+/// `desiredModels` when present, else leaves whatever is already configured.
+fn inference_models_action(confidential: bool, desired: &[String]) -> InferenceModelsAction {
+    if confidential {
+        InferenceModelsAction::Clear
+    } else if desired.is_empty() {
+        InferenceModelsAction::Leave
+    } else {
+        InferenceModelsAction::Set(desired.join(","))
+    }
+}
+
 /// Build the per-model engine registry for this serve invocation.
 ///
 /// Every registry includes a `stub` entry — it's the no-cost
@@ -2058,6 +2108,47 @@ fn cmd_whoami() -> Result<()> {
         None => println!("not paired; run `cocore agent pair`"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod inference_models_action_tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn confidential_always_clears_regardless_of_desired() {
+        // Native-only: even with owner-selected models (or an injected env), a
+        // confidential serve must never run the subprocess engine.
+        assert_eq!(
+            inference_models_action(true, &[]),
+            InferenceModelsAction::Clear
+        );
+        assert_eq!(
+            inference_models_action(true, &v(&["mlx-community/Qwen3.5-0.8B-MLX-4bit"])),
+            InferenceModelsAction::Clear
+        );
+        assert_eq!(
+            inference_models_action(true, &v(&["a", "b"])),
+            InferenceModelsAction::Clear
+        );
+    }
+
+    #[test]
+    fn best_effort_sets_desired_or_leaves_default() {
+        // Owner picked models → set them (joined CSV, order preserved).
+        assert_eq!(
+            inference_models_action(false, &v(&["a", "b"])),
+            InferenceModelsAction::Set("a,b".to_string())
+        );
+        // No console selection → leave whatever the env/default provides.
+        assert_eq!(
+            inference_models_action(false, &[]),
+            InferenceModelsAction::Leave
+        );
+    }
 }
 
 #[cfg(test)]
