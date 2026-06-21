@@ -22,7 +22,7 @@ provider-shell/
     OAuthFlow.swift             # ASWebAuthenticationSession + SessionStore
     PreferencesView.swift       # SwiftUI settings tabs
     Resources/
-      Info.plist                # LSUIElement=true, no dock icon
+      Info.plist                # no LSUIElement; Dock hidden via DockActivation
       cocore.entitlements       # Hardened Runtime, no get-task-allow
 ```
 
@@ -46,7 +46,7 @@ Steps:
 
 ```bash
 # 1. Open the package in Xcode and create a new Target wrapping it
-#    as a macOS app (LSUIElement, status-bar-only).
+#    as a macOS app (status-bar-only; dock icon hidden at runtime).
 
 # 2. Set the entitlements file to Sources/CoCoreShell/Resources/cocore.entitlements
 #    and the Info.plist to Sources/CoCoreShell/Resources/Info.plist.

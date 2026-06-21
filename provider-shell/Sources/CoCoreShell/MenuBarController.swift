@@ -7,7 +7,7 @@ import Combine
 
 @MainActor
 final class MenuBarController {
-    private let item: NSStatusItem
+    private var item: NSStatusItem
     private let state: AppState
     private let supervisor: AgentSupervisor
     private let updater: Updater
@@ -39,32 +39,71 @@ final class MenuBarController {
     /// Drives a loud "keeps crashing — send a report" menu row so a flapping
     /// machine doesn't just silently respawn behind a flat ledger.
     private var crashLoopCount = 0
+    /// One-shot recreate at launch when ControlCenter registered the item but
+    /// never composited it (common on Sonoma+ when LSUIElement conflicted with
+    /// a runtime accessory-policy switch).
+    private var didRecreateStatusItem = false
 
     /// Show the green heartbeat for this long after the agent's most
     /// recent served response (it touches `~/.cocore/last-served-at`).
     private static let heartbeatWindow: TimeInterval = 15
 
+    private static let autosaveVersionKey = "statusItemAutosaveVersion"
+
+    /// Stable per-bundle identity so macOS manages the menu-bar slot. Version
+    /// suffix bumps escape ControlCenter position caches on Tahoe when an item
+    /// is parked off-screen (y≈-17) despite being allowed in Menu Bar settings.
+    private static var autosaveName: String {
+        let bundle = Bundle.main.bundleIdentifier ?? "dev.cocore.shell"
+        let version = UserDefaults.standard.integer(forKey: autosaveVersionKey)
+        let v = max(version, 3)
+        return "\(bundle).status.v\(v)"
+    }
+
+    private static func makeStatusItem() -> NSStatusItem {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.autosaveName = autosaveName
+        return item
+    }
+
+    private func configureStatusItem(_ item: NSStatusItem) {
+        item.button?.image = MenuBarController.brandImage()
+        item.button?.toolTip = "co/core"
+        item.isVisible = true
+    }
+
     init(state: AppState, supervisor: AgentSupervisor, updater: Updater) {
         self.state = state
         self.supervisor = supervisor
         self.updater = updater
-        self.item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // A stable autosave name gives the item a persistent identity in the
-        // menu bar, so macOS manages its slot instead of handing it a phantom
-        // position (the symptom of an unmanaged item: it never renders).
-        item.autosaveName = "dev.cocore.shell.status"
-        item.button?.image = MenuBarController.brandImage()
-        item.button?.toolTip = "co/core"
+        let repaired = MenuBarStatusItemDefaultsRepair.repairHiddenVisibilityDefaultsIfNeeded(
+            defaults: UserDefaults.standard)
+        if !repaired.isEmpty {
+            NSLog("cocore: repaired hidden status-item defaults: %@", repaired.joined(separator: ","))
+        }
+        self.item = Self.makeStatusItem()
+        configureStatusItem(item)
+        DockActivation.isTrayComposited = { [weak self] in
+            self?.placementState() == .composited
+        }
         refreshServing()
         rebuildMenu()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.beginVisibilityMonitoring()
+        }
 
-        // Some macOS builds create the item but never lay it into the bar
-        // (it reports a slot but draws nothing). Toggling visibility once the
-        // bar has settled forces a re-layout that lands it in a real slot.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
-            self.item.isVisible = false
-            self.item.isVisible = true
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.beginVisibilityMonitoring()
+                if self.placementState() == .composited {
+                    DockActivation.hideDockWhenTrayReady()
+                }
+            }
         }
 
         // Apply any Pause done on the website while the app was closed.
@@ -518,20 +557,97 @@ final class MenuBarController {
     /// menu (the only other way in) is unreachable.
     func showMainWindow() { mainWindow.show() }
 
-    /// True once `NSStatusBar` has actually placed our item in the menu bar.
-    /// A stranded item (macOS occasionally fails to assign it a slot) still
-    /// has a button window — it's just parked off-screen — so a nil-window
-    /// check isn't enough. A real placement sits in the menu-bar band at the
-    /// top of a screen; anything else is our cue to fall back to opening the
-    /// main window so this menu-bar-only app stays reachable.
-    var statusItemPlaced: Bool {
-        guard let win = item.button?.window else { return false }
-        let screen = win.screen ?? NSScreen.main
-        guard let frame = screen?.frame else { return false }
-        // AppKit is bottom-left origin: a placed item's window hugs the top of
-        // the screen, so its top edge lands within a menu-bar height of the
-        // screen's top edge. A stranded item is parked far below that.
-        return win.frame.maxY >= frame.maxY - 30 && frame.intersects(win.frame)
+    /// Tahoe ControlCenter visibility states for the status item.
+    private enum StatusItemPlacement {
+        case composited
+        /// Allowed in Menu Bar settings but parked off-screen (y≈-17) or with
+        /// no screen — recreating the item alone does not fix this; the user
+        /// must toggle OFF→ON in System Settings → Menu Bar.
+        case tahoeBlockedProxy
+        case notMaterialized
+    }
+
+    private func placementState() -> StatusItemPlacement {
+        guard let button = item.button, let win = button.window else {
+            return .notMaterialized
+        }
+        // CodexBar #1440: on Tahoe, a blocked-but-allowed item still has
+        // visible=true, button=true, window=true, but screen=nil and frame
+        // parked at (0, -22, …x22) — off the menu bar.
+        if win.isVisible, win.screen == nil {
+            return .tahoeBlockedProxy
+        }
+        if isComposited(win) {
+            return .composited
+        }
+        if win.isVisible {
+            return .tahoeBlockedProxy
+        }
+        return .notMaterialized
+    }
+
+    private func isComposited(_ win: NSWindow) -> Bool {
+        if !win.isVisible { return false }
+        if !win.occlusionState.contains(.visible) { return false }
+        guard let screen = win.screen ?? NSScreen.main else { return false }
+        let frame = screen.frame
+        return win.frame.maxY >= frame.maxY - 40 && frame.intersects(win.frame)
+    }
+
+    /// Probe after launch and on menu-bar relayout. Recreate once if off-screen;
+    /// open the main window silently if still missing (no modal — Tahoe users
+    /// already have Menu Bar permission ON).
+    private func beginVisibilityMonitoring() {
+        if placementState() == .composited {
+            DockActivation.hideDockWhenTrayReady()
+            return
+        }
+
+        if placementState() == .tahoeBlockedProxy, !didRecreateStatusItem {
+            didRecreateStatusItem = true
+            bumpAutosaveVersion()
+            recreateStatusItem()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self else { return }
+                if self.placementState() == .composited {
+                    DockActivation.hideDockWhenTrayReady()
+                } else {
+                    NSLog(
+                        "cocore: status item still off-screen after recreate (frame=%@)",
+                        NSStringFromRect(self.item.button?.window?.frame ?? .zero)
+                    )
+                    self.showMainWindow()
+                }
+            }
+            return
+        }
+
+        if placementState() == .notMaterialized, !didRecreateStatusItem {
+            didRecreateStatusItem = true
+            bumpAutosaveVersion()
+            recreateStatusItem()
+            return
+        }
+
+        if placementState() != .composited {
+            NSLog("cocore: status item not composited; opening main window")
+            showMainWindow()
+        }
+    }
+
+    private func bumpAutosaveVersion() {
+        let next = UserDefaults.standard.integer(forKey: Self.autosaveVersionKey) + 1
+        UserDefaults.standard.set(max(next, 5), forKey: Self.autosaveVersionKey)
+    }
+
+    private func recreateStatusItem() {
+        NSStatusBar.system.removeStatusItem(item)
+        let newItem = Self.makeStatusItem()
+        configureStatusItem(newItem)
+        item = newItem
+        iconState = .plain
+        rebuildMenu()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private lazy var welcomeWindow: WelcomeWindowController = {
