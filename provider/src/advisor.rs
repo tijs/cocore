@@ -115,6 +115,13 @@ impl AdvisorClient {
         // flipping) and restarts to reload the new active set.
         model_schedules: &crate::schedule::ModelSchedules,
         configured_models: &[String],
+        // APNs code-identity push receiver (confidential tier; `apns` build).
+        // The process main thread runs the AppKit push host (see
+        // `push_host::run_blocking`) and forwards each received `E_K(nonce)`
+        // challenge here. `None` on non-apns builds and on headless sessions
+        // that never registered for push — the corresponding `select!` arm is
+        // then inert and the loop behaves exactly as before.
+        mut push_rx: Option<&mut mpsc::UnboundedReceiver<String>>,
     ) -> Result<()> {
         tracing::info!(url = %self.url, "connecting to advisor");
         let (ws, _resp) =
@@ -412,6 +419,29 @@ impl AdvisorClient {
                     write.send(Message::Text(payload.into()))
                         .await
                         .map_err(|e| ProviderError::Advisor(e.to_string()))?;
+                }
+                // APNs code-identity challenge (confidential tier). The push
+                // host on the main thread forwarded an `E_K(nonce)` payload:
+                // open it with `K`, SE-sign the recovered nonce, and emit a
+                // `CodeAttestationResponse` over the existing outbound channel
+                // so the advisor can mark this measured binary `codeAttested`.
+                // Inert when `push_rx` is None (non-apns / headless).
+                Some(payload) = next_push(&mut push_rx) => {
+                    match handle_code_challenge_payload(encryption, signer, &payload) {
+                        Ok(Some(resp)) => {
+                            match serde_json::to_string(&AdvisorMessage::CodeAttestationResponse(resp)) {
+                                Ok(s) => {
+                                    // Route through outbound_tx so the single
+                                    // `write` half stays uncontended.
+                                    let _ = outbound_tx.send(s);
+                                    tracing::info!("answered APNs code-identity challenge");
+                                }
+                                Err(e) => tracing::warn!(error = %e, "serialize code-attestation response failed"),
+                            }
+                        }
+                        Ok(None) => tracing::warn!("code-identity push payload was not a parseable challenge"),
+                        Err(e) => tracing::warn!(error = %e, "failed to answer code-identity challenge"),
+                    }
                 }
                 // An in-flight job finished — flush its replies. Guarded so
                 // the branch is disabled (rather than spinning on a `None`)
@@ -1316,6 +1346,18 @@ pub fn parse_code_challenge_payload(json_str: &str) -> Option<(String, String)> 
 /// recover the nonce and produce the signed response. `Ok(None)` means the
 /// push wasn't a code challenge (ignore it); `Err` means it was but couldn't
 /// be opened (fail-closed — no response goes out).
+/// Await the next APNs push payload from an optional receiver. When the
+/// receiver is absent (non-apns build, or a headless session that never got a
+/// push host), this future never resolves, so the `select!` arm that uses it
+/// stays permanently inert — the serve loop behaves exactly as it did before
+/// code identity existed.
+async fn next_push(rx: &mut Option<&mut mpsc::UnboundedReceiver<String>>) -> Option<String> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 pub fn handle_code_challenge_payload(
     encryption: &ProviderKeypair,
     signer: &dyn SigningIdentity,
