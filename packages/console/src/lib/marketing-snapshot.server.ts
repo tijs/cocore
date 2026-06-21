@@ -1,6 +1,7 @@
 import { Effect } from "effect";
 
 import { cocoreConfig } from "@/lib/cocore-config.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import {
   type AppviewAccountSummary,
   type AppviewIndexedRecord,
@@ -356,13 +357,23 @@ async function fetchAdvisorTtftP50Ms(): Promise<number | null> {
 async function buildMarketingSnapshot(): Promise<MarketingSnapshot> {
   const generatedAt = new Date().toISOString();
 
-  const [receiptsR, providersR, activityR, accountsR, profilesR, firstTokenP50Ms, policy] =
+  const [[receiptsR, providersR, activityR, accountsR, profilesR], firstTokenP50Ms, policy] =
     await Promise.all([
-      Effect.runPromise(Effect.either(appviewGetReceiptsEffect({}))),
-      Effect.runPromise(Effect.either(appviewListProvidersEffect)),
-      Effect.runPromise(Effect.either(appviewModelActivityEffect)),
-      Effect.runPromise(Effect.either(appviewListAccountsEffect({ limit: 60, sortBy: "recent" }))),
-      Effect.runPromise(Effect.either(appviewListProfilesEffect)),
+      // One root span, five concurrent child `appview.request` spans —
+      // each appview effect carries its own span (see appview.server.ts).
+      runTraced(
+        "marketing.snapshot.appview",
+        Effect.all(
+          [
+            Effect.either(appviewGetReceiptsEffect({})),
+            Effect.either(appviewListProvidersEffect),
+            Effect.either(appviewModelActivityEffect),
+            Effect.either(appviewListAccountsEffect({ limit: 60, sortBy: "recent" })),
+            Effect.either(appviewListProfilesEffect),
+          ],
+          { concurrency: "unbounded" },
+        ),
+      ),
       fetchAdvisorTtftP50Ms(),
       fetchPolicySnapshot(),
     ]);

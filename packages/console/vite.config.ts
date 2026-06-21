@@ -18,7 +18,13 @@ const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 export default mergeConfig(
   defineConfig({
-    resolve: { tsconfigPaths: true },
+    resolve: {
+      tsconfigPaths: true,
+      // Explicit `@/` → src alias so Vitest (which doesn't apply
+      // `tsconfigPaths`) resolves the same paths the app does. Scoped to
+      // `@/` so it never rewrites `@scope/pkg` imports.
+      alias: [{ find: /^@\//, replacement: `${path.join(rootDir, "src")}/` }],
+    },
     // Native bindings: Rolldown's dep optimizer reads js-binding.js, which
     // embeds/loads the .node binary and fails UTF-8 decoding.
     optimizeDeps: { exclude: ["@resvg/resvg-js"] },

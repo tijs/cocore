@@ -7,6 +7,7 @@ import {
   resolveAppSessionToken,
   revokeAppSession,
 } from "@/integrations/auth/app-session-store.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { readAuthSessionToken } from "@/integrations/auth/cookie-parse.ts";
 
 export type AtprotoSessionContext = {
@@ -44,5 +45,5 @@ export function atprotoSessionForRequestEffect(
 export function getAtprotoSessionForRequest(
   request: Request,
 ): Promise<AtprotoSessionContext | undefined> {
-  return Effect.runPromise(atprotoSessionForRequestEffect(request));
+  return runTraced("auth.sessionForRequest", atprotoSessionForRequestEffect(request));
 }

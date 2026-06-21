@@ -1,12 +1,12 @@
 import { queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
-import { Effect } from "effect";
 import { z } from "zod";
 
 import {
   type AppviewAccountSummary,
   appviewListAccountsEffect,
 } from "@/integrations/appview/appview.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { authMiddleware } from "@/middleware/auth.ts";
 
 const directoryTypeaheadSchema = z.object({
@@ -18,7 +18,8 @@ const cocoreDirectoryTypeaheadServerFn = createServerFn({ method: "GET" })
   .inputValidator(directoryTypeaheadSchema)
   .middleware([authMiddleware])
   .handler(async ({ context, data }): Promise<{ accounts: AppviewAccountSummary[] }> => {
-    const res = await Effect.runPromise(
+    const res = await runTraced(
+      "appview.listAccounts",
       appviewListAccountsEffect({
         query: data.q,
         limit: data.limit ?? 20,
@@ -36,7 +37,8 @@ const cocoreDirectoryTypeaheadServerFn = createServerFn({ method: "GET" })
 const cocoreDirectoryTypeaheadPublicServerFn = createServerFn({ method: "GET" })
   .inputValidator(directoryTypeaheadSchema)
   .handler(async ({ data }): Promise<{ accounts: AppviewAccountSummary[] }> => {
-    const res = await Effect.runPromise(
+    const res = await runTraced(
+      "appview.listAccounts",
       appviewListAccountsEffect({
         query: data.q,
         limit: data.limit ?? 20,

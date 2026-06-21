@@ -28,7 +28,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { timingSafeEqual } from "node:crypto";
 import { isDid } from "@atcute/lexicons/syntax";
-import { Effect } from "effect";
+
+import { runTraced } from "@/lib/o11y.server.ts";
 
 import { restoreAtprotoSessionEffect } from "@/integrations/auth/atproto.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
@@ -88,7 +89,7 @@ async function wipeAllPdses(): Promise<PerDidReport[]> {
       continue;
     }
     try {
-      const session = await Effect.runPromise(restoreAtprotoSessionEffect(did));
+      const session = await runTraced("auth.restoreSession", restoreAtprotoSessionEffect(did));
       if (!session) {
         results.push({ did, ok: false, error: "session restore returned null" });
         continue;

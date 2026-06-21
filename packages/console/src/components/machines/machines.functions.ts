@@ -3,6 +3,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { Effect } from "effect";
 import { z } from "zod";
 
+import { runTraced } from "@/lib/o11y.server.ts";
 import type { Machine } from "@/components/machines/machines-data.ts";
 import type {
   FleetReceiptStats,
@@ -92,7 +93,8 @@ function emptyStats(): FleetReceiptStats {
 const listMyMachinesServerFn = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(({ context }) =>
-    Effect.runPromise(
+    runTraced(
+      "machines.listMine",
       Effect.gen(function* () {
         const fetchedAt = new Date().toISOString();
         const base = () => ({
@@ -212,7 +214,8 @@ const getMyMachineDetailServerFn = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .inputValidator(providerRkeySchema)
   .handler(({ context, data }) =>
-    Effect.runPromise(
+    runTraced(
+      "machines.getDetail",
       Effect.gen(function* () {
         const fetchedAt = new Date().toISOString();
         const did = context.did;

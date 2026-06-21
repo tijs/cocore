@@ -28,6 +28,7 @@ import {
   isAppviewForwardConfigured,
 } from "@/lib/appview-pds-forward.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { PdsPublishTransport } from "@/lib/pds-publish.server.ts";
 import { appviewGetProfileEffect } from "@/integrations/appview/appview.server.ts";
 
@@ -213,7 +214,10 @@ async function resolveProviderCredit(
   // Authoritative: the label of the machine we routed to.
   let machineLabel = machine.machineLabel?.trim() || null;
   try {
-    const result = await Effect.runPromise(Effect.either(appviewGetProfileEffect(did)));
+    const result = await runTraced(
+      "appview.getProfile",
+      Effect.either(appviewGetProfileEffect(did)),
+    );
     if (result._tag === "Right" && result.right) {
       handle = result.right.handle;
       displayName = result.right.displayName;

@@ -14,6 +14,7 @@
 import type { Did } from "@atcute/lexicons";
 import { Effect, Either } from "effect";
 
+import { runTraced } from "@/lib/o11y.server.ts";
 import { getAtprotoSessionForRequest } from "@/middleware/auth.server.ts";
 import { PairError, sharedStore } from "./pair-store.ts";
 import { providerSessionForDidEffect } from "./provider-session-from-oauth.server.ts";
@@ -122,7 +123,7 @@ export async function devicePairConfirmResponse(request: Request): Promise<Respo
       }),
     );
   }
-  return Effect.runPromise(devicePairConfirmLocalEffect(request));
+  return runTraced("devicePair.confirmLocal", devicePairConfirmLocalEffect(request));
 }
 
 function requestJsonEffect<T>(request: Request): Effect.Effect<T, unknown> {

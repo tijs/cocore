@@ -15,7 +15,8 @@
 
 import type { Did } from "@atcute/lexicons";
 import { isDid } from "@atcute/lexicons/syntax";
-import { Effect } from "effect";
+
+import { runTraced } from "@/lib/o11y.server.ts";
 
 import { restoreAtprotoSessionEffect } from "@/integrations/auth/atproto.server.ts";
 import { resolveBearerKey } from "@/lib/api-keys.server.ts";
@@ -113,7 +114,7 @@ function resolveCallerDid(request: Request): { did: Did } | Response {
 /** Legacy path: restore the console-owned DPoP session for `did`, or a 401.
  *  Used only when AppView forwarding is not configured. */
 async function restoreSessionOr401(did: Did) {
-  const session = await Effect.runPromise(restoreAtprotoSessionEffect(did));
+  const session = await runTraced("auth.restoreSession", restoreAtprotoSessionEffect(did));
   if (!session) {
     return jsonError(401, "underlying ATProto session no longer valid; re-authenticate");
   }

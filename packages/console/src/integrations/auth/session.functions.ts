@@ -10,10 +10,12 @@ import { readAuthSessionToken } from "@/integrations/auth/cookie-parse.ts";
 import { ensureMyProfile } from "@/lib/account-profile.server.ts";
 import { deriveChatStorageKey } from "@/lib/chat-storage-key.server.ts";
 import { fetchBlueskyPublicProfileFieldsEffect } from "@/lib/bluesky-public-profile.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { atprotoSessionForRequestEffect } from "@/middleware/auth.server.ts";
 
 const getSessionServerFn = createServerFn({ method: "GET" }).handler(() =>
-  Effect.runPromise(
+  runTraced(
+    "auth.getSession",
     Effect.gen(function* () {
       const request = getRequest();
       const ctx = yield* atprotoSessionForRequestEffect(request);
@@ -65,7 +67,8 @@ export const getSessionQueryOptions = queryOptions({
 // each API key (and we can add a "Sign out everywhere" affordance
 // later that clears the oauth_sessions row + revokes all keys).
 const signOutServerFn = createServerFn({ method: "POST" }).handler(() =>
-  Effect.runPromise(
+  runTraced(
+    "auth.signOut",
     Effect.sync(() => {
       const request = getRequest();
       const token = readAuthSessionToken(request.headers.get("cookie"));

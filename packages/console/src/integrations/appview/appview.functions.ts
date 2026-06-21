@@ -1,9 +1,12 @@
 import { mutationOptions, queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
-import { Effect } from "effect";
+import type { Effect } from "effect";
 import { z } from "zod";
 
+import { runTraced } from "@/lib/o11y.server.ts";
+
 import {
+  type AppviewClient,
   appviewGetReceiptsEffect,
   appviewGetSettlementsEffect,
   appviewListProvidersEffect,
@@ -28,8 +31,8 @@ const uriSchema = z.object({
   uri: z.string().min(1, "URI is required"),
 });
 
-function runAppview<R, E>(effect: Effect.Effect<R, E>): Promise<R> {
-  return Effect.runPromise(effect);
+function runAppview<A, E>(name: string, effect: Effect.Effect<A, E, AppviewClient>): Promise<A> {
+  return runTraced(`appview.${name}`, effect);
 }
 
 export type AppviewIndexedRecordEnriched = AppviewIndexedRecord & {
@@ -86,7 +89,7 @@ async function enrichIndexedRecords(
 }
 
 const listProvidersAppviewServerFn = createServerFn({ method: "GET" }).handler(async () => {
-  const data = await runAppview(appviewListProvidersEffect);
+  const data = await runAppview("listProviders", appviewListProvidersEffect);
   return { providers: await enrichIndexedRecords(data.providers) };
 });
 
@@ -99,7 +102,7 @@ export const listProvidersAppviewQueryOptions = queryOptions({
 const getReceiptsAppviewServerFn = createServerFn({ method: "GET" })
   .inputValidator(receiptsFiltersSchema)
   .handler(async ({ data }) => {
-    const result = await runAppview(appviewGetReceiptsEffect(data));
+    const result = await runAppview("getReceipts", appviewGetReceiptsEffect(data));
     return { receipts: await enrichIndexedRecords(result.receipts, { withRequester: true }) };
   });
 
@@ -114,7 +117,7 @@ export function getReceiptsAppviewQueryOptions(filters: z.infer<typeof receiptsF
 const getSettlementsAppviewServerFn = createServerFn({ method: "GET" })
   .inputValidator(settlementsFiltersSchema)
   .handler(async ({ data }) => {
-    const result = await runAppview(appviewGetSettlementsEffect(data));
+    const result = await runAppview("getSettlements", appviewGetSettlementsEffect(data));
     return { settlements: await enrichIndexedRecords(result.settlements) };
   });
 
@@ -130,11 +133,11 @@ export function getSettlementsAppviewQueryOptions(
 
 const verifyReceiptAppviewServerFn = createServerFn({ method: "POST" })
   .inputValidator(uriSchema)
-  .handler(({ data }) => runAppview(appviewVerifyReceiptEffect(data.uri)));
+  .handler(({ data }) => runAppview("verifyReceipt", appviewVerifyReceiptEffect(data.uri)));
 
 const verifySettlementAppviewServerFn = createServerFn({ method: "POST" })
   .inputValidator(uriSchema)
-  .handler(({ data }) => runAppview(appviewVerifySettlementEffect(data.uri)));
+  .handler(({ data }) => runAppview("verifySettlement", appviewVerifySettlementEffect(data.uri)));
 
 export type VerifyReceiptVariables = z.infer<typeof uriSchema>;
 export type VerifySettlementVariables = z.infer<typeof uriSchema>;
