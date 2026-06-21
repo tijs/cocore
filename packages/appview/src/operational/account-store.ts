@@ -22,6 +22,8 @@
 import Database from "better-sqlite3";
 import type { Database as DB } from "better-sqlite3";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -42,6 +44,15 @@ CREATE TABLE IF NOT EXISTS oauth_sessions (
   data TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS bug_reports (
+  ticket_id TEXT PRIMARY KEY,
+  did TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bug_reports_did ON bug_reports (did);
 `;
 
 export interface ApiKeyRow {
@@ -53,6 +64,14 @@ export interface ApiKeyRow {
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
+}
+
+export interface StoredBugReport {
+  ticketId: string;
+  did: string;
+  filePath: string;
+  sizeBytes: number;
+  createdAt: string;
 }
 
 interface DbRow {
@@ -119,8 +138,10 @@ export interface ResolvedKey {
 
 export class AccountStore {
   readonly db: DB;
+  private readonly dbPath: string;
 
   constructor(path: string) {
+    this.dbPath = path;
     this.db = new Database(path);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
@@ -225,6 +246,39 @@ export class AccountStore {
       .prepare(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`)
       .run(new Date().toISOString(), row.id);
     return { id: row.id, did: row.did, name: row.name };
+  }
+
+  // ---- Bug reports -------------------------------------------------
+  //
+  // Diagnostic bundle uploads from the menu-bar app. The BYTES go to the
+  // filesystem next to this store's DB file (durable wherever the DB is —
+  // the Railway volume); a metadata row records ticket id, uploader DID,
+  // on-disk path, and size. We never read or log the bundle's contents.
+  // Mirrors the console's bug-reports.server.ts so either service can
+  // accept an upload depending on where the agent's key was minted.
+
+  storeBugReport(input: { did: string; bytes: Buffer }): StoredBugReport {
+    const { did, bytes } = input;
+    const ticketId = `br_${randomBytes(5).toString("hex").slice(0, 8)}`;
+    const createdAt = new Date().toISOString();
+
+    const baseDir = this.dbPath === ":memory:" ? process.cwd() : dirname(this.dbPath);
+    const dir = join(baseDir, "bug-reports");
+    mkdirSync(dir, { recursive: true });
+    // Filename: ticket id + short DID fingerprint — namespaces per uploader
+    // without putting the DID on the visible path.
+    const didFp = createHash("sha256").update(did).digest("hex").slice(0, 12);
+    const filePath = join(dir, `${ticketId}-${didFp}.tar.gz`);
+    writeFileSync(filePath, bytes);
+
+    this.db
+      .prepare(
+        `INSERT INTO bug_reports (ticket_id, did, file_path, size_bytes, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(ticketId, did, filePath, bytes.byteLength, createdAt);
+
+    return { ticketId, did, filePath, sizeBytes: bytes.byteLength, createdAt };
   }
 
   // ---- OAuth sessions ----------------------------------------------

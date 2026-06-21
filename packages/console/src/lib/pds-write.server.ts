@@ -129,11 +129,21 @@ async function forwardOrNull(
   body: Record<string, unknown>,
 ): Promise<Response | null> {
   if (!isAppviewForwardConfigured()) return null;
-  const r = await forwardPdsWrite(op, body);
-  return new Response(await r.text(), {
-    status: r.status,
-    headers: { "content-type": "application/json" },
-  });
+  // The AppView now returns structured errors; relay them verbatim. A thrown
+  // fetch (AppView unreachable) would otherwise escape the route handler as an
+  // opaque 500, so collapse it to a legible 502.
+  try {
+    const r = await forwardPdsWrite(op, body);
+    return new Response(await r.text(), {
+      status: r.status,
+      headers: { "content-type": "application/json" },
+    });
+  } catch (e) {
+    return jsonError(
+      502,
+      `appview ${op} forward failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
 }
 
 // ---- createRecord ---------------------------------------------------

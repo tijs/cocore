@@ -122,13 +122,15 @@ final class AppState: ObservableObject {
     }
 
     func refreshStatus() async {
-        // `/api/agent/*` are console routes, so target Endpoints.consoleURL —
-        // NOT session.apiBase, which is the AppView origin (see Endpoints.swift)
-        // and 404s here. Trusting apiBase made every stale-session provider's
-        // status poll silently 404 against the AppView.
+        // Target session.apiBase — the service that paired us, which both holds
+        // our bearer key and serves /api/agent/status. Console-paired agents
+        // get the console; device-pair'd agents get the AppView. Using a fixed
+        // console URL would send AppView-keyed agents to a service that can't
+        // resolve their key (401).
         guard let s = session,
               let apiKey = s.apiKey,
-              let url = URL(string: "\(Endpoints.consoleURL)/api/agent/status")
+              let base = s.apiBase,
+              let url = URL(string: "\(base)/api/agent/status")
         else { return }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

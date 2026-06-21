@@ -297,11 +297,47 @@ type WriteCore<A> = (
   a: A,
 ) => Promise<HttpServerResponse.HttpServerResponse>;
 
-/** Restore the session for `did`, or the 401 response. */
+/** Invoke a write-core, converting an unexpected promise rejection into a
+ *  structured 502 rather than an Effect defect. `Effect.promise` treats a
+ *  rejection as an unrecoverable defect, which the HTTP server renders as an
+ *  opaque `{unhandled:true,message:"HTTPError"}` 500 — exactly what the
+ *  exchange-bootstrap proxyCreate failure surfaced as. A throw from
+ *  `session.handle`, `r.json()`, or the OAuth layer should be a legible
+ *  upstream error, not a mystery 500. */
+function runCore(
+  op: string,
+  run: () => Promise<HttpServerResponse.HttpServerResponse>,
+): Effect.Effect<HttpServerResponse.HttpServerResponse> {
+  return Effect.tryPromise({
+    try: run,
+    catch: (e) =>
+      err(502, {
+        error: "PdsWriteFailed",
+        message: `${op}: ${e instanceof Error ? e.message : String(e)}`,
+      }),
+  }).pipe(Effect.merge);
+}
+
+/** Restore the session for `did`, or a non-2xx response: 401 when the
+ *  session is simply gone, 502 when the restore itself throws (so a broken
+ *  OAuth layer is a legible error, not an unhandled defect). */
 function sessionOr401(ctx: PdsWriteContext, did: string) {
   return Effect.gen(function* () {
-    const session = yield* Effect.promise(() => restoreSession(ctx.oauth, did as Did));
-    if (!session)
+    const restored = yield* Effect.tryPromise({
+      try: () => restoreSession(ctx.oauth, did as Did),
+      catch: (e) => e,
+    }).pipe(Effect.either);
+    if (restored._tag === "Left") {
+      const e = restored.left;
+      return {
+        ok: false as const,
+        res: err(502, {
+          error: "SessionRestoreFailed",
+          message: `restore session for ${did}: ${e instanceof Error ? e.message : String(e)}`,
+        }),
+      };
+    }
+    if (!restored.right)
       return {
         ok: false as const,
         res: err(401, {
@@ -309,7 +345,7 @@ function sessionOr401(ctx: PdsWriteContext, did: string) {
           message: "underlying ATProto session no longer valid; re-authenticate",
         }),
       };
-    return { ok: true as const, session };
+    return { ok: true as const, session: restored.right };
   });
 }
 
@@ -340,7 +376,7 @@ function bearerRoute<A>(
     const a = parse(parsed.right as Record<string, unknown>);
     if (typeof a === "string") return err(400, { error: "InvalidRequest", message: a });
 
-    return yield* Effect.promise(() => core(ctx, resolved.did, session.session, a));
+    return yield* runCore(op, () => core(ctx, resolved.did, session.session, a));
   }).pipe(Effect.withSpan(`appview.pds.${op}`));
 }
 
@@ -375,7 +411,7 @@ function internalRoute<A>(
     const session = yield* sessionOr401(ctx, did);
     if (!session.ok) return session.res;
 
-    return yield* Effect.promise(() => core(ctx, did, session.session, a));
+    return yield* runCore(op, () => core(ctx, did, session.session, a));
   }).pipe(Effect.withSpan(`appview.internal.pds.${op}`));
 }
 

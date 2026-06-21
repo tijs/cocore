@@ -28,6 +28,8 @@ import { AccountStore } from "../operational/account-store.ts";
 import { buildInternalPdsRouter, buildPdsRouter } from "../pds/write.ts";
 import { Store } from "../store.ts";
 import { buildAccountRouter } from "./account-routes.ts";
+import { buildAgentBugReportRouter } from "./agent-bug-report.ts";
+import { buildAgentStatusRouter } from "./agent-status.ts";
 import { appviewNodeHandler, err, header, jsonBody, ok } from "./http-app.ts";
 import { buildReadRouter } from "./read-router.ts";
 
@@ -209,6 +211,25 @@ function buildAppviewRouters(
       internalRouters.push(buildInternalPdsRouter(pctx, opts.internalSecret));
     console.error(
       `appview: /pds write endpoints enabled${opts.internalSecret ? " (+ /internal/pds)" : ""}`,
+    );
+  }
+
+  // Menu-bar agent routes: `/api/agent/status` + `/api/agent/bug-report`. A
+  // device-pair'd agent's apiBase points at this AppView and its bearer key
+  // lives in this AccountStore, so serve these here (the console serves the
+  // same routes for console-paired agents — each resolves the keys it minted).
+  if (opts.accountStore) {
+    const agentStatus = buildAgentStatusRouter({
+      accounts: opts.accountStore,
+      store,
+      bridgeUrl: opts.bridgeUrl,
+    });
+    const agentBugReport = buildAgentBugReportRouter({ accounts: opts.accountStore });
+    routers.push(
+      agentStatus,
+      agentStatus.pipe(HttpRouter.prefixAll("/api")),
+      agentBugReport,
+      agentBugReport.pipe(HttpRouter.prefixAll("/api")),
     );
   }
 
