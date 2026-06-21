@@ -122,10 +122,13 @@ final class AppState: ObservableObject {
     }
 
     func refreshStatus() async {
+        // `/api/agent/*` are console routes, so target Endpoints.consoleURL —
+        // NOT session.apiBase, which is the AppView origin (see Endpoints.swift)
+        // and 404s here. Trusting apiBase made every stale-session provider's
+        // status poll silently 404 against the AppView.
         guard let s = session,
               let apiKey = s.apiKey,
-              let base = s.apiBase,
-              let url = URL(string: "\(base)/api/agent/status")
+              let url = URL(string: "\(Endpoints.consoleURL)/api/agent/status")
         else { return }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

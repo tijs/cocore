@@ -163,10 +163,11 @@ final class AgentSupervisor {
     /// session or the upload fails, so the user can still attach it by hand.
     func sendBugReport(note: String? = nil) async -> String? {
         guard let bundle = Self.generateBugReportBundle() else { return nil }
+        // `/api/agent/bug-report` is a console route — use Endpoints.consoleURL,
+        // not session.apiBase (the AppView origin, which has no such route).
         guard let session = SessionStore.load(),
               let apiKey = session.apiKey,
-              let base = session.apiBase,
-              let url = URL(string: "\(base)/api/agent/bug-report"),
+              let url = URL(string: "\(Endpoints.consoleURL)/api/agent/bug-report"),
               let body = try? Data(contentsOf: bundle)
         else {
             return bundle.absoluteString // local fallback
