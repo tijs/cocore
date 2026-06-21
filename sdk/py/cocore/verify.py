@@ -64,7 +64,10 @@ def verify_provider_for_seal(
     session_key: Optional[Mapping[str, str]] = None,
     require_session_key: bool = False,
     code_attested: bool = False,
-    require_code_attested: bool = False,
+    # SECURE DEFAULT (0.9.23): confidential requires the live APNs code-identity
+    # proof unless explicitly opted out (the cdHash is self-reported; the
+    # AMFI-gated push is the one leg an operator can't forge). Mirrors the TS SDK.
+    require_code_attested: bool = True,
     trust_anchor_der: Optional[bytes] = None,
     now: Optional[datetime] = None,
 ) -> VerifyResult:

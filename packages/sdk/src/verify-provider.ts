@@ -99,9 +99,13 @@ export interface VerifyProviderOptions {
    *  advisor-asserted — the deliberate coordinator-trust carve-out the
    *  confidential tier accepts (see infra/mdm + the parity ADR). */
   codeAttested?: boolean;
-  /** Require {@link codeAttested} for the confidential tier. Set this when the
-   *  deployment enforces APNs code-identity (the advisor has APNs configured).
-   *  Default false so callers against a non-enforcing advisor keep working. */
+  /** Require {@link codeAttested} for the confidential tier. **Default true**
+   *  (0.9.23): confidentiality is only as strong as binary measurement, and the
+   *  cdHash is self-reported — the AMFI-gated push is the one leg an operator
+   *  can't forge, so we require it by default. Set this to `false` ONLY when
+   *  targeting a non-APNs advisor, explicitly accepting the weaker proof (a
+   *  confidential result then rests on the self-reported cdHash + MDA chain,
+   *  which a forked binary on the operator's own attested device can satisfy). */
   requireCodeAttested?: boolean;
   /** Clock seam for tests. */
   now?: () => Date;
@@ -154,6 +158,15 @@ export async function verifyProviderForSeal(
   opts: VerifyProviderOptions = {},
 ): Promise<ProviderVerifyResult> {
   const requireConfidential = opts.requireConfidential ?? false;
+  // SECURE DEFAULT (0.9.23): the confidential tier REQUIRES the live APNs
+  // code-identity proof unless the caller explicitly opts out. The cdHash in the
+  // attestation is self-reported — a forked binary can copy a blessed cdHash
+  // string and (with the operator's own genuine MDA chain) satisfy every other
+  // gate. The AMFI-gated push challenge is the one leg an operator cannot forge
+  // (they don't hold the cocore team's signing identity + APNs topic), so we
+  // require it by default. A caller targeting a non-APNs advisor must opt out
+  // explicitly (requireCodeAttested: false) and thereby accept the weaker proof.
+  const requireCodeAttested = opts.requireCodeAttested ?? true;
   const now = opts.now ? opts.now() : new Date();
   const knownGood = new Set<string>(
     [...(opts.knownGoodCdHashes ?? [])].map((h) => h.toLowerCase()),
@@ -386,9 +399,9 @@ export async function verifyProviderForSeal(
   // --- 8. APNs code identity (advisor-asserted, see opts.codeAttested). ---
   // The un-forgeable complement to the self-reported cdHash: a fork can claim a
   // blessed cdHash, but cannot answer the advisor's AMFI-gated push challenge.
-  // Only enforced when the caller opts in (the advisor runs APNs); off by
-  // default so non-enforcing deployments are unaffected.
-  if (opts.requireCodeAttested && opts.codeAttested !== true) {
+  // REQUIRED by default for confidential (0.9.23) — opt out only against a
+  // non-enforcing advisor, accepting the weaker (self-reported-cdHash) proof.
+  if (requireCodeAttested && opts.codeAttested !== true) {
     block(
       "code-not-attested",
       "provider has not passed a live APNs code-identity challenge (advisor codeAttested is not true)",

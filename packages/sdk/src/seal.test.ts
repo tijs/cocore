@@ -72,6 +72,9 @@ test.skipIf(!existsSync(CONF_FIXTURE))(
         knownGoodEngineLibHashes: [f.knownGoodEngineLibHash],
         osFloor: f.osFloor,
         trustAnchorDer: Uint8Array.from(Buffer.from(f.rootDerB64, "base64")),
+        // Offline fixture (no live advisor): opt out of the APNs code-identity
+        // leg, which is asserted separately (see the 0.9.23 secure default).
+        requireCodeAttested: false,
         now: () => new Date(),
       },
     );

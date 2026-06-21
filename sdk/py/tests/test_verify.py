@@ -51,6 +51,9 @@ def test_cross_language_confidential_pass():
         att["mdaCertChain"],
         require_confidential=True,
         require_session_key=True,
+        # Offline fixture: the live APNs code-identity leg is asserted separately
+        # (see the 0.9.23 secure default), so opt out of it here.
+        require_code_attested=False,
         known_good_cdhashes=[f["knownGoodCdHash"]],
         known_good_metallib_hashes=[f["knownGoodMetallibHash"]],
         known_good_engine_lib_hashes=[f["knownGoodEngineLibHash"]],
@@ -70,6 +73,7 @@ def test_cross_language_confidential_pass():
         att,
         att["mdaCertChain"],
         require_confidential=True,
+        require_code_attested=False,
         known_good_cdhashes=[f["knownGoodCdHash"]],
         known_good_metallib_hashes=[f["knownGoodMetallibHash"]],
         os_floor=f["osFloor"],
@@ -135,8 +139,11 @@ def test_require_code_attested_gate():
     assert "code-not-attested" in codes(missing)
     ok = verify_provider_for_seal(att, None, require_code_attested=True, code_attested=True)
     assert "code-not-attested" not in codes(ok)
-    # Default (not required) never blocks on code-attestation.
-    off = verify_provider_for_seal(att, None)
+    # SECURE DEFAULT (0.9.23): code-attestation is REQUIRED by default → blocks.
+    default_required = verify_provider_for_seal(att, None)
+    assert "code-not-attested" in codes(default_required)
+    # Explicit opt-out (non-APNs advisor) no longer blocks.
+    off = verify_provider_for_seal(att, None, require_code_attested=False)
     assert "code-not-attested" not in codes(off)
 
 

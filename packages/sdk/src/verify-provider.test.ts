@@ -140,8 +140,15 @@ test("requireCodeAttested gates on the advisor's APNs code-identity standing", a
     codeAttested: true,
   });
   assert.ok(!codes(ok.findings).includes("code-not-attested"));
-  // Not required (default) → never blocks even when not code-attested.
-  const off = await verifyProviderForSeal(att, undefined, base);
+  // SECURE DEFAULT (0.9.23): code-attestation is REQUIRED by default, so a
+  // confidential seal blocks when not code-attested even without opting in.
+  const def = await verifyProviderForSeal(att, undefined, base);
+  assert.ok(codes(def.findings).includes("code-not-attested"));
+  // Explicit opt-out (non-APNs advisor) → no longer blocks.
+  const off = await verifyProviderForSeal(att, undefined, {
+    ...base,
+    requireCodeAttested: false,
+  });
   assert.ok(!codes(off.findings).includes("code-not-attested"));
 });
 
@@ -410,6 +417,10 @@ test.skipIf(!existsSync(CONF_FIXTURE))(
     const withKey = await verifyProviderForSeal(att, chain, {
       requireConfidential: true,
       requireSessionKey: true,
+      // This fixture exercises the OFFLINE crypto (Rust-signed attestation +
+      // MDA chain + session key); the live APNs code-identity leg is asserted
+      // separately by the advisor, so opt out of it here.
+      requireCodeAttested: false,
       knownGoodCdHashes: [f.knownGoodCdHash],
       knownGoodMetallibHashes: [f.knownGoodMetallibHash],
       knownGoodEngineLibHashes: [f.knownGoodEngineLibHash],
@@ -432,6 +443,7 @@ test.skipIf(!existsSync(CONF_FIXTURE))(
     // selfSignature-authenticated long-lived encryptionPubKey.
     const noKey = await verifyProviderForSeal(att, chain, {
       requireConfidential: true,
+      requireCodeAttested: false,
       knownGoodCdHashes: [f.knownGoodCdHash],
       knownGoodMetallibHashes: [f.knownGoodMetallibHash],
       osFloor: f.osFloor,

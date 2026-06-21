@@ -50,24 +50,33 @@ export function makeCodeNonce(): string {
 }
 
 /** Reconstruct the canonical bytes the provider SE-signed for a code-identity
- *  challenge: `canonicalize({ nonce })` — byte-identical to the provider's
- *  `build_code_attestation_response`. */
-export function codeSignedPayloadFor(nonce: string): Uint8Array {
-  return new TextEncoder().encode(canonicalize({ nonce }));
+ *  challenge — byte-identical to the provider's `build_code_attestation_response`.
+ *  When `cdHash` is provided (0.9.23+), it is BOUND into the signed payload as
+ *  `canonicalize({ cdHash, nonce })`, so the proof of code identity is tied to a
+ *  specific measured binary rather than just "answered the push". The advisor
+ *  reconstructs with the provider's REGISTERED cdHash, so a provider that
+ *  registers cdHash X but signs over a different one fails to verify. Falls back
+ *  to `canonicalize({ nonce })` when no cdHash is available (legacy/degenerate). */
+export function codeSignedPayloadFor(nonce: string, cdHash?: string): Uint8Array {
+  const payload = cdHash ? { cdHash, nonce } : { nonce };
+  return new TextEncoder().encode(canonicalize(payload));
 }
 
 /** Verify a CodeAttestationResponse signature against the provider's P-256
  *  attestation public key. The recovered nonce must equal `expectedNonce`
- *  (caller checks freshness) and the SE signature must verify over the
- *  canonical `{ nonce }`. Resolves false on any shape/verify error. */
+ *  (caller checks freshness) and the SE signature must verify over the canonical
+ *  payload — `{ cdHash, nonce }` when `cdHash` is given (0.9.23+), binding the
+ *  proof to the registered measurement. Resolves false on any shape/verify
+ *  error. */
 export async function verifyCodeAttestation(
   resp: CodeAttestationResponse,
   expectedNonce: string,
   attestationPubKeyB64: string,
+  cdHash?: string,
 ): Promise<boolean> {
   if (resp.nonce !== expectedNonce) return false;
   const sigDerB64 = bytesToBase64(resp.signature);
-  const message = codeSignedPayloadFor(resp.nonce);
+  const message = codeSignedPayloadFor(resp.nonce, cdHash);
   try {
     return await verifyP256(attestationPubKeyB64, sigDerB64, message);
   } catch {

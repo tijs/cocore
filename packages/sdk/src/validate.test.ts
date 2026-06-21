@@ -292,6 +292,28 @@ async function signedReceipt(
   return { ...draft, enclaveSignature: base64Encode(sig) };
 }
 
+/** An attestation whose `selfSignature` actually verifies against `publicKey`
+ *  (H1: verifyForChargeStrict now authenticates the attestation, not just the
+ *  receipt). */
+async function signedAttestation(
+  kp: { publicKeyB64: string; signRaw: (msg: Uint8Array) => Promise<Uint8Array> },
+  overrides: Partial<AttestationRecord> = {},
+): Promise<AttestationRecord> {
+  const draft = fixtureAttestation({
+    publicKey: kp.publicKeyB64,
+    selfSignature: "",
+    ...overrides,
+  });
+  const {
+    selfSignature: _omit,
+    $type: _t,
+    ...signable
+  } = draft as unknown as Record<string, unknown>;
+  const msg = new TextEncoder().encode(canonicalize(signable));
+  const sig = await kp.signRaw(msg);
+  return { ...draft, selfSignature: base64Encode(sig) };
+}
+
 test("verifyReceiptStrict: valid signature passes", async () => {
   const kp = await genP256Keypair();
   const att = fixtureAttestation({ publicKey: kp.publicKeyB64 });
@@ -340,7 +362,7 @@ test("verifyReceiptStrict: malformed publicKey surfaces signature-verify-error",
 
 test("verifyForChargeStrict: appends a sig check on top of verifyForCharge", async () => {
   const kp = await genP256Keypair();
-  const att = fixtureAttestation({ publicKey: kp.publicKeyB64 });
+  const att = await signedAttestation(kp);
   const receipt = await signedReceipt(kp.publicKeyB64, kp.signRaw);
   const job = fixtureJob();
   const auth = fixtureAuth();
@@ -365,7 +387,7 @@ test("verifyForChargeStrict: appends a sig check on top of verifyForCharge", asy
 
 test("verifyForChargeStrict: bad sig fails before charging", async () => {
   const kp = await genP256Keypair();
-  const att = fixtureAttestation({ publicKey: kp.publicKeyB64 });
+  const att = await signedAttestation(kp);
   const receipt = await signedReceipt(kp.publicKeyB64, kp.signRaw);
   // Tamper with the price after signing — the sig is now stale.
   const tampered = { ...receipt, price: { amount: 99, currency: "USD" } };
