@@ -17,7 +17,7 @@
 //     enclave, not just well-shaped.
 
 import { canonicalize } from "./canonical.ts";
-import { verifyReceiptSignature } from "./p256.ts";
+import { verifyAttestationSignature, verifyReceiptSignature } from "./p256.ts";
 import type {
   AttestationRecord,
   JobRecord,
@@ -341,6 +341,40 @@ export async function verifyForChargeStrict(
         "enclaveSignature did not verify against attestation.publicKey",
       );
     }
+  }
+
+  // H1 (0.9.23): authenticate the ATTESTATION itself before settling against it.
+  // Verifying the receipt against `attestation.publicKey` is meaningless if the
+  // attestation is forged — a provider could mint a fresh attestation with a
+  // self-chosen key and sign the receipt with it. Require the attestation's own
+  // selfSignature to verify against its publicKey, so the posture fields (and
+  // the key the receipt is checked against) are authentically the enclave's.
+  // (The owner-DID binding — this attestation belongs to the provider being
+  // paid — is enforced by the exchange, which holds both record repos.)
+  if (attestation.selfSignature && attestation.selfSignature.length > 0) {
+    let attestOk: boolean;
+    try {
+      attestOk = await verifyAttestationSignature(
+        attestation as unknown as { selfSignature?: string } & Record<string, unknown>,
+        attestation.publicKey,
+      );
+    } catch (e) {
+      err(
+        findings,
+        "attestation-verify-error",
+        `attestation selfSignature verification threw: ${(e as Error).message}`,
+      );
+      return { ok: ok(findings), findings };
+    }
+    if (!attestOk) {
+      err(
+        findings,
+        "attestation-selfsig-invalid",
+        "attestation.selfSignature did not verify against attestation.publicKey",
+      );
+    }
+  } else {
+    err(findings, "attestation-unsigned", "attestation is missing selfSignature");
   }
   return { ok: ok(findings), findings };
 }

@@ -415,7 +415,19 @@ export function handleConnection(
         }
         const entry = registry.get(registeredDid, registeredMachineId);
         if (!entry) return;
-        const ok = await verifyCodeAttestation(msg, pendingCodeNonce, entry.attestationPubKey);
+        // Bind the proof to the REGISTERED cdHash (0.9.23): the agent SE-signs
+        // {cdHash, nonce} over its measured cdHash, and we reconstruct with the
+        // cdHash it registered — so the code-identity proof is tied to a specific
+        // measured binary, not just "answered the push". A confidential machine
+        // always reports a cdHash; if it's absent we can't bind, so fail closed.
+        const ok =
+          entry.cdHash != null &&
+          (await verifyCodeAttestation(
+            msg,
+            pendingCodeNonce,
+            entry.attestationPubKey,
+            entry.cdHash,
+          ));
         if (!ok) {
           console.error(
             `[ws] BAD code-attestation did=${registeredDid} machine=${registeredMachineId}`,

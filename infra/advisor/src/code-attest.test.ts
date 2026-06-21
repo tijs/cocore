@@ -128,6 +128,22 @@ describe("verifyCodeAttestation", () => {
     const bad = { ...resp, signature: [...sig.slice(0, -1), (sig.at(-1)! ^ 1) & 0xff] };
     expect(await verifyCodeAttestation(bad, nonce, pubB64)).toBe(false);
   });
+
+  it("BINDS the cdHash (0.9.23): a {cdHash,nonce} signature verifies only against the same cdHash", async () => {
+    const { key, pubB64 } = await p256KeyPair();
+    const nonce = makeCodeNonce();
+    const cd = "57bd6dfa8daf45c187249a4c70a2b6c396ab9fc0";
+    // Agent signs over {cdHash, nonce} (its measured cdHash).
+    const sig = await signDer(key, codeSignedPayloadFor(nonce, cd));
+    const resp: CodeAttestationResponse = { nonce, signature: sig };
+
+    // Advisor reconstructs with the SAME (registered) cdHash → verifies.
+    expect(await verifyCodeAttestation(resp, nonce, pubB64, cd)).toBe(true);
+    // A different registered cdHash → reject (the proof is bound to the measurement).
+    expect(await verifyCodeAttestation(resp, nonce, pubB64, "deadbeef")).toBe(false);
+    // Reconstructing as nonce-only (legacy) also rejects a bound proof.
+    expect(await verifyCodeAttestation(resp, nonce, pubB64)).toBe(false);
+  });
 });
 
 describe("confidential gate is per-machine earned — ALWAYS requires code-attestation", () => {

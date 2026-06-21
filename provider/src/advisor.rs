@@ -150,6 +150,11 @@ impl AdvisorClient {
             register.machine_id = provider_rkey.map(str::to_string);
         }
 
+        // Our measured cdHash, captured before `register` is moved into the
+        // frame — bound into every code-attestation response (0.9.23) so the
+        // code-identity proof is tied to this specific binary.
+        let my_cd_hash: Option<String> = register.cd_hash.clone();
+
         // Register
         let payload = serde_json::to_string(&AdvisorMessage::Register(register))
             .map_err(|e| ProviderError::Advisor(e.to_string()))?;
@@ -447,7 +452,9 @@ impl AdvisorClient {
                 // so the advisor can mark this measured binary `codeAttested`.
                 // Inert when `push_rx` is None (non-apns / headless).
                 Some(payload) = next_push(&mut push_rx) => {
-                    match handle_code_challenge_payload(encryption, signer, &payload) {
+                    // Bind our measured cdHash (the value we registered) into the
+                    // signed code-attestation, so the proof is tied to this binary.
+                    match handle_code_challenge_payload(encryption, signer, &payload, my_cd_hash.as_deref()) {
                         Ok(Some(resp)) => {
                             match serde_json::to_string(&AdvisorMessage::CodeAttestationResponse(resp)) {
                                 Ok(s) => {
@@ -1349,6 +1356,7 @@ pub fn recover_code_challenge(
     signer: &dyn SigningIdentity,
     advisor_eph_pub_b64: &str,
     sealed_b64: &str,
+    cd_hash: Option<&str>,
 ) -> Result<CodeAttestationResponse> {
     use base64::Engine as _;
     let sealed = base64::engine::general_purpose::STANDARD
@@ -1359,7 +1367,7 @@ pub fn recover_code_challenge(
         .map_err(|e| ProviderError::Advisor(format!("code challenge open: {e}")))?;
     let nonce = String::from_utf8(nonce_bytes)
         .map_err(|e| ProviderError::Advisor(format!("code challenge nonce utf8: {e}")))?;
-    build_code_attestation_response(signer, &nonce)
+    build_code_attestation_response(signer, &nonce, cd_hash)
 }
 
 /// Extract the code-identity challenge from an APNs push payload (the raw JSON
@@ -1395,9 +1403,12 @@ pub fn handle_code_challenge_payload(
     encryption: &ProviderKeypair,
     signer: &dyn SigningIdentity,
     json_str: &str,
+    cd_hash: Option<&str>,
 ) -> Result<Option<CodeAttestationResponse>> {
     match parse_code_challenge_payload(json_str) {
-        Some((epk, sealed)) => recover_code_challenge(encryption, signer, &epk, &sealed).map(Some),
+        Some((epk, sealed)) => {
+            recover_code_challenge(encryption, signer, &epk, &sealed, cd_hash).map(Some)
+        }
         None => Ok(None),
     }
 }
@@ -1413,8 +1424,21 @@ pub fn handle_code_challenge_payload(
 pub fn build_code_attestation_response(
     signer: &dyn SigningIdentity,
     recovered_nonce: &str,
+    cd_hash: Option<&str>,
 ) -> Result<CodeAttestationResponse> {
-    let payload = json!({ "nonce": recovered_nonce });
+    // 0.9.23: BIND the measured cdHash into the signed payload so the proof of
+    // code identity is tied to a specific binary, not just "answered the push".
+    // We sign over our OWN measured cdHash (the same value we put in Register);
+    // the advisor reconstructs with the cdHash we registered, so a mismatch
+    // between the registered and signed cdHash fails verification. Canonical
+    // sort-key order puts `cdHash` before `nonce`; the advisor's
+    // `canonicalize({ cdHash, nonce })` matches byte-for-byte. Falls back to
+    // `{ nonce }` only when no cdHash is available (a confidential machine
+    // always has one).
+    let payload = match cd_hash {
+        Some(cd) => json!({ "cdHash": cd, "nonce": recovered_nonce }),
+        None => json!({ "nonce": recovered_nonce }),
+    };
     let canonical = to_canonical_bytes(&payload)
         .map_err(|e| ProviderError::Advisor(format!("canonical: {e}")))?;
     let sig = signer
@@ -1564,15 +1588,16 @@ mod tests {
     }
 
     #[test]
-    fn code_attestation_response_signature_verifies() {
-        // The SE signature over {nonce} must verify against the signer's public
-        // key over the SAME canonical bytes the advisor's verifier reconstructs.
+    fn code_attestation_response_binds_cdhash() {
+        // 0.9.23: the SE signature is over {cdHash, nonce}, BOUND to the measured
+        // binary — it must verify over those canonical bytes AND must NOT verify
+        // over {nonce} alone (proving the cdHash is actually in the signed payload).
         let _g = identity_lock();
         let signer = load_or_create_identity().unwrap();
-        let resp = build_code_attestation_response(&*signer, "deadbeefcafe").unwrap();
+        let cd = "57bd6dfa8daf45c187249a4c70a2b6c396ab9fc0";
+        let resp = build_code_attestation_response(&*signer, "deadbeefcafe", Some(cd)).unwrap();
         assert_eq!(resp.nonce, "deadbeefcafe");
 
-        let canonical = to_canonical_bytes(&json!({ "nonce": resp.nonce })).unwrap();
         let pub_raw = B64.decode(signer.public_key_b64()).unwrap();
         let mut uncompressed = [0u8; 65];
         uncompressed[0] = 0x04;
@@ -1580,8 +1605,26 @@ mod tests {
         let point = EncodedPoint::from_bytes(uncompressed).unwrap();
         let vk = VerifyingKey::from_encoded_point(&point).unwrap();
         let sig = Signature::from_der(&resp.signature).unwrap();
-        vk.verify(&canonical, &sig)
-            .expect("code attestation response must verify");
+
+        // Verifies over {cdHash, nonce} (advisor reconstructs this with the
+        // registered cdHash).
+        let bound = to_canonical_bytes(&json!({ "cdHash": cd, "nonce": resp.nonce })).unwrap();
+        vk.verify(&bound, &sig)
+            .expect("code attestation must verify over {cdHash, nonce}");
+        // Does NOT verify over {nonce} alone — the binding is real.
+        let unbound = to_canonical_bytes(&json!({ "nonce": resp.nonce })).unwrap();
+        assert!(
+            vk.verify(&unbound, &sig).is_err(),
+            "a cdHash-bound proof must not verify as nonce-only"
+        );
+        // Nor over a DIFFERENT cdHash (a fork that registers a blessed cdHash but
+        // signs its own would fail the advisor's reconstruction).
+        let other =
+            to_canonical_bytes(&json!({ "cdHash": "deadbeef", "nonce": resp.nonce })).unwrap();
+        assert!(
+            vk.verify(&other, &sig).is_err(),
+            "proof must not verify against a different cdHash"
+        );
     }
 
     #[test]
@@ -1601,12 +1644,19 @@ mod tests {
             .unwrap();
         let sealed_b64 = B64.encode(&sealed);
 
-        let resp = recover_code_challenge(&k, &*signer, &advisor_eph.public_key_b64(), &sealed_b64)
-            .unwrap();
+        let cd = "abc123def456";
+        let resp = recover_code_challenge(
+            &k,
+            &*signer,
+            &advisor_eph.public_key_b64(),
+            &sealed_b64,
+            Some(cd),
+        )
+        .unwrap();
         assert_eq!(resp.nonce, nonce);
 
-        // Signature verifies against the attestation public key.
-        let canonical = to_canonical_bytes(&json!({ "nonce": resp.nonce })).unwrap();
+        // Signature verifies against the attestation public key over {cdHash, nonce}.
+        let canonical = to_canonical_bytes(&json!({ "cdHash": cd, "nonce": resp.nonce })).unwrap();
         let pub_raw = B64.decode(signer.public_key_b64()).unwrap();
         let mut uncompressed = [0u8; 65];
         uncompressed[0] = 0x04;
@@ -1636,7 +1686,7 @@ mod tests {
         .to_string();
 
         assert!(parse_code_challenge_payload(&payload).is_some());
-        let resp = handle_code_challenge_payload(&k, &*signer, &payload)
+        let resp = handle_code_challenge_payload(&k, &*signer, &payload, Some("cd0011"))
             .unwrap()
             .expect("payload carries a code challenge");
         assert_eq!(resp.nonce, nonce);
@@ -1644,9 +1694,11 @@ mod tests {
         // A non-challenge push (plain aps) is ignored, not an error.
         let plain = json!({ "aps": { "content-available": 1 } }).to_string();
         assert!(parse_code_challenge_payload(&plain).is_none());
-        assert!(handle_code_challenge_payload(&k, &*signer, &plain)
-            .unwrap()
-            .is_none());
+        assert!(
+            handle_code_challenge_payload(&k, &*signer, &plain, Some("cd0011"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1662,8 +1714,13 @@ mod tests {
             .seal_to(&k.public_key_b64(), b"deadbeef")
             .unwrap();
         let sealed_b64 = B64.encode(&sealed);
-        let err =
-            recover_code_challenge(&not_k, &*signer, &advisor_eph.public_key_b64(), &sealed_b64);
+        let err = recover_code_challenge(
+            &not_k,
+            &*signer,
+            &advisor_eph.public_key_b64(),
+            &sealed_b64,
+            Some("cd00"),
+        );
         assert!(err.is_err(), "opening with the wrong K must fail");
     }
 
