@@ -46,9 +46,14 @@ impl Default for CodeSignInfo {
 }
 
 // Code-signing flags (xnu osfmk `cs_blobs.h`). Only the three the
-// confidential posture depends on.
+// confidential posture depends on. macOS-only: they're consumed solely by the
+// `imp` module below, which is itself `cfg(target_os = "macos")` — so on the
+// Linux CI they'd be dead code and trip clippy's `-D warnings`.
+#[cfg(target_os = "macos")]
 const CS_GET_TASK_ALLOW: u32 = 0x0000_0004;
+#[cfg(target_os = "macos")]
 const CS_REQUIRE_LV: u32 = 0x0000_2000; // library validation
+#[cfg(target_os = "macos")]
 const CS_RUNTIME: u32 = 0x0001_0000; // hardened runtime
 
 #[cfg(target_os = "macos")]

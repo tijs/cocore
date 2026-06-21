@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { createServer, type Server } from "node:http";
+import { describe, expect, it } from "vitest";
+import { HttpRouter } from "@effect/platform";
 
 import { AccountStore } from "../operational/account-store.ts";
 import type { AppviewOAuthClient } from "../auth/oauth-client.ts";
-import { internalPdsRoutes, pdsRoutes } from "./write.ts";
+import { withAppviewServer } from "../api/http-app.ts";
+import { buildInternalPdsRouter, buildPdsRouter } from "./write.ts";
 
 const ALICE = "did:plc:alice";
 const INTERNAL_SECRET = "test-internal-secret";
@@ -56,42 +57,21 @@ function fakeOauth(
   } as unknown as AppviewOAuthClient;
 }
 
-function mount(
-  accounts: AccountStore,
-  oauth: AppviewOAuthClient,
-): Promise<{ base: string; server: Server }> {
-  const ctx = { accounts, oauth };
-  const routes = { ...pdsRoutes(ctx), ...internalPdsRoutes(ctx, INTERNAL_SECRET) };
-  const server = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    const h = routes[url.pathname];
-    if (!h) {
-      res.writeHead(404).end("{}");
-      return;
-    }
-    void h(req, res, url);
-  });
-  return new Promise((resolve) => {
-    server.listen(0, () => {
-      const addr = server.address();
-      if (typeof addr === "string" || !addr) throw new Error("no addr");
-      resolve({ base: `http://127.0.0.1:${addr.port}`, server });
-    });
-  });
-}
-
-let server: Server | undefined;
-afterEach(() => {
-  server?.close();
-  server = undefined;
-});
-
-async function setup(oauth?: AppviewOAuthClient): Promise<{ base: string; secret: string }> {
+/** Build an in-memory AccountStore + router and hand the running server's
+ *  base URL (and the minted bearer secret) to `fn`. The server is torn
+ *  down when `fn` resolves. */
+async function withServer(
+  oauth: AppviewOAuthClient | undefined,
+  fn: (base: string, secret: string) => Promise<void>,
+): Promise<void> {
   const accounts = new AccountStore(":memory:");
   const { secret } = accounts.createKey({ did: ALICE, name: "agent" });
-  const m = await mount(accounts, oauth ?? fakeOauth());
-  server = m.server;
-  return { base: m.base, secret };
+  const ctx = { accounts, oauth: oauth ?? fakeOauth() };
+  const router = HttpRouter.empty.pipe(
+    HttpRouter.concat(buildPdsRouter(ctx)),
+    HttpRouter.concat(buildInternalPdsRouter(ctx, INTERNAL_SECRET)),
+  );
+  await withAppviewServer(router, (base) => fn(base, secret));
 }
 
 function post(base: string, path: string, secret: string | null, body: unknown): Promise<Response> {
@@ -107,70 +87,77 @@ function post(base: string, path: string, secret: string | null, body: unknown):
 
 describe("/pds/* write endpoints", () => {
   it("createRecord writes via the session and returns uri/cid/commit", async () => {
-    const { base, secret } = await setup();
-    const r = await post(base, "/pds/createRecord", secret, {
-      collection: "dev.cocore.compute.receipt",
-      record: { foo: 1 },
+    await withServer(undefined, async (base, secret) => {
+      const r = await post(base, "/pds/createRecord", secret, {
+        collection: "dev.cocore.compute.receipt",
+        record: { foo: 1 },
+      });
+      expect(r.status).toBe(200);
+      expect((await r.json()) as unknown).toMatchObject({ cid: "bafycid", commit: { rev: "r" } });
     });
-    expect(r.status).toBe(200);
-    expect((await r.json()) as unknown).toMatchObject({ cid: "bafycid", commit: { rev: "r" } });
   });
 
   it("putRecord requires an rkey and echoes it back", async () => {
-    const { base, secret } = await setup();
-    const ok = await post(base, "/pds/putRecord", secret, {
-      collection: "dev.cocore.compute.provider",
-      rkey: "self",
-      record: { a: 1 },
-    });
-    expect(((await ok.json()) as { uri: string }).uri).toContain("/self");
+    await withServer(undefined, async (base, secret) => {
+      const ok = await post(base, "/pds/putRecord", secret, {
+        collection: "dev.cocore.compute.provider",
+        rkey: "self",
+        record: { a: 1 },
+      });
+      expect(((await ok.json()) as { uri: string }).uri).toContain("/self");
 
-    const noRkey = await post(base, "/pds/putRecord", secret, {
-      collection: "dev.cocore.compute.provider",
-      record: {},
+      const noRkey = await post(base, "/pds/putRecord", secret, {
+        collection: "dev.cocore.compute.provider",
+        record: {},
+      });
+      expect(noRkey.status).toBe(400);
     });
-    expect(noRkey.status).toBe(400);
   });
 
   it("deleteRecord returns the uri", async () => {
-    const { base, secret } = await setup();
-    const r = await post(base, "/pds/deleteRecord", secret, {
-      collection: "dev.cocore.account.profile",
-      rkey: "self",
+    await withServer(undefined, async (base, secret) => {
+      const r = await post(base, "/pds/deleteRecord", secret, {
+        collection: "dev.cocore.account.profile",
+        rkey: "self",
+      });
+      expect(r.status).toBe(200);
+      expect(((await r.json()) as { uri: string }).uri).toBe(
+        `at://${ALICE}/dev.cocore.account.profile/self`,
+      );
     });
-    expect(r.status).toBe(200);
-    expect(((await r.json()) as { uri: string }).uri).toBe(
-      `at://${ALICE}/dev.cocore.account.profile/self`,
-    );
   });
 
   it("401s without a valid bearer key", async () => {
-    const { base } = await setup();
-    expect((await post(base, "/pds/createRecord", null, {})).status).toBe(401);
-    expect((await post(base, "/pds/createRecord", "cocore-bogus", {})).status).toBe(401);
+    await withServer(undefined, async (base) => {
+      expect((await post(base, "/pds/createRecord", null, {})).status).toBe(401);
+      expect((await post(base, "/pds/createRecord", "cocore-bogus", {})).status).toBe(401);
+    });
   });
 
   it("401s when the OAuth session can't be restored", async () => {
-    const { base, secret } = await setup(fakeOauth({ nullFor: new Set([ALICE]) }));
-    const r = await post(base, "/pds/createRecord", secret, {
-      collection: "dev.cocore.compute.job",
-      record: {},
+    await withServer(fakeOauth({ nullFor: new Set([ALICE]) }), async (base, secret) => {
+      const r = await post(base, "/pds/createRecord", secret, {
+        collection: "dev.cocore.compute.job",
+        record: {},
+      });
+      expect(r.status).toBe(401);
     });
-    expect(r.status).toBe(401);
   });
 
   it("400s a collection outside dev.cocore.*", async () => {
-    const { base, secret } = await setup();
-    const r = await post(base, "/pds/createRecord", secret, {
-      collection: "app.bsky.feed.post",
-      record: {},
+    await withServer(undefined, async (base, secret) => {
+      const r = await post(base, "/pds/createRecord", secret, {
+        collection: "app.bsky.feed.post",
+        record: {},
+      });
+      expect(r.status).toBe(400);
     });
-    expect(r.status).toBe(400);
   });
 
   it("405s on the wrong method", async () => {
-    const { base } = await setup();
-    expect((await fetch(`${base}/pds/createRecord`)).status).toBe(405);
+    await withServer(undefined, async (base) => {
+      expect((await fetch(`${base}/pds/createRecord`)).status).toBe(405);
+    });
   });
 });
 
@@ -187,42 +174,46 @@ describe("/internal/pds/* (trusted-DID write)", () => {
   }
 
   it("writes with the secret + an asserted did", async () => {
-    const { base } = await setup();
-    const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
-      did: ALICE,
-      collection: "dev.cocore.compute.receipt",
-      record: { x: 1 },
+    await withServer(undefined, async (base) => {
+      const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
+        did: ALICE,
+        collection: "dev.cocore.compute.receipt",
+        record: { x: 1 },
+      });
+      expect(r.status).toBe(200);
+      expect((await r.json()) as unknown).toMatchObject({ cid: "bafycid" });
     });
-    expect(r.status).toBe(200);
-    expect((await r.json()) as unknown).toMatchObject({ cid: "bafycid" });
   });
 
   it("403 without the internal secret", async () => {
-    const { base } = await setup();
-    const r = await ipost(base, "/internal/pds/createRecord", null, {
-      did: ALICE,
-      collection: "dev.cocore.compute.job",
-      record: {},
+    await withServer(undefined, async (base) => {
+      const r = await ipost(base, "/internal/pds/createRecord", null, {
+        did: ALICE,
+        collection: "dev.cocore.compute.job",
+        record: {},
+      });
+      expect(r.status).toBe(403);
     });
-    expect(r.status).toBe(403);
   });
 
   it("400 without an asserted did", async () => {
-    const { base } = await setup();
-    const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
-      collection: "dev.cocore.compute.job",
-      record: {},
+    await withServer(undefined, async (base) => {
+      const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
+        collection: "dev.cocore.compute.job",
+        record: {},
+      });
+      expect(r.status).toBe(400);
     });
-    expect(r.status).toBe(400);
   });
 
   it("401 when the session can't restore", async () => {
-    const { base } = await setup(fakeOauth({ nullFor: new Set([ALICE]) }));
-    const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
-      did: ALICE,
-      collection: "dev.cocore.compute.job",
-      record: {},
+    await withServer(fakeOauth({ nullFor: new Set([ALICE]) }), async (base) => {
+      const r = await ipost(base, "/internal/pds/createRecord", INTERNAL_SECRET, {
+        did: ALICE,
+        collection: "dev.cocore.compute.job",
+        record: {},
+      });
+      expect(r.status).toBe(401);
     });
-    expect(r.status).toBe(401);
   });
 });

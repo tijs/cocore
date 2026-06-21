@@ -11,11 +11,16 @@
 // own CDN-tier cache, and tolerates the kind of fanout a small
 // AppView produces.
 //
-// Cache: an in-process Map keyed by DID with a configurable TTL
-// (1 hour default). One bsky round-trip per DID per TTL window
-// across all directory page-loads. Negative results are cached
-// too (with a shorter TTL) so a failed lookup doesn't retry on
-// every page load.
+// Cache: an in-process effect `Cache` keyed by DID with a
+// configurable TTL (1 hour default). One bsky round-trip per DID
+// per TTL window across all directory page-loads, and concurrent
+// lookups for the same DID collapse onto a single in-flight fetch
+// for free. Negative results are cached too (with a shorter TTL) so
+// a failed lookup doesn't retry on every page load.
+
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "@effect/platform";
+import { makeRuntime } from "@cocore/o11y";
+import { Cache, Duration, Effect, Exit } from "effect";
 
 interface Hydrated {
   handle: string | null;
@@ -23,52 +28,31 @@ interface Hydrated {
   avatarUrl: string | null;
 }
 
-interface CacheEntry {
-  value: Hydrated | null;
-  expiresAt: number;
-}
-
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h for positive results
 const NEGATIVE_TTL_MS = 5 * 60 * 1000; // 5m for "not found" — recover faster
 const MAX_CACHE_ENTRIES = 10_000;
 
-const cache = new Map<string, CacheEntry>();
-const inFlight = new Map<string, Promise<Hydrated | null>>();
-
-function getCached(did: string): Hydrated | null | undefined {
-  const entry = cache.get(did);
-  if (!entry) return undefined;
-  if (entry.expiresAt < Date.now()) {
-    cache.delete(did);
-    return undefined;
-  }
-  return entry.value;
-}
-
-function setCached(did: string, value: Hydrated | null): void {
-  // Bounded LRU-ish: when over cap, drop the oldest insertion. Map
-  // iteration order is insertion order, so taking the first key
-  // gives us the oldest. Good enough for a cache that's ~hundreds
-  // of entries in practice.
-  if (cache.size >= MAX_CACHE_ENTRIES) {
-    const firstKey = cache.keys().next().value;
-    if (firstKey !== undefined) cache.delete(firstKey);
-  }
-  cache.set(did, {
-    value,
-    expiresAt: Date.now() + (value === null ? NEGATIVE_TTL_MS : DEFAULT_TTL_MS),
-  });
-}
+// One o11y runtime for the module — provides the tracing layer that
+// `Effect.withSpan` reports through. Cache construction provides its
+// own HttpClient layer (below), so `cache.get` needs no environment
+// and runs cleanly on this runtime.
+const runtime = makeRuntime({ serviceName: "cocore-appview" });
 
 /** Fetch identity for one DID from the public bsky appview.
- *  Returns null on any failure (network, 404, malformed). */
-async function fetchOne(did: string): Promise<Hydrated | null> {
-  const url = new URL("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile");
-  url.searchParams.set("actor", did);
-  try {
-    const res = await fetch(url, { headers: { accept: "application/json" } });
-    if (!res.ok) return null;
-    const body = (await res.json()) as {
+ *  Returns null on any failure (network, non-2xx, malformed). This
+ *  is the cache `lookup`; the `Cache` itself handles TTL + dedup. */
+const lookup = (did: string): Effect.Effect<Hydrated | null, never, HttpClient.HttpClient> =>
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    const request = HttpClientRequest.get(
+      "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile",
+    ).pipe(
+      HttpClientRequest.setUrlParam("actor", did),
+      HttpClientRequest.setHeader("accept", "application/json"),
+    );
+    const res = yield* client.execute(request);
+    if (res.status < 200 || res.status >= 300) return null;
+    const body = (yield* res.json) as {
       did?: unknown;
       handle?: unknown;
       displayName?: unknown;
@@ -83,45 +67,49 @@ async function fetchOne(did: string): Promise<Hydrated | null> {
           : null,
       avatarUrl: typeof body.avatar === "string" && body.avatar.length > 0 ? body.avatar : null,
     };
-  } catch {
-    return null;
-  }
-}
+  }).pipe(Effect.catchAll(() => Effect.succeed<Hydrated | null>(null)));
 
-/** Resolve identity for one DID, going through the cache. Multiple
- *  concurrent calls for the same DID collapse onto a single
- *  in-flight fetch via the `inFlight` map (prevents N parallel
- *  page-loads from each firing their own request when the cache is
- *  cold). */
-async function hydrateOne(did: string): Promise<Hydrated | null> {
-  const cached = getCached(did);
-  if (cached !== undefined) return cached;
-  const existing = inFlight.get(did);
-  if (existing) return existing;
-  const p = fetchOne(did).then((v) => {
-    setCached(did, v);
-    inFlight.delete(did);
-    return v;
-  });
-  inFlight.set(did, p);
-  return p;
-}
+// Build the cache eagerly, providing the fetch-backed HttpClient
+// directly so the environment is baked in (and `cache.get` requires
+// nothing). `FetchHttpClient.layer` reads `globalThis.fetch` at
+// request time, so the test's fetch mock keeps working. Built
+// synchronously so `__resetHydrateCacheForTests` can stay sync.
+const cache = Effect.runSync(
+  Cache.makeWith({
+    capacity: MAX_CACHE_ENTRIES,
+    lookup,
+    // Positive results live for 1h; negative ("not found") results
+    // expire after 5m so a transient failure recovers faster. The
+    // lookup never fails (it catches into `null`), so the exit is
+    // always a success whose value distinguishes the two TTLs.
+    timeToLive: (exit: Exit.Exit<Hydrated | null, never>) =>
+      Duration.millis(
+        Exit.isSuccess(exit) && exit.value !== null ? DEFAULT_TTL_MS : NEGATIVE_TTL_MS,
+      ),
+  }).pipe(Effect.provide(FetchHttpClient.layer)),
+);
 
 /** Resolve identity for N DIDs in parallel. Used by `listAccounts`
  *  to fill in the directory page in a single fan-out. Order of the
  *  returned map is not meaningful; callers index by DID. */
 export async function hydrateDids(dids: string[]): Promise<Map<string, Hydrated>> {
-  const out = new Map<string, Hydrated>();
-  const results = await Promise.all(dids.map(async (did) => [did, await hydrateOne(did)] as const));
-  for (const [did, v] of results) {
-    if (v) out.set(did, v);
-  }
-  return out;
+  return runtime.runPromise(
+    Effect.gen(function* () {
+      const results = yield* Effect.forEach(dids, (did) => cache.get(did), {
+        concurrency: "unbounded",
+      });
+      const out = new Map<string, Hydrated>();
+      dids.forEach((did, i) => {
+        const v = results[i];
+        if (v) out.set(did, v);
+      });
+      return out;
+    }).pipe(Effect.withSpan("bsky.hydrate", { attributes: { count: dids.length } })),
+  );
 }
 
 /** Test seam — flush the cache so a test doesn't leak state into
  *  the next one. */
 export function __resetHydrateCacheForTests(): void {
-  cache.clear();
-  inFlight.clear();
+  Effect.runSync(cache.invalidateAll);
 }

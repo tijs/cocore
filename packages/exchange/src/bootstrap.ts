@@ -16,9 +16,20 @@
 // invalidate prior settlements. Future enhancement: putRecord with
 // a stable rkey so we keep a single canonical pair per process.
 
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "@effect/platform";
+import { makeRuntime } from "@cocore/o11y";
+import { Effect } from "effect";
+
 import type { PublishedRecord } from "./publisher.ts";
 import type { FeePolicy, SelfLoopRule } from "./exchange.ts";
 import { type PrivateJwk, publicKeyFingerprint } from "./signing.ts";
+
+// One o11y runtime for the module — provides the tracing layer that
+// `Effect.withSpan` reports through. The fetch-backed HttpClient is
+// supplied per-call via `Effect.provide(FetchHttpClient.layer)`;
+// `FetchHttpClient.layer` reads `globalThis.fetch` at request time, so
+// test fetch-mocking keeps working unchanged.
+const runtime = makeRuntime({ serviceName: "cocore-exchange" });
 
 export interface BootstrapInputs {
   exchangeDid: string;
@@ -72,19 +83,34 @@ async function proxyCreate(
   collection: string,
   record: Record<string, unknown>,
 ): Promise<PublishedRecord> {
-  const r = await fetch(`${apiBase.replace(/\/$/, "")}/api/pds/createRecord`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ collection, record }),
-  });
-  if (!r.ok) {
-    const body = await r.text().catch(() => "");
-    throw new Error(`proxy create ${collection} returned ${r.status}: ${body.slice(0, 300)}`);
-  }
-  return (await r.json()) as PublishedRecord;
+  const effect = Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    const request = yield* HttpClientRequest.post(
+      `${apiBase.replace(/\/$/, "")}/api/pds/createRecord`,
+    ).pipe(
+      HttpClientRequest.setHeaders({
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      }),
+      HttpClientRequest.bodyJson({ collection, record }),
+    );
+    const res = yield* client.execute(request);
+    if (res.status < 200 || res.status >= 300) {
+      const body = yield* res.text.pipe(Effect.orElseSucceed(() => ""));
+      return yield* Effect.fail(
+        new Error(`proxy create ${collection} returned ${res.status}: ${body.slice(0, 300)}`),
+      );
+    }
+    return (yield* res.json) as PublishedRecord;
+  }).pipe(
+    // Map any non-Error failure (HttpBodyError / transport / decode) into a
+    // thrown Error so the external Promise rejects with an Error, matching
+    // the old `await fetch(...)` boundary.
+    Effect.catchAll((e) => Effect.fail(e instanceof Error ? e : new Error(String(e)))),
+    Effect.withSpan("exchange.bootstrap.proxyCreate", { attributes: { collection } }),
+    Effect.provide(FetchHttpClient.layer),
+  );
+  return runtime.runPromise(effect);
 }
 
 export async function bootstrapExchangeRecords(inputs: BootstrapInputs): Promise<BootstrapResult> {

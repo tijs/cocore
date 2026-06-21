@@ -250,7 +250,15 @@ async fn cmd_set_active(active: bool) -> Result<()> {
     // a stuck pause. Only the swap conflict is retried; other errors bubble up.
     const MAX_ATTEMPTS: u32 = 4;
     for attempt in 1..=MAX_ATTEMPTS {
-        let (rkey, mut value, cid) = find_my_provider_record(&pds, &pubkey).await?;
+        let find = find_my_provider_record(&pds, &pubkey).await;
+        if find.is_err() && active {
+            // First serve hasn't published a provider record yet. An absent
+            // `active` field reads as true, so resume is already the desired
+            // state — let `agent serve` create the record on startup.
+            println!("serving (no change)");
+            return Ok(());
+        }
+        let (rkey, mut value, cid) = find?;
         if value
             .get("active")
             .and_then(|v| v.as_bool())
@@ -292,11 +300,14 @@ fn is_swap_conflict(e: &cocore_provider::error::ProviderError) -> bool {
 /// `cocore agent active`: print `serving` or `paused` from the shared switch.
 async fn cmd_print_active() -> Result<()> {
     let (pds, pubkey) = open_pds()?;
-    let (_, value, _) = find_my_provider_record(&pds, &pubkey).await?;
-    let active = value
-        .get("active")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let active = match find_my_provider_record(&pds, &pubkey).await {
+        Ok((_, value, _)) => value
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        // Never served — no record to read; default active is true.
+        Err(_) => true,
+    };
     println!("{}", if active { "serving" } else { "paused" });
     Ok(())
 }

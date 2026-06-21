@@ -10,7 +10,8 @@
 // packages/exchange/src/token-balance.ts).
 
 import { createFileRoute } from "@tanstack/react-router";
-import { Effect } from "effect";
+
+import { runTraced } from "@/lib/o11y.server.ts";
 
 import { appviewListProvidersEffect } from "@/integrations/appview/appview.server.ts";
 import { resolveBearerKey } from "@/lib/api-keys.server.ts";
@@ -75,7 +76,9 @@ export const Route = createFileRoute("/api/agent/status")({
         const [balance, events, providers, confidential] = await Promise.all([
           getBalance(did).catch(() => null),
           listEvents(did, EVENT_LIMIT).catch(() => ({ events: [] })),
-          Effect.runPromise(appviewListProvidersEffect).catch(() => ({ providers: [] })),
+          runTraced("appview.listProviders", appviewListProvidersEffect).catch(() => ({
+            providers: [],
+          })),
           fetchConfidentialEligible(did),
         ]);
 

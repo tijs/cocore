@@ -30,6 +30,24 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # durable, content-safe trail instead of an NSLog line that ages out.
 tracing-appender = "0.2"
 
+# OTLP export bridge for the existing `tracing` spans/events. Wired into
+# the subscriber registry in `diagnostics.rs` ONLY when
+# `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so the default build behaves
+# exactly as before (stderr + rolling file). OTLP/HTTP-protobuf over the
+# blocking reqwest client so export needs no async reactor of its own and
+# reuses the rustls posture above (no native-tls, no tonic/grpc). Honeycomb
+# is OTLP-native: point the endpoint at api.honeycomb.io and pass the team
+# key via OTEL_EXPORTER_OTLP_HEADERS — no Honeycomb-specific code here.
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "http-proto",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+    "trace",
+] }
+tracing-opentelemetry = "0.33"
+
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 # `cocore agent update` extracts the release tarball in-process so we

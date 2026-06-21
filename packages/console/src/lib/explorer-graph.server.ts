@@ -21,6 +21,7 @@ import {
   appviewListProfilesEffect,
   appviewListProvidersEffect,
 } from "@/integrations/appview/appview.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 
 /** One person/account in the network graph, enriched with the
  *  hardware they run and their trust degree. */
@@ -173,12 +174,18 @@ function nodeWeight(n: ExplorerNode): number {
 async function buildExplorerGraph(): Promise<ExplorerGraph> {
   const generatedAt = new Date().toISOString();
 
-  const [accountsR, providersR, edgesR, profilesR] = await Promise.all([
-    Effect.runPromise(Effect.either(appviewListAccountsEffect({ limit: 100, sortBy: "recent" }))),
-    Effect.runPromise(Effect.either(appviewListProvidersEffect)),
-    Effect.runPromise(Effect.either(appviewListFriendEdgesEffect({ limit: 5000 }))),
-    Effect.runPromise(Effect.either(appviewListProfilesEffect)),
-  ]);
+  const [accountsR, providersR, edgesR, profilesR] = await runTraced(
+    "explorer.graph.appview",
+    Effect.all(
+      [
+        Effect.either(appviewListAccountsEffect({ limit: 100, sortBy: "recent" })),
+        Effect.either(appviewListProvidersEffect),
+        Effect.either(appviewListFriendEdgesEffect({ limit: 5000 })),
+        Effect.either(appviewListProfilesEffect),
+      ],
+      { concurrency: "unbounded" },
+    ),
+  );
 
   const accounts: AppviewAccountSummary[] =
     accountsR._tag === "Right" ? accountsR.right.accounts : [];

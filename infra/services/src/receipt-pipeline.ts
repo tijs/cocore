@@ -37,10 +37,13 @@
 // to the exchange call so a logging block sees both outcomes
 // together.
 
+import { Metric } from "effect";
+
 import type { Firehose, IndexedRecord } from "@cocore/sdk";
 import type { ReceiptRecord } from "@cocore/sdk/types";
 import type { Exchange, SettlementOutcome } from "@cocore/exchange";
 import type { TokenLedger, TokenLedgerPolicy } from "@cocore/exchange/token-balance";
+import { metrics, record, runTracedPromise, type O11yRuntime } from "@cocore/o11y";
 
 // Minimal read-side view of the AppView store that the pipeline
 // needs. Carved as an interface so tests can drive an in-memory
@@ -69,6 +72,11 @@ export interface ReceiptPipelineOptions {
   /** Logger seam. Tests inject a recording logger; production
    *  passes `console.error`. */
   log?: (line: string) => void;
+  /** Optional o11y runtime. When present, each `processReceipt` runs
+   *  inside a `services.processReceipt` span (content-safe attrs only)
+   *  and emits the cross-cutting receipt/settlement/token metrics.
+   *  Absent (e.g. unit tests) → a no-op; the control flow is identical. */
+  runtime?: O11yRuntime;
 }
 
 export interface ReceiptPipeline {
@@ -188,7 +196,46 @@ export function createReceiptPipeline(opts: ReceiptPipelineOptions): ReceiptPipe
     }
   }
 
+  // Emit cross-cutting metrics for one processed receipt. No-op without a
+  // runtime; recorded fire-and-forget. Dimensions stay low-cardinality
+  // (outcome.kind / direction) — never a DID or URI. Token throughput uses
+  // the receipt's self-reported token deltas, recorded only once the
+  // exchange has actually settled (or de-duped) the receipt.
+  function emitMetrics(outcome: SettlementOutcome, body: ReceiptRecord | null): void {
+    const rt = opts.runtime;
+    if (!rt) return;
+    record(rt, Metric.increment(metrics.receiptsIndexed));
+    record(rt, Metric.increment(metrics.settlementOutcome(outcome.kind)));
+    if ((outcome.kind === "settled" || outcome.kind === "duplicate") && body?.tokens) {
+      const tin = body.tokens.in;
+      const tout = body.tokens.out;
+      if (Number.isFinite(tin) && tin > 0) {
+        record(rt, Metric.incrementBy(metrics.tokenThroughput("in"), tin));
+      }
+      if (Number.isFinite(tout) && tout > 0) {
+        record(rt, Metric.incrementBy(metrics.tokenThroughput("out"), tout));
+      }
+    }
+  }
+
+  // Traced boundary: every receipt (firehose first-pass, reactive retry,
+  // and reconcile sweep all funnel through here) runs inside one
+  // `services.processReceipt` span when a runtime is configured. Without a
+  // runtime this is a direct call — identical control flow for the tests.
   async function processReceipt(rec: IndexedRecord, retried = false): Promise<SettlementOutcome> {
+    if (!opts.runtime) return processReceiptInner(rec, retried);
+    return runTracedPromise(
+      opts.runtime,
+      "services.processReceipt",
+      () => processReceiptInner(rec, retried),
+      { "receipt.uri": rec.uri },
+    );
+  }
+
+  async function processReceiptInner(
+    rec: IndexedRecord,
+    retried = false,
+  ): Promise<SettlementOutcome> {
     const receiptRec = rec as IndexedRecord<ReceiptRecord>;
     const outcome = await opts.exchange.onReceipt(receiptRec);
     const tag: "fresh" | "retry" = retried ? "retry" : "fresh";
@@ -293,6 +340,7 @@ export function createReceiptPipeline(opts: ReceiptPipelineOptions): ReceiptPipe
         }
       }
     }
+    emitMetrics(outcome, rec.body as ReceiptRecord | null);
     return outcome;
   }
 

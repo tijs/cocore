@@ -29,8 +29,11 @@
     "@atcute/oauth-node-client": "^1.1.1",
     "@atproto/identity": "^0.4.12",
     "@atproto/sync": "^0.2.2",
+    "@cocore/o11y": "workspace:*",
     "@cocore/sdk": "workspace:*",
+    "@effect/platform": "^0.96.2",
     "better-sqlite3": "^11.5.0",
+    "effect": "^3.21.4",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {

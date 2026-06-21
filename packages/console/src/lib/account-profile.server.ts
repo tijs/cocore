@@ -24,7 +24,8 @@
 // signed-in server fns. Never imported client-side.
 
 import type { OAuthSession } from "@atcute/oauth-node-client";
-import { Effect } from "effect";
+
+import { runTraced } from "@/lib/o11y.server.ts";
 
 import { fetchBlueskyPublicProfileFieldsEffect } from "@/lib/bluesky-public-profile.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
@@ -175,7 +176,10 @@ async function getMyProfile(session: OAuthSession): Promise<CocoreProfile | null
 export async function ensureMyProfile(session: OAuthSession): Promise<CocoreProfile> {
   const existing = await getMyProfile(session);
   if (existing) return existing;
-  const bsky = await Effect.runPromise(fetchBlueskyPublicProfileFieldsEffect(session.did));
+  const bsky = await runTraced(
+    "bsky.fetchPublicProfile",
+    fetchBlueskyPublicProfileFieldsEffect(session.did),
+  );
   const now = new Date().toISOString();
   const record: Record<string, unknown> = { createdAt: now };
   if (bsky?.displayName) record.displayName = bsky.displayName;

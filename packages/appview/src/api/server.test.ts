@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __resetHydrateCacheForTests } from "../bsky-hydrate.ts";
 import { Store } from "../store.ts";
-import { buildServer } from "./server.ts";
+import { buildAppviewApp } from "./server.ts";
+import { withAppviewServer } from "./http-app.ts";
 import { canonicalize } from "@cocore/sdk/canonical";
 
 let originalFetch: typeof fetch;
@@ -189,16 +190,7 @@ async function withServer<T>(
     body: ctx.receipt,
   });
 
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no address");
-  const base = `http://127.0.0.1:${addr.port}`;
-  try {
-    return await fn(base, ctx);
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  return withAppviewServer(buildAppviewApp(store), async (base) => fn(base, ctx));
 }
 
 test("verifyReceipt happy path returns ok=true with real P-256 signature", async () => {
@@ -247,13 +239,9 @@ test("verifyReceipt rejects a tampered receipt at the signature check", async ()
     body: tampered,
   });
 
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no address");
-  try {
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
     const res = await fetch(
-      `http://127.0.0.1:${addr.port}/xrpc/dev.cocore.compute.verifyReceipt?uri=${encodeURIComponent(ctx.RECEIPT_URI)}`,
+      `${base}/xrpc/dev.cocore.compute.verifyReceipt?uri=${encodeURIComponent(ctx.RECEIPT_URI)}`,
     );
     assert.equal(res.status, 200);
     const body = (await res.json()) as { ok: boolean; findings: { code: string }[] };
@@ -273,9 +261,7 @@ test("verifyReceipt rejects a tampered receipt at the signature check", async ()
       `unexpected structural failures: ${JSON.stringify(onlyStructuralCodes)}`,
     );
     assert.equal(onlyStructuralCodes[0]!.code, "model-mismatch");
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 test("verifyReceipt returns 404 for unknown URI", async () => {
@@ -354,23 +340,15 @@ test("getProfile includes provider latency derived from receipts", async () => {
     rkey: "1",
     body: { model: "m", startedAt: "2026-05-07T12:00:00Z", completedAt: "2026-05-07T12:00:03Z" },
   });
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no addr");
-  try {
-    const res = await fetch(
-      `http://127.0.0.1:${addr.port}/xrpc/dev.cocore.account.getProfile?did=did:plc:alice`,
-    );
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
+    const res = await fetch(`${base}/xrpc/dev.cocore.account.getProfile?did=did:plc:alice`);
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
       profile: { latency: { sampleCount: number; avgMs: number | null } };
     };
     assert.equal(body.profile.latency.sampleCount, 2);
     assert.equal(body.profile.latency.avgMs, 2000);
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 test("getJobs filters by requester repo", async () => {
@@ -461,16 +439,7 @@ async function withAccountsStore(
       body: { subject: e.subject, createdAt: "2026-05-01T00:00:00Z" },
     });
   }
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no address");
-  const base = `http://127.0.0.1:${addr.port}`;
-  try {
-    await fn(base);
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  await withAppviewServer(buildAppviewApp(store), fn);
 }
 
 test("listAccounts returns every signed-up DID with denormalized profile", async () => {
@@ -657,12 +626,8 @@ test("listAccounts includes DIDs whose only cocore footprint is a profile record
       createdAt: "2026-05-01T00:00:00Z",
     },
   });
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no addr");
-  try {
-    const res = await fetch(`http://127.0.0.1:${addr.port}/xrpc/dev.cocore.account.listAccounts`);
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
+    const res = await fetch(`${base}/xrpc/dev.cocore.account.listAccounts`);
     const body = (await res.json()) as {
       accounts: AccountSummaryWire[];
       total: number;
@@ -670,9 +635,7 @@ test("listAccounts includes DIDs whose only cocore footprint is a profile record
     assert.equal(body.total, 1);
     assert.equal(body.accounts[0]!.did, "did:plc:alice");
     assert.equal(body.accounts[0]!.handle, "alice.bsky.social");
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 test("listAccounts hydrates handle + displayName from bsky when no local profile record exists", async () => {
@@ -710,12 +673,8 @@ test("listAccounts hydrates handle + displayName from bsky when no local profile
     "did:plc:alice": { handle: "WRONG_HANDLE_DO_NOT_USE" },
   });
 
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no addr");
-  try {
-    const res = await fetch(`http://127.0.0.1:${addr.port}/xrpc/dev.cocore.account.listAccounts`);
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
+    const res = await fetch(`${base}/xrpc/dev.cocore.account.listAccounts`);
     const body = (await res.json()) as { accounts: AccountSummaryWire[]; total: number };
     const byDid = Object.fromEntries(body.accounts.map((a) => [a.did, a]));
     // alice's local profile wins — bsky was not consulted.
@@ -724,9 +683,7 @@ test("listAccounts hydrates handle + displayName from bsky when no local profile
     // bob's was hydrated from the bsky appview.
     assert.equal(byDid["did:plc:bob"]!.handle, "bob.bsky.social");
     assert.equal(byDid["did:plc:bob"]!.displayName, "Bob");
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 test("listAccounts also includes DIDs whose only footprint is a compute record (API-direct users)", async () => {
@@ -743,20 +700,14 @@ test("listAccounts also includes DIDs whose only footprint is a compute record (
     rkey: "3lk5",
     body: { model: "stub", createdAt: "2026-05-01T00:00:00Z" },
   });
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no addr");
-  try {
-    const res = await fetch(`http://127.0.0.1:${addr.port}/xrpc/dev.cocore.account.listAccounts`);
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
+    const res = await fetch(`${base}/xrpc/dev.cocore.account.listAccounts`);
     const body = (await res.json()) as { accounts: AccountSummaryWire[]; total: number };
     assert.equal(body.total, 1);
     assert.equal(body.accounts[0]!.did, "did:plc:power");
     // No profile so handle is null.
     assert.equal(body.accounts[0]!.handle, null);
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 interface ProfileWire {
@@ -872,14 +823,8 @@ test("getProfile aggregates profile + machines + activity counts for a signed-up
     });
   }
 
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no addr");
-  try {
-    const res = await fetch(
-      `http://127.0.0.1:${addr.port}/xrpc/dev.cocore.account.getProfile?did=did:plc:alice`,
-    );
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
+    const res = await fetch(`${base}/xrpc/dev.cocore.account.getProfile?did=did:plc:alice`);
     assert.equal(res.status, 200);
     const body = (await res.json()) as { profile: ProfileWire };
     assert.equal(body.profile.did, "did:plc:alice");
@@ -900,9 +845,7 @@ test("getProfile aggregates profile + machines + activity counts for a signed-up
       body.profile.weekSeries.trustedByNew.reduce((a, b) => a + b, 0),
       2,
     );
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 test("listIncomingFriends returns DIDs that named the queried DID as subject", async () => {
@@ -929,13 +872,9 @@ test("listIncomingFriends returns DIDs that named the queried DID as subject", a
     body: { subject: "did:plc:someone-else", createdAt: "2026-05-10T00:00:00Z" },
   });
 
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no addr");
-  try {
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
     const res = await fetch(
-      `http://127.0.0.1:${addr.port}/xrpc/dev.cocore.account.listIncomingFriends?did=did:plc:alice`,
+      `${base}/xrpc/dev.cocore.account.listIncomingFriends?did=did:plc:alice`,
     );
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
@@ -945,9 +884,7 @@ test("listIncomingFriends returns DIDs that named the queried DID as subject", a
     assert.equal(body.total, 3);
     const frienders = body.friends.map((f) => f.friender).sort();
     assert.deepEqual(frienders, ["did:plc:bob", "did:plc:carol", "did:plc:dave"]);
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 test("listIncomingFriends collapses duplicate records from the same friender into one row", async () => {
@@ -978,13 +915,9 @@ test("listIncomingFriends collapses duplicate records from the same friender int
     body: { subject: "did:plc:alice", createdAt: "2026-05-11T00:00:00Z" },
   });
 
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no addr");
-  try {
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
     const res = await fetch(
-      `http://127.0.0.1:${addr.port}/xrpc/dev.cocore.account.listIncomingFriends?did=did:plc:alice`,
+      `${base}/xrpc/dev.cocore.account.listIncomingFriends?did=did:plc:alice`,
     );
     const body = (await res.json()) as {
       friends: Array<{ friender: string; createdAt: string }>;
@@ -997,9 +930,7 @@ test("listIncomingFriends collapses duplicate records from the same friender int
     // The OLDEST timestamp wins so the trust-started-on date is
     // stable across page refreshes.
     assert.equal(bob!.createdAt, "2026-05-10T00:00:00Z");
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 test("getProfile.incomingFriendsCount counts distinct frienders, not raw records", async () => {
@@ -1026,20 +957,12 @@ test("getProfile.incomingFriendsCount counts distinct frienders, not raw records
     });
   }
 
-  const server = buildServer(store);
-  await new Promise<void>((r) => server.listen(0, r));
-  const addr = server.address();
-  if (typeof addr === "string" || !addr) throw new Error("no addr");
-  try {
-    const res = await fetch(
-      `http://127.0.0.1:${addr.port}/xrpc/dev.cocore.account.getProfile?did=did:plc:alice`,
-    );
+  await withAppviewServer(buildAppviewApp(store), async (base) => {
+    const res = await fetch(`${base}/xrpc/dev.cocore.account.getProfile?did=did:plc:alice`);
     const body = (await res.json()) as { profile: { incomingFriendsCount: number } };
     // One DISTINCT friender even with three records.
     assert.equal(body.profile.incomingFriendsCount, 1);
-  } finally {
-    await new Promise<void>((r) => server.close(() => r()));
-  }
+  });
 });
 
 test("indexer accepts dev.cocore.account.* records (not just compute.*)", async () => {

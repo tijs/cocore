@@ -17,7 +17,6 @@
 
 import { queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
-import { Effect } from "effect";
 import { z } from "zod";
 
 import {
@@ -26,6 +25,7 @@ import {
   appviewGetProfileEffect,
   appviewListIncomingFriendsEffect,
 } from "@/integrations/appview/appview.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { appviewProfileFieldsForDid, lookupActor } from "@/lib/friends.server.ts";
 
 const identifierSchema = z.object({
@@ -92,14 +92,15 @@ const profilePageServerFn = createServerFn({ method: "GET" })
   .handler(async ({ data }): Promise<ProfilePageBundle | null> => {
     const resolved = await resolveIdentifier(data.identifier);
     if (!resolved) return null;
-    const profile = await Effect.runPromise(appviewGetProfileEffect(resolved.did));
+    const profile = await runTraced("appview.getProfile", appviewGetProfileEffect(resolved.did));
     return { resolved, profile };
   });
 
 const incomingFriendsServerFn = createServerFn({ method: "GET" })
   .inputValidator(didOnlySchema)
   .handler(async ({ data }): Promise<IncomingFriend[]> => {
-    const res = await Effect.runPromise(
+    const res = await runTraced(
+      "appview.listIncomingFriends",
       appviewListIncomingFriendsEffect({ did: data.did, limit: 100 }),
     );
     return await Promise.all(

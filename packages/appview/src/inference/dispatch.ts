@@ -27,7 +27,18 @@
 
 import type { RecordTransport } from "@cocore/sdk/publish";
 import { submitJob } from "@cocore/sdk/publish";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "@effect/platform";
+import { makeRuntime } from "@cocore/o11y";
+import { Effect } from "effect";
 import nacl from "tweetnacl";
+
+// One o11y runtime for the module — provides the tracing layer that
+// `Effect.withSpan` reports through. The fetch-backed HttpClient is
+// supplied per-call via `Effect.provide(FetchHttpClient.layer)`;
+// `FetchHttpClient.layer` reads `globalThis.fetch` at request time, so
+// test fetch-mocking keeps working unchanged. The SSE `/jobs` read is
+// deliberately NOT routed through HttpClient yet (streaming follow-up).
+const runtime = makeRuntime({ serviceName: "cocore-appview" });
 
 export interface DispatchInputs {
   did: string;
@@ -226,6 +237,30 @@ export function filterByPayoutsEligibility<T extends { did: string }>(
   });
 }
 
+/** GET the advisor's provider registry. Runs on the module o11y runtime
+ *  behind a span so the public async API stays a plain Promise. On a
+ *  non-2xx response it rejects with `new Error(`advisor /providers
+ *  ${status}`)` — identical to the prior `fetch` path. */
+async function fetchProviders(advisorUrl: string): Promise<AdvisorProviderRow[]> {
+  const effect = Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    const request = HttpClientRequest.get(`${advisorUrl}/providers`);
+    const res = yield* client.execute(request);
+    if (res.status < 200 || res.status >= 300) {
+      return yield* Effect.fail(new Error(`advisor /providers ${res.status}`));
+    }
+    return (yield* res.json) as AdvisorProviderRow[];
+  }).pipe(
+    // Map any non-Error failure (transport / decode) into a thrown Error so
+    // the external Promise rejects with an Error, matching the old
+    // `await fetch(...)` boundary.
+    Effect.catchAll((e) => Effect.fail(e instanceof Error ? e : new Error(String(e)))),
+    Effect.withSpan("dispatch.advisor.providers", { attributes: { advisorUrl } }),
+    Effect.provide(FetchHttpClient.layer),
+  );
+  return runtime.runPromise(effect);
+}
+
 async function pickProvider(
   advisorUrl: string,
   model: string,
@@ -237,9 +272,7 @@ async function pickProvider(
    *  `targetDid` — a pinned provider is the user's choice. */
   excludeDids: Set<string> | undefined,
 ): Promise<AdvisorProviderRow> {
-  const r = await fetch(`${advisorUrl}/providers`);
-  if (!r.ok) throw new Error(`advisor /providers ${r.status}`);
-  const list = (await r.json()) as AdvisorProviderRow[];
+  const list = await fetchProviders(advisorUrl);
   const attested = list.filter((p) => p.attestedAt);
   if (attested.length === 0) throw new NoProvidersConnectedError();
 

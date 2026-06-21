@@ -1,29 +1,27 @@
-// CocoreShellApp: SwiftUI app entry. We don't want a dock icon, so
-// the actual UI is a status-bar-only menu (see MenuBarController).
-// SwiftUI is used for the preferences window only.
+// CocoreShellApp: AppKit entry for the menu-bar provider shell.
 //
 // Lifecycle:
 //   launch       -> AppDelegate.applicationDidFinishLaunching
 //   pair (first) -> kick PairFlow (cocore agent pair), persist session
 //   serve        -> AgentSupervisor.start (spawns cocore-provider)
 //   quit         -> AgentSupervisor.stop, then NSApp.terminate
+//
+// We use a plain NSApplication main (not SwiftUI's App + Settings scene).
+// On macOS Tahoe, the SwiftUI Settings scene creates infrastructure that
+// interferes with NSStatusItem compositing. All UI is AppKit: NSStatusItem
+// plus NSHostingController windows.
 
 import AppKit
 import ServiceManagement
 import SwiftUI
 
 @main
-struct CocoreShellApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
-    var body: some Scene {
-        // Settings scene is the only proper SwiftUI window; the menu
-        // bar is an NSStatusItem managed by MenuBarController so that
-        // we keep the activation policy at .accessory (no dock icon).
-        Settings {
-            PreferencesView(supervisor: appDelegate.supervisor)
-                .environmentObject(appDelegate.state)
-        }
+enum CoCoreShellMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
     }
 }
 
@@ -36,55 +34,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        // Tahoe parks NSStatusItems off-screen when created under `.accessory`
+        // or LSUIElement. Launch `.regular`, create the tray icon, then hide
+        // the Dock via DockActivation once the item is composited on-screen.
         registerLoginItem()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
         menu = MenuBarController(state: state, supervisor: supervisor, updater: updater)
-        // Auto-update: check on launch, then every 6 hours (a few times a
-        // day) so a published release reaches users without a manual check.
-        // A below-minSupported version auto-applies (the forced path);
-        // otherwise it surfaces in the menu and pulses the icon yellow (see
-        // MenuBarController.needsAttention).
         Task { await updater.check() }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.updater.check() }
         }
         Task { @MainActor in
             await state.refreshSession()
-            // First-run onboarding: walk a not-yet-paired user through
-            // sign in → choose a model → start serving.
-            menu?.showWelcomeIfNeeded()
-            // Auto-start serving in the SELF-CONTAINED app case only: signed
-            // in AND no `dev.cocore.provider` LaunchAgent present (a
-            // download-only install where the app supervises the bundled
-            // agent itself). When the LaunchAgent exists (headless/curl
-            // install) launchd already runs the agent — don't double-run.
+            // Defer onboarding so the status item can settle before we open a
+            // SwiftUI window (welcome wizard).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                self?.menu?.showWelcomeIfNeeded()
+            }
             if state.session != nil, !supervisor.isLaunchAgentManaged {
                 await supervisor.start()
             }
         }
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { menu?.showMainWindow() }
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // Synchronous: a detached `Task { await supervisor.stop() }` loses
-        // the race with app exit and leaves the agent child orphaned
-        // (reparented to launchd), which is how two agents end up
-        // registered for one DID. Reap it inline before we go.
         supervisor.stopSynchronously()
     }
 
-    /// This is a menu-bar app: closing its last window (Welcome, Models,
-    /// Preferences) must NOT quit it — the status item, the supervised
-    /// agent, and the auto-update timer all have to keep running. Critical
-    /// now that WindowActivation flips us to `.regular` while a window is
-    /// open, since `.regular` apps otherwise terminate on last-window-close.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
 
-    /// Register the menu-bar app to launch at login so the tray icon
-    /// survives a reboot. Idempotent; best-effort (ad-hoc-signed dev
-    /// builds may not persist, which is fine — the notarized release
-    /// will). Users can still toggle it in System Settings › Login Items.
     private func registerLoginItem() {
         do {
             if SMAppService.mainApp.status != .enabled {
@@ -105,8 +91,6 @@ final class AppState: ObservableObject {
     /// which is the provider record's self-asserted value.
     @Published var confidential: Bool = false
     @Published var attestationExpiresAt: Date?
-    // cocore is a closed-loop credit system — there is no USD payout.
-    // Earnings are denominated in credits.
     @Published var creditsLast24h: Int = 0
     @Published var balanceCredits: Int?
     @Published var agentVersion: String?
@@ -120,10 +104,6 @@ final class AppState: ObservableObject {
     }
 
     init() {
-        // Seed from the last successful /api/agent/status so a relaunch
-        // shows the last-known earnings/balance immediately instead of a
-        // misleading 0 until the first poll returns (~seconds on a cold
-        // network). The live refresh overwrites these.
         let d = UserDefaults.standard
         if let c = d.object(forKey: CacheKey.credits24h) as? Int { creditsLast24h = c }
         if let b = d.object(forKey: CacheKey.balance) as? Int { balanceCredits = b }
@@ -146,12 +126,12 @@ final class AppState: ObservableObject {
         let agentVersion: String?
     }
 
-    /// Pull live status (earnings, balance, real trust level, agent
-    /// version) from the console's bearer-authed /api/agent/status using
-    /// the paired session's apiKey + apiBase. Transient failures leave
-    /// the previous values untouched (so a brief network blip doesn't
-    /// flash the count back to 0).
     func refreshStatus() async {
+        // Target session.apiBase — the service that paired us, which both holds
+        // our bearer key and serves /api/agent/status. Console-paired agents
+        // get the console; device-pair'd agents get the AppView. Using a fixed
+        // console URL would send AppView-keyed agents to a service that can't
+        // resolve their key (401).
         guard let s = session,
               let apiKey = s.apiKey,
               let base = s.apiBase,
@@ -185,7 +165,6 @@ final class AppState: ObservableObject {
 
 enum TrustLevel: String { case selfAttested = "self-attested", hardwareAttested = "hardware-attested" }
 
-/// Format a credit balance for display, e.g. `1 credit` / `1,234 credits`.
 func creditsDisplay(_ n: Int) -> String {
     let fmt = NumberFormatter()
     fmt.numberStyle = .decimal

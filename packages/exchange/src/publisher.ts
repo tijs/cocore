@@ -15,11 +15,61 @@
 // `new SettlementPublisher(did)`; the transport is an optional
 // constructor argument.
 
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "@effect/platform";
+import { makeRuntime } from "@cocore/o11y";
+import { Effect } from "effect";
+
 import type { Money, SettlementRecord, StrongRef } from "@cocore/sdk/types";
 
 export interface PublishedRecord {
   uri: string;
   cid: string;
+}
+
+// One o11y runtime for the module — provides the tracing layer that
+// `Effect.withSpan` reports through. The fetch-backed HttpClient is
+// supplied per-call via `Effect.provide(FetchHttpClient.layer)`;
+// `FetchHttpClient.layer` reads `globalThis.fetch` at request time, so
+// test fetch-mocking keeps working unchanged.
+const runtime = makeRuntime({ serviceName: "cocore-exchange" });
+
+/** POST a JSON body to `url` with bearer auth and parse a
+ *  `{ uri, cid }` createRecord response. Runs on the module o11y
+ *  runtime behind a span so the public async API stays a plain
+ *  Promise. On a non-2xx response it rejects with `new Error(
+ *  errorMessage(status, text))` — identical to the prior `fetch` path. */
+function postCreateRecord(opts: {
+  url: string;
+  authToken: string;
+  body: unknown;
+  spanName: string;
+  exchangeDid: string;
+  errorMessage: (status: number, text: string) => string;
+}): Promise<PublishedRecord> {
+  const effect = Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    const request = yield* HttpClientRequest.post(opts.url).pipe(
+      HttpClientRequest.setHeaders({
+        "content-type": "application/json",
+        authorization: `Bearer ${opts.authToken}`,
+      }),
+      HttpClientRequest.bodyJson(opts.body),
+    );
+    const res = yield* client.execute(request);
+    if (res.status < 200 || res.status >= 300) {
+      const text = yield* res.text;
+      return yield* Effect.fail(new Error(opts.errorMessage(res.status, text)));
+    }
+    return (yield* res.json) as PublishedRecord;
+  }).pipe(
+    // Map any non-Error failure (HttpBodyError / transport / decode) into a
+    // thrown Error so the external Promise rejects with an Error, matching
+    // the old `await fetch(...)` boundary.
+    Effect.catchAll((e) => Effect.fail(e instanceof Error ? e : new Error(String(e)))),
+    Effect.withSpan(opts.spanName, { attributes: { exchangeDid: opts.exchangeDid } }),
+    Effect.provide(FetchHttpClient.layer),
+  );
+  return runtime.runPromise(effect);
 }
 
 export interface SettlementInputs {
@@ -66,23 +116,18 @@ export class PdsSettlementTransport implements SettlementTransport {
   }
 
   async publish(exchangeDid: string, record: SettlementRecord): Promise<PublishedRecord> {
-    const res = await fetch(`${this.endpoint}/xrpc/com.atproto.repo.createRecord`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.accessToken}`,
-      },
-      body: JSON.stringify({
+    return postCreateRecord({
+      url: `${this.endpoint}/xrpc/com.atproto.repo.createRecord`,
+      authToken: this.accessToken,
+      body: {
         repo: exchangeDid,
         collection: "dev.cocore.compute.settlement",
         record,
-      }),
+      },
+      spanName: "exchange.pds.publish",
+      exchangeDid,
+      errorMessage: (status, text) => `createRecord settlement returned ${status}: ${text}`,
     });
-    if (!res.ok) {
-      throw new Error(`createRecord settlement returned ${res.status}: ${await res.text()}`);
-    }
-    const body = (await res.json()) as { uri: string; cid: string };
-    return body;
   }
 }
 
@@ -110,25 +155,20 @@ export class ConsoleProxySettlementTransport implements SettlementTransport {
     this.apiKey = opts.apiKey;
   }
 
-  async publish(_exchangeDid: string, record: SettlementRecord): Promise<PublishedRecord> {
+  async publish(exchangeDid: string, record: SettlementRecord): Promise<PublishedRecord> {
     // The proxy resolves the API key → DID and writes to that DID's
     // PDS, so we don't need to send `repo` separately.
-    const res = await fetch(`${this.base}/api/pds/createRecord`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
+    return postCreateRecord({
+      url: `${this.base}/api/pds/createRecord`,
+      authToken: this.apiKey,
+      body: {
         collection: "dev.cocore.compute.settlement",
         record,
-      }),
+      },
+      spanName: "exchange.consoleProxy.publish",
+      exchangeDid,
+      errorMessage: (status, text) => `proxy settlement createRecord ${status}: ${text}`,
     });
-    if (!res.ok) {
-      throw new Error(`proxy settlement createRecord ${res.status}: ${await res.text()}`);
-    }
-    const body = (await res.json()) as { uri: string; cid: string };
-    return body;
   }
 }
 

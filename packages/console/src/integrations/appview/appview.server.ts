@@ -1,4 +1,4 @@
-import { Duration, Effect, Schedule } from "effect";
+import { Data, Duration, Effect, Schedule } from "effect";
 
 /** JSON subset TanStack server functions can serialize across the RPC boundary. */
 export type JsonValue =
@@ -34,16 +34,10 @@ function getAppviewBaseUrl(): string {
   return "http://localhost:8081";
 }
 
-export class AppviewFetchError extends Error {
-  readonly _tag = "AppviewFetchError";
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = "AppviewFetchError";
-  }
-}
+export class AppviewFetchError extends Data.TaggedError("AppviewFetchError")<{
+  readonly status: number;
+  readonly message: string;
+}> {}
 
 export type AppviewListProvidersResponse = { providers: AppviewIndexedRecord[] };
 export type AppviewListProfilesResponse = { profiles: AppviewIndexedRecord[] };
@@ -209,12 +203,6 @@ const appviewRetrySchedule = Schedule.intersect(
   Schedule.recurs(2),
 );
 
-/** Last-known-good response per URL. When the AppView is briefly down, the
- *  console serves slightly-stale data and stays usable instead of erroring
- *  the whole page — the AppView is a cache anyway, so stale reads are safe.
- *  Only used as a *fallback* after a transient failure, never to skip a live
- *  fetch, and only within the staleness window below. */
-const appviewResponseCache = new Map<string, { at: number; value: unknown }>();
 const APPVIEW_STALE_MAX_MS = 10 * 60_000;
 
 function appviewFetchOnceEffect<T>(url: string): Effect.Effect<T, AppviewFetchError> {
@@ -228,7 +216,10 @@ function appviewFetchOnceEffect<T>(url: string): Effect.Effect<T, AppviewFetchEr
         if (!res.ok) {
           resume(
             Effect.fail(
-              new AppviewFetchError(res.status, text.slice(0, 500) || `HTTP ${res.status}`),
+              new AppviewFetchError({
+                status: res.status,
+                message: text.slice(0, 500) || `HTTP ${res.status}`,
+              }),
             ),
           );
           return;
@@ -238,7 +229,10 @@ function appviewFetchOnceEffect<T>(url: string): Effect.Effect<T, AppviewFetchEr
         } catch (e) {
           resume(
             Effect.fail(
-              new AppviewFetchError(500, `invalid JSON from AppView: ${(e as Error).message}`),
+              new AppviewFetchError({
+                status: 500,
+                message: `invalid JSON from AppView: ${(e as Error).message}`,
+              }),
             ),
           );
         }
@@ -254,7 +248,10 @@ function appviewFetchOnceEffect<T>(url: string): Effect.Effect<T, AppviewFetchEr
         const detail = cause?.code ?? cause?.message;
         resume(
           Effect.fail(
-            new AppviewFetchError(0, `${message}${detail ? ` (${detail})` : ""} — GET ${url}`),
+            new AppviewFetchError({
+              status: 0,
+              message: `${message}${detail ? ` (${detail})` : ""} — GET ${url}`,
+            }),
           ),
         );
       },
@@ -262,47 +259,73 @@ function appviewFetchOnceEffect<T>(url: string): Effect.Effect<T, AppviewFetchEr
   });
 }
 
-/** GET JSON from the AppView HTTP API, with retry-on-transient and a
- *  stale-cache fallback so a brief AppView outage degrades the console
- *  instead of breaking it. */
+/** The AppView HTTP read client, as an Effect service so consumers depend
+ *  on an injected boundary (testable: provide a stub layer) rather than a
+ *  module-level fetch. The single instance owns the last-known-good
+ *  response cache; the console runtime provides `AppviewClient.Default`.
+ *
+ *  `get` GETs JSON with retry-on-transient and a stale-cache fallback so a
+ *  brief AppView outage degrades the console instead of breaking it, and
+ *  carries its own `appview.request` span (so every call is traced). */
+export class AppviewClient extends Effect.Service<AppviewClient>()("AppviewClient", {
+  effect: Effect.sync(() => {
+    // Last-known-good response per URL, owned by this client instance.
+    // Only used as a *fallback* after a transient failure, never to skip a
+    // live fetch, and only within the staleness window above. The AppView
+    // is a cache anyway, so stale reads are safe.
+    const cache = new Map<string, { at: number; value: unknown }>();
+
+    const get = <T>(path: string, search: URLSearchParams): Effect.Effect<T, AppviewFetchError> => {
+      const url = buildUrl(path, search);
+      return Effect.gen(function* () {
+        const fetched = yield* Effect.either(
+          appviewFetchOnceEffect<T>(url).pipe(
+            Effect.retry({ schedule: appviewRetrySchedule, while: isTransient }),
+          ),
+        );
+        if (fetched._tag === "Right") {
+          cache.set(url, { at: Date.now(), value: fetched.right });
+          return fetched.right;
+        }
+        // Transient failure → serve last-known-good if it's fresh enough. A
+        // 4xx (e.g. 404) is a real answer, not an outage, so let it fail.
+        if (isTransient(fetched.left)) {
+          const cached = cache.get(url);
+          if (cached && Date.now() - cached.at <= APPVIEW_STALE_MAX_MS) {
+            yield* Effect.logWarning(
+              `[appview] serving stale (${Math.round((Date.now() - cached.at) / 1000)}s old) after ${fetched.left.message}`,
+            );
+            return cached.value as T;
+          }
+        }
+        return yield* Effect.fail(fetched.left);
+      }).pipe(Effect.withSpan("appview.request", { attributes: { "appview.path": path } }));
+    };
+
+    return { get } as const;
+  }),
+}) {}
+
+/** Thin accessor: GET JSON from the AppView via the injected client. The
+ *  exported `appview*Effect`s below all funnel through here, so each
+ *  requires the {@link AppviewClient} service in its environment. */
 function appviewGetJsonEffect<T>(
   path: string,
   search: URLSearchParams,
-): Effect.Effect<T, AppviewFetchError> {
-  const url = buildUrl(path, search);
-  return Effect.gen(function* () {
-    const fetched = yield* Effect.either(
-      appviewFetchOnceEffect<T>(url).pipe(
-        Effect.retry({ schedule: appviewRetrySchedule, while: isTransient }),
-      ),
-    );
-    if (fetched._tag === "Right") {
-      appviewResponseCache.set(url, { at: Date.now(), value: fetched.right });
-      return fetched.right;
-    }
-    // Transient failure → serve last-known-good if it's fresh enough. A 4xx
-    // (e.g. 404) is a real answer, not an outage, so let it fail through.
-    if (isTransient(fetched.left)) {
-      const cached = appviewResponseCache.get(url);
-      if (cached && Date.now() - cached.at <= APPVIEW_STALE_MAX_MS) {
-        console.warn(
-          `[appview] serving stale (${Math.round((Date.now() - cached.at) / 1000)}s old) after ${fetched.left.message}`,
-        );
-        return cached.value as T;
-      }
-    }
-    return yield* Effect.fail(fetched.left);
-  });
+): Effect.Effect<T, AppviewFetchError, AppviewClient> {
+  return Effect.flatMap(AppviewClient, (client) => client.get<T>(path, search));
 }
 
 export const appviewListProvidersEffect: Effect.Effect<
   AppviewListProvidersResponse,
-  AppviewFetchError
+  AppviewFetchError,
+  AppviewClient
 > = appviewGetJsonEffect("/xrpc/dev.cocore.compute.listProviders", new URLSearchParams());
 
 export const appviewListProfilesEffect: Effect.Effect<
   AppviewListProfilesResponse,
-  AppviewFetchError
+  AppviewFetchError,
+  AppviewClient
 > = appviewGetJsonEffect("/xrpc/dev.cocore.account.listProfiles", new URLSearchParams());
 
 /** Discovery directory used by /friends. The AppView returns every
@@ -316,7 +339,7 @@ export const appviewListProfilesEffect: Effect.Effect<
  *  any other error becomes an AppviewFetchError. */
 export function appviewGetProfileEffect(
   did: string,
-): Effect.Effect<AppviewProfilePagePayload | null, AppviewFetchError> {
+): Effect.Effect<AppviewProfilePagePayload | null, AppviewFetchError, AppviewClient> {
   const search = new URLSearchParams();
   search.set("did", did);
   return Effect.gen(function* () {
@@ -335,7 +358,7 @@ export function appviewGetProfileEffect(
 export function appviewListIncomingFriendsEffect(filters: {
   did: string;
   limit?: number;
-}): Effect.Effect<AppviewListIncomingFriendsResponse, AppviewFetchError> {
+}): Effect.Effect<AppviewListIncomingFriendsResponse, AppviewFetchError, AppviewClient> {
   const search = new URLSearchParams();
   search.set("did", filters.did);
   if (filters.limit !== undefined) search.set("limit", String(filters.limit));
@@ -344,7 +367,7 @@ export function appviewListIncomingFriendsEffect(filters: {
 
 export function appviewListFriendEdgesEffect(filters?: {
   limit?: number;
-}): Effect.Effect<AppviewListFriendEdgesResponse, AppviewFetchError> {
+}): Effect.Effect<AppviewListFriendEdgesResponse, AppviewFetchError, AppviewClient> {
   const search = new URLSearchParams();
   if (filters?.limit !== undefined) search.set("limit", String(filters.limit));
   return appviewGetJsonEffect("/xrpc/dev.cocore.account.listFriendEdges", search);
@@ -359,7 +382,7 @@ export function appviewListAccountsEffect(filters: {
   excludeViewerFriends?: boolean;
   /** Substring match on profile handle and/or DID (AppView `q` param). */
   query?: string;
-}): Effect.Effect<AppviewListAccountsResponse, AppviewFetchError> {
+}): Effect.Effect<AppviewListAccountsResponse, AppviewFetchError, AppviewClient> {
   const search = new URLSearchParams();
   if (filters.limit !== undefined) search.set("limit", String(filters.limit));
   if (filters.offset !== undefined) search.set("offset", String(filters.offset));
@@ -374,14 +397,15 @@ export function appviewListAccountsEffect(filters: {
 
 export const appviewModelActivityEffect: Effect.Effect<
   AppviewModelActivityResponse,
-  AppviewFetchError
+  AppviewFetchError,
+  AppviewClient
 > = appviewGetJsonEffect("/xrpc/dev.cocore.compute.modelActivity", new URLSearchParams());
 
 export function appviewGetReceiptsEffect(filters: {
   provider?: string;
   requester?: string;
   job?: string;
-}): Effect.Effect<AppviewGetReceiptsResponse, AppviewFetchError> {
+}): Effect.Effect<AppviewGetReceiptsResponse, AppviewFetchError, AppviewClient> {
   const search = new URLSearchParams();
   if (filters.provider?.trim()) search.set("provider", filters.provider.trim());
   if (filters.requester?.trim()) search.set("requester", filters.requester.trim());
@@ -391,7 +415,7 @@ export function appviewGetReceiptsEffect(filters: {
 
 export function appviewGetJobsEffect(
   requester: string,
-): Effect.Effect<AppviewGetJobsResponse, AppviewFetchError> {
+): Effect.Effect<AppviewGetJobsResponse, AppviewFetchError, AppviewClient> {
   const search = new URLSearchParams();
   search.set("requester", requester.trim());
   return appviewGetJsonEffect("/xrpc/dev.cocore.compute.listJobs", search);
@@ -400,7 +424,7 @@ export function appviewGetJobsEffect(
 export function appviewGetSettlementsEffect(filters: {
   receipt?: string;
   requester?: string;
-}): Effect.Effect<AppviewGetSettlementsResponse, AppviewFetchError> {
+}): Effect.Effect<AppviewGetSettlementsResponse, AppviewFetchError, AppviewClient> {
   const search = new URLSearchParams();
   if (filters.receipt?.trim()) search.set("receipt", filters.receipt.trim());
   if (filters.requester?.trim()) search.set("requester", filters.requester.trim());
@@ -409,7 +433,11 @@ export function appviewGetSettlementsEffect(filters: {
 
 export function appviewVerifyReceiptEffect(
   uri: string,
-): Effect.Effect<AppviewVerifyReceiptResponse | { error: string }, AppviewFetchError> {
+): Effect.Effect<
+  AppviewVerifyReceiptResponse | { error: string },
+  AppviewFetchError,
+  AppviewClient
+> {
   const search = new URLSearchParams();
   search.set("uri", uri.trim());
   return appviewGetJsonEffect("/xrpc/dev.cocore.compute.verifyReceipt", search);
@@ -417,7 +445,11 @@ export function appviewVerifyReceiptEffect(
 
 export function appviewVerifySettlementEffect(
   uri: string,
-): Effect.Effect<AppviewVerifySettlementResponse | { error: string }, AppviewFetchError> {
+): Effect.Effect<
+  AppviewVerifySettlementResponse | { error: string },
+  AppviewFetchError,
+  AppviewClient
+> {
   const search = new URLSearchParams();
   search.set("uri", uri.trim());
   return appviewGetJsonEffect("/xrpc/dev.cocore.compute.verifySettlement", search);

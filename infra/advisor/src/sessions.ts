@@ -12,10 +12,22 @@
 // survives advisor restarts; for v0 a redeploy just disconnects
 // in-flight requesters and they retry.
 
-import type { ServerResponse } from "node:http";
-
 import type { AttestedSseEvent } from "./events.ts";
 import { renderSseEvent } from "./events.ts";
+
+/** Minimal write-side an SSE relay needs. Node's `ServerResponse` satisfies
+ *  this structurally (the test + any raw-`createServer` caller pass one
+ *  directly), and so does the @effect/platform stream-backed sink the
+ *  HttpRouter `/jobs` route uses — letting the SessionManager drive either
+ *  transport with identical frame-writing logic. */
+export interface SseResponse {
+  statusCode: number;
+  setHeader(name: string, value: string | number | readonly string[]): void;
+  flushHeaders(): void;
+  write(chunk: string): boolean;
+  end(): void;
+  readonly writableEnded: boolean;
+}
 
 export interface SessionEntry {
   /** Provider DID this session was dispatched to. */
@@ -36,7 +48,7 @@ export interface SessionEntry {
   /** Last `inference_chunk` arrival (epoch ms), or null if none yet. */
   lastChunkAt: number | null;
   /** Underlying SSE response — we own writing to it. */
-  res: ServerResponse;
+  res: SseResponse;
   /** Wall-clock idle timer; reset on every chunk and cleared on
    *  complete. */
   idleTimer: NodeJS.Timeout | null;
@@ -82,7 +94,7 @@ export class SessionManager {
     providerDid: string,
     providerMachineId: string,
     requesterDid: string,
-    res: ServerResponse,
+    res: SseResponse,
     receivedAt?: number,
   ): SessionEntry {
     res.statusCode = 200;

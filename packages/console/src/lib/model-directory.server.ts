@@ -22,6 +22,8 @@
 
 import { Effect } from "effect";
 
+import { runTraced } from "@/lib/o11y.server.ts";
+
 import {
   appviewListProfilesEffect,
   appviewListProvidersEffect,
@@ -307,25 +309,31 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
   // tolerant of AppView failure independently — providers being
   // unreachable means an empty directory, but a profile or
   // activity miss just means we render bare DIDs / zero counts.
-  const [appviewResults, advisorOnline] = await Promise.all([
-    Promise.allSettled([
-      Effect.runPromise(appviewListProvidersEffect),
-      Effect.runPromise(appviewListProfilesEffect),
-      Effect.runPromise(appviewModelActivityEffect),
-    ]),
+  const [[providersResult, profilesResult, activityResult], advisorOnline] = await Promise.all([
+    // One root span, three concurrent child `appview.request` spans.
+    runTraced(
+      "models.directory.appview",
+      Effect.all(
+        [
+          Effect.either(appviewListProvidersEffect),
+          Effect.either(appviewListProfilesEffect),
+          Effect.either(appviewModelActivityEffect),
+        ],
+        { concurrency: "unbounded" },
+      ),
+    ),
     fetchAdvisorOnlineDids(),
   ]);
-  const [providersResult, profilesResult, activityResult] = appviewResults;
 
-  if (providersResult.status !== "fulfilled") {
-    logAppviewUnreachable(providersResult.reason);
+  if (providersResult._tag !== "Right") {
+    logAppviewUnreachable(providersResult.left);
     return { models: [], generatedAt, appviewUnreachable: true };
   }
   logAppviewRecovered();
 
   const profilesByDid = new Map<string, ProfileChip>();
-  if (profilesResult.status === "fulfilled") {
-    for (const row of profilesResult.value.profiles) {
+  if (profilesResult._tag === "Right") {
+    for (const row of profilesResult.right.profiles) {
       const body = row.body as ProfileRecordView;
       profilesByDid.set(row.repo, {
         did: row.repo,
@@ -335,12 +343,12 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
       });
     }
   } else {
-    console.warn("[model-directory] AppView listProfiles failed:", profilesResult.reason);
+    console.warn("[model-directory] AppView listProfiles failed:", profilesResult.left);
   }
 
-  const activity = activityResult.status === "fulfilled" ? activityResult.value : null;
-  if (activityResult.status !== "fulfilled") {
-    console.warn("[model-directory] AppView modelActivity failed:", activityResult.reason);
+  const activity = activityResult._tag === "Right" ? activityResult.right : null;
+  if (activityResult._tag !== "Right") {
+    console.warn("[model-directory] AppView modelActivity failed:", activityResult.left);
   }
 
   // Fall back to microcosm for operator chips: any online provider DID without
@@ -348,7 +356,7 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
   // Slingshot + its PDS, so the table shows a real user instead of a bare DID.
   const onlineMissingProfile = [
     ...new Set(
-      providersResult.value.providers
+      providersResult.right.providers
         .map((row) => row.repo)
         .filter((did) => (advisorOnline?.has(did) ?? false) && !profilesByDid.has(did)),
     ),
@@ -366,7 +374,7 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
   // cleaned up) we keep just the freshest — exactly one row per machine.
   const byModel = new Map<string, ModelDirectoryEntry>();
   const machinesByModel = new Map<string, Map<string, ModelMachine>>();
-  for (const row of providersResult.value.providers) {
+  for (const row of providersResult.right.providers) {
     const body = row.body as ProviderRecordView;
     const supportedModels = body.supportedModels ?? [];
     const did = row.repo;

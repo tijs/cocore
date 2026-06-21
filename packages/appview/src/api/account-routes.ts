@@ -7,58 +7,20 @@
 // with `verifyServiceAuthToken`. The authenticated DID scopes every
 // operation, so a caller can only ever touch their own keys.
 //
-// These mirror the console's dev.cocore.account.* routes (the canonical
-// path already used service-auth); the difference is the key store now
-// lives in the AppView, not console-db.
+// Authored as an @effect/platform `HttpRouter`: every route is an Effect
+// returning an `HttpServerResponse` (`ok`/`err`), closing over the
+// operational `AccountStore` and the service-auth `appviewDid` audience
+// (dependency injection by closure — no Context tags). Each route carries
+// an `appview.account.<op>` span. listApiKeys/createApiKey are mounted
+// with `HttpRouter.all` + an explicit method check so a wrong-method call
+// still yields 405 (the rest are single-method `get`/`post` routes).
 
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { HttpRouter, HttpServerRequest } from "@effect/platform";
+import { Effect } from "effect";
 
 import { verifyServiceAuthToken } from "../auth/service-auth.ts";
 import type { AccountStore, ApiKeyRow } from "../operational/account-store.ts";
-
-type Handler = (req: IncomingMessage, res: ServerResponse, url: URL) => void | Promise<void>;
-
-function json(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" });
-  res.end(JSON.stringify(body));
-}
-
-function bearer(req: IncomingMessage): string | null {
-  const h = req.headers["authorization"];
-  if (typeof h !== "string") return null;
-  const m = /^Bearer\s+(.+)$/i.exec(h);
-  return m ? m[1]!.trim() : null;
-}
-
-function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on("data", (c: Buffer) => {
-      size += c.length;
-      // Key-management bodies are tiny; cap to avoid unbounded buffering.
-      if (size > 64 * 1024) {
-        reject(new Error("body too large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8").trim();
-      if (raw.length === 0) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new Error("body must be JSON"));
-      }
-    });
-    req.on("error", reject);
-  });
-}
+import { bearer, err, jsonBody, ok } from "./http-app.ts";
 
 /** Shape an {@link ApiKeyRow} into the `dev.cocore.account.defs#apiKeyView`
  *  wire form: never the secret, and null optionals dropped (absent, not
@@ -77,106 +39,125 @@ function apiKeyView(row: ApiKeyRow): Record<string, unknown> {
   return view;
 }
 
-/** Verify service auth for `lxm`. On success returns the DID; on failure
- *  writes the 401 response and returns null. */
-async function authedDid(
-  req: IncomingMessage,
-  res: ServerResponse,
-  audience: string,
-  lxm: string,
-): Promise<string | null> {
-  const result = await verifyServiceAuthToken(bearer(req), { audience, lxm });
-  if (!result.ok) {
-    json(res, result.status, { error: result.error, message: result.message });
-    return null;
-  }
-  return result.did;
-}
-
-function methodNotAllowed(res: ServerResponse, expected: string): void {
-  json(res, 405, { error: "MethodNotAllowed", message: `expected HTTP ${expected}` });
-}
-
-/** Route map for the four account methods, scoped to `appviewDid` as the
- *  service-auth audience and `store` as the key backend. Merge into the
- *  AppView's route table. */
-export function accountRoutes(store: AccountStore, appviewDid: string): Record<string, Handler> {
+/** The four account methods as an `HttpRouter`, scoped to `appviewDid` as
+ *  the service-auth audience and `store` as the key backend. Mount into the
+ *  AppView app. */
+export function buildAccountRouter(
+  store: AccountStore,
+  appviewDid: string,
+): HttpRouter.HttpRouter<never, never> {
   const NS = "dev.cocore.account";
-  return {
-    [`/xrpc/${NS}.listApiKeys`]: async (req, res) => {
-      if (req.method !== "GET") return methodNotAllowed(res, "GET");
-      const did = await authedDid(req, res, appviewDid, `${NS}.listApiKeys`);
-      if (!did) return;
-      json(res, 200, { keys: store.listKeysForDid(did).map(apiKeyView) });
-    },
 
-    [`/xrpc/${NS}.createApiKey`]: async (req, res) => {
-      if (req.method !== "POST") return methodNotAllowed(res, "POST");
-      const did = await authedDid(req, res, appviewDid, `${NS}.createApiKey`);
-      if (!did) return;
-      let body: { name?: unknown; expiresAt?: unknown };
-      try {
-        body = (await readJsonBody(req)) as typeof body;
-      } catch (e) {
-        return json(res, 400, { error: "InvalidRequest", message: (e as Error).message });
+  /** Service-auth for `lxm`: yields the authenticated DID, or a 401-shaped
+   *  error response carrying the verifier's own status/error/message. */
+  const auth = (lxm: string) =>
+    Effect.gen(function* () {
+      const token = yield* bearer;
+      const result = yield* Effect.promise(() =>
+        verifyServiceAuthToken(token, { audience: appviewDid, lxm }),
+      );
+      if (!result.ok) {
+        return {
+          ok: false as const,
+          response: err(result.status, { error: result.error, message: result.message }),
+        };
       }
-      if (typeof body.name !== "string" || body.name.length < 1 || body.name.length > 100) {
-        return json(res, 400, {
-          error: "InvalidRequest",
-          message: "name must be a string of length 1..100",
-        });
-      }
-      if (
-        body.expiresAt !== undefined &&
-        body.expiresAt !== null &&
-        typeof body.expiresAt !== "string"
-      ) {
-        return json(res, 400, {
-          error: "InvalidRequest",
-          message: "expiresAt must be an RFC3339 string when provided",
-        });
-      }
-      const { key, secret } = store.createKey({
-        did,
-        name: body.name,
-        expiresAt: typeof body.expiresAt === "string" ? body.expiresAt : null,
-      });
-      json(res, 200, { key: apiKeyView(key), secret });
-    },
+      return { ok: true as const, did: result.did };
+    });
 
-    [`/xrpc/${NS}.revokeApiKey`]: async (req, res) => {
-      if (req.method !== "POST") return methodNotAllowed(res, "POST");
-      const did = await authedDid(req, res, appviewDid, `${NS}.revokeApiKey`);
-      if (!did) return;
-      const id = await readKeyId(req, res);
-      if (id === null) return;
-      json(res, 200, { revoked: store.revokeKey({ id, did }) });
-    },
-
-    [`/xrpc/${NS}.deleteApiKey`]: async (req, res) => {
-      if (req.method !== "POST") return methodNotAllowed(res, "POST");
-      const did = await authedDid(req, res, appviewDid, `${NS}.deleteApiKey`);
-      if (!did) return;
-      const id = await readKeyId(req, res);
-      if (id === null) return;
-      json(res, 200, { deleted: store.deleteKey({ id, did }) });
-    },
-  };
-
-  /** Parse the shared `{ id }` body for revoke/delete. Writes a 400 and
-   *  returns null on a bad body. */
-  async function readKeyId(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
-    let body: { id?: unknown };
-    try {
-      body = (await readJsonBody(req)) as typeof body;
-    } catch (e) {
-      json(res, 400, { error: "InvalidRequest", message: (e as Error).message });
-      return null;
+  /** Parse the shared `{ id }` body for revoke/delete; yields the id, or a
+   *  400-shaped error response on a bad body or a missing/oversize id. */
+  const readKeyId = Effect.gen(function* () {
+    const parsed = yield* Effect.either(jsonBody);
+    if (parsed._tag === "Left") {
+      return {
+        ok: false as const,
+        response: err(400, { error: "InvalidRequest", message: parsed.left.message }),
+      };
     }
+    const body = parsed.right as { id?: unknown };
     if (typeof body.id !== "string" || body.id.length < 1 || body.id.length > 200) {
-      json(res, 400, { error: "InvalidRequest", message: "id must be a string of length 1..200" });
-      return null;
+      return {
+        ok: false as const,
+        response: err(400, {
+          error: "InvalidRequest",
+          message: "id must be a string of length 1..200",
+        }),
+      };
     }
-    return body.id;
-  }
+    return { ok: true as const, id: body.id };
+  });
+
+  return HttpRouter.empty.pipe(
+    HttpRouter.all(
+      `/xrpc/${NS}.listApiKeys`,
+      Effect.gen(function* () {
+        const req = yield* HttpServerRequest.HttpServerRequest;
+        if (req.method !== "GET") {
+          return err(405, { error: "MethodNotAllowed", message: "expected HTTP GET" });
+        }
+        const a = yield* auth(`${NS}.listApiKeys`);
+        if (!a.ok) return a.response;
+        return ok({ keys: store.listKeysForDid(a.did).map(apiKeyView) });
+      }).pipe(Effect.withSpan("appview.account.listKeys")),
+    ),
+    HttpRouter.all(
+      `/xrpc/${NS}.createApiKey`,
+      Effect.gen(function* () {
+        const req = yield* HttpServerRequest.HttpServerRequest;
+        if (req.method !== "POST") {
+          return err(405, { error: "MethodNotAllowed", message: "expected HTTP POST" });
+        }
+        const a = yield* auth(`${NS}.createApiKey`);
+        if (!a.ok) return a.response;
+        const parsed = yield* Effect.either(jsonBody);
+        if (parsed._tag === "Left") {
+          return err(400, { error: "InvalidRequest", message: parsed.left.message });
+        }
+        const body = parsed.right as { name?: unknown; expiresAt?: unknown };
+        if (typeof body.name !== "string" || body.name.length < 1 || body.name.length > 100) {
+          return err(400, {
+            error: "InvalidRequest",
+            message: "name must be a string of length 1..100",
+          });
+        }
+        if (
+          body.expiresAt !== undefined &&
+          body.expiresAt !== null &&
+          typeof body.expiresAt !== "string"
+        ) {
+          return err(400, {
+            error: "InvalidRequest",
+            message: "expiresAt must be an RFC3339 string when provided",
+          });
+        }
+        const { key, secret } = store.createKey({
+          did: a.did,
+          name: body.name,
+          expiresAt: typeof body.expiresAt === "string" ? body.expiresAt : null,
+        });
+        return ok({ key: apiKeyView(key), secret });
+      }).pipe(Effect.withSpan("appview.account.createKey")),
+    ),
+    HttpRouter.post(
+      `/xrpc/${NS}.revokeApiKey`,
+      Effect.gen(function* () {
+        const a = yield* auth(`${NS}.revokeApiKey`);
+        if (!a.ok) return a.response;
+        const k = yield* readKeyId;
+        if (!k.ok) return k.response;
+        return ok({ revoked: store.revokeKey({ id: k.id, did: a.did }) });
+      }).pipe(Effect.withSpan("appview.account.revokeKey")),
+    ),
+    HttpRouter.post(
+      `/xrpc/${NS}.deleteApiKey`,
+      Effect.gen(function* () {
+        const a = yield* auth(`${NS}.deleteApiKey`);
+        if (!a.ok) return a.response;
+        const k = yield* readKeyId;
+        if (!k.ok) return k.response;
+        return ok({ deleted: store.deleteKey({ id: k.id, did: a.did }) });
+      }).pipe(Effect.withSpan("appview.account.deleteKey")),
+    ),
+  );
 }

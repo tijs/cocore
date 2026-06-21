@@ -29,6 +29,8 @@ import {
 import type { Did } from "@atcute/lexicons";
 import { isDid } from "@atcute/lexicons/syntax";
 import { fromBase64Url } from "@atcute/multibase";
+import { makeRuntime } from "@cocore/o11y";
+import { Cache, Duration, Effect, Exit } from "effect";
 
 /** Tolerance for clock skew between the issuing PDS and us. */
 const CLOCK_SKEW_SECONDS = 30;
@@ -52,6 +54,49 @@ const didResolver = new CompositeDidDocumentResolver({
     web: new WebDidDocumentResolver(),
   },
 });
+
+type ResolvableDid = Did<"plc" | "web">;
+
+// Cached, traced DID-document resolution. The verify path resolves the
+// issuer's DID document on every request to fetch its signing key; the
+// same handful of requesters call repeatedly within seconds, so an
+// uncached resolve hammers plc.directory / the did:web host. We wrap the
+// resolver in an Effect `Cache` with a TTL so repeated lookups for a DID
+// hit memory instead of the network, and put a span around each *actual*
+// lookup (cache misses only) named "identity.resolve".
+//
+// Failures are NOT cached: `makeWith` gives a zero TTL to a failed Exit,
+// so a transient resolution error doesn't pin a DID into a broken state
+// — the next request re-resolves, matching the pre-cache behavior.
+const DID_DOC_CACHE_CAPACITY = 1024;
+const DID_DOC_CACHE_TTL = Duration.minutes(5);
+
+// One telemetry runtime for this module. A no-op (Layer.empty tracing)
+// until OTEL_EXPORTER_OTLP_* is set — see @cocore/o11y.
+const runtime = makeRuntime({
+  serviceName: process.env["OTEL_SERVICE_NAME"] ?? "cocore-appview",
+  serviceVersion: process.env["COCORE_SOFTWARE_VERSION"],
+});
+
+const didDocCache = runtime.runSync(
+  Cache.makeWith({
+    capacity: DID_DOC_CACHE_CAPACITY,
+    lookup: (did: ResolvableDid) =>
+      Effect.tryPromise(() => didResolver.resolve(did)).pipe(
+        Effect.withSpan("identity.resolve", { attributes: { did } }),
+      ),
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? DID_DOC_CACHE_TTL : Duration.zero),
+  }),
+);
+
+/** Resolve a DID document through the TTL cache. Mirrors
+ *  `didResolver.resolve` — rejects on resolution failure (which is not
+ *  cached). Kept private; the verify path is the only caller. */
+function resolveDidDocument(
+  did: ResolvableDid,
+): Promise<Awaited<ReturnType<typeof didResolver.resolve>>> {
+  return runtime.runPromise(didDocCache.get(did));
+}
 
 function readBearer(request: Request): string | null {
   const h = request.headers.get("authorization");
@@ -148,7 +193,7 @@ export async function verifyServiceAuthToken(
   // Resolve the issuer's DID document and pull the atproto signing key.
   let material: { type: string; publicKeyMultibase: string } | undefined;
   try {
-    const doc = await didResolver.resolve(iss as Did<"plc" | "web">);
+    const doc = await resolveDidDocument(iss as ResolvableDid);
     material = getAtprotoVerificationMaterial(doc);
   } catch {
     return fail(401, "BadJwtIssuer", "could not resolve issuer DID document");

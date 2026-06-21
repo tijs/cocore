@@ -263,6 +263,55 @@ pub fn crash_signature() -> Option<CrashSignature> {
 // process. Dropping it would silently stop the file log.
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
+// Keeps the OTLP tracer provider alive for the life of the process.
+// Dropping it shuts down the exporter (and would stop OTLP export), so we
+// park it here once built. Only set when OTLP is configured.
+static OTEL_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> = OnceLock::new();
+
+/// True when an OTLP endpoint is configured. Mirrors the TypeScript
+/// services' gating (`@cocore/o11y`): until this is set the OTLP layer is
+/// never built, so the default build behaves exactly as before.
+fn otlp_enabled() -> bool {
+    std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()
+        || std::env::var_os("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_some()
+}
+
+/// Build the OTLP tracer provider from the standard `OTEL_EXPORTER_OTLP_*`
+/// env vars (endpoint, headers, etc. — read by the exporter itself) and
+/// return a `tracing` layer that bridges the agent's existing spans/events
+/// to it. Returns `None` (logging stays stderr+file only) on any build
+/// error so a misconfigured collector never breaks logging init.
+///
+/// Content-safety: this only forwards the spans/events the agent already
+/// emits, which are authored to never carry prompt/token content (see the
+/// module-level contract). It introduces no new fields.
+fn build_otel_provider() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use opentelemetry_sdk::Resource;
+
+    let exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .build()
+    {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("cocore: OTLP span exporter init failed, continuing without OTLP: {err}");
+            return None;
+        }
+    };
+
+    let version = env!("CARGO_PKG_VERSION");
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            Resource::builder()
+                .with_service_name("cocore-provider")
+                .with_attribute(opentelemetry::KeyValue::new("service.version", version))
+                .build(),
+        )
+        .build();
+    Some(provider)
+}
+
 /// Initialise tracing with a stderr layer (unchanged behaviour) PLUS a
 /// rolling daily file at `~/.cocore/logs/agent.log`. The file carries
 /// the same events as stderr — and since the agent's tracing is written
@@ -289,9 +338,25 @@ pub fn init_logging(level: &str) {
             .with_filter(filter())
     });
 
+    // OTLP export, only when an endpoint is configured. `Option<Layer>` is
+    // itself a `Layer`, so the `None` case adds nothing to the registry.
+    let otel_layer = if otlp_enabled() {
+        build_otel_provider().map(|provider| {
+            let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "cocore-provider");
+            // Park the provider so it isn't dropped (which would stop export).
+            let _ = OTEL_PROVIDER.set(provider);
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(filter())
+        })
+    } else {
+        None
+    };
+
     tracing_subscriber::registry()
         .with(stderr_layer)
         .with(file_layer)
+        .with(otel_layer)
         .init();
 }
 

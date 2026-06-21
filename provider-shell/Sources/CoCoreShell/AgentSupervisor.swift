@@ -163,6 +163,9 @@ final class AgentSupervisor {
     /// session or the upload fails, so the user can still attach it by hand.
     func sendBugReport(note: String? = nil) async -> String? {
         guard let bundle = Self.generateBugReportBundle() else { return nil }
+        // Target session.apiBase — the service that paired us holds our bearer
+        // key. (Follow-up: the AppView should serve /api/agent/bug-report too,
+        // so device-pair'd agents can upload; today only the console does.)
         guard let session = SessionStore.load(),
               let apiKey = session.apiKey,
               let base = session.apiBase,

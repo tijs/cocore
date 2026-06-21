@@ -19,15 +19,20 @@
 // works because nothing here is privileged — multiple instances can
 // run against different firehoses and observe the same receipts.
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import Database from "better-sqlite3";
+
+import { HttpRouter } from "@effect/platform";
+import { Config, Duration, Effect, Option, Redacted, Schedule } from "effect";
 
 import { Firehose, type IndexedRecord } from "@cocore/sdk";
 import { Indexer, RelayFirehose } from "@cocore/appview/indexer";
 import { Store } from "@cocore/appview/store";
-import { buildAppviewHandler } from "@cocore/appview/api";
+import { buildAppviewSplit } from "@cocore/appview/api";
 import { AccountStore } from "@cocore/appview/account-store";
+import { makeRuntime } from "@cocore/o11y";
+import { err, header, jsonBody, makeNodeHandler, ok, searchParams } from "@cocore/o11y/http";
 import { Exchange } from "@cocore/exchange";
 import { bootstrapExchangeRecords } from "@cocore/exchange/bootstrap";
 import { ConsoleProxySettlementTransport, SettlementPublisher } from "@cocore/exchange/publisher";
@@ -36,35 +41,126 @@ import { TokenLedger, type TokenLedgerPolicy } from "@cocore/exchange/token-bala
 import { startAutoresponder } from "./autorespond.ts";
 import { createReceiptPipeline } from "./receipt-pipeline.ts";
 
-const PORT = Number(process.env["COCORE_BRIDGE_PORT"] ?? 8080);
-const APPVIEW_PORT = Number(process.env["COCORE_APPVIEW_PORT"] ?? 8081);
-const DB_PATH = process.env["COCORE_DB"] ?? ":memory:";
+// Optional secret: read as Redacted (never serializes into logs/traces)
+// and, to match the old `if (process.env[X])` truthiness, treat an empty
+// string as absent (None) — not as a present-but-empty secret.
+const secretOption = (name: string) =>
+  Config.redacted(name).pipe(
+    Config.option,
+    Config.map(Option.filter((r) => Redacted.value(r).length > 0)),
+  );
+
+// Typed, fail-fast configuration. Read ONCE at startup; a malformed
+// numeric env var crashes immediately with a clear Config error rather
+// than coercing to NaN later. Secrets are kept Redacted and only
+// unwrapped at their point of use (signing, constant-time compare,
+// transport auth). Defaults preserved exactly from the previous
+// `process.env[...] ?? default` / `Number(... ?? n)` reads.
+const CONFIG = Effect.runSync(
+  Effect.all({
+    bridgePort: Config.integer("COCORE_BRIDGE_PORT").pipe(Config.withDefault(8080)),
+    appviewPort: Config.integer("COCORE_APPVIEW_PORT").pipe(Config.withDefault(8081)),
+    dbPath: Config.string("COCORE_DB").pipe(Config.withDefault(":memory:")),
+    appviewDid: Config.string("COCORE_APPVIEW_DID").pipe(Config.option),
+    accountDb: Config.string("COCORE_ACCOUNT_DB").pipe(Config.withDefault(":memory:")),
+    exchangeDid: Config.string("COCORE_EXCHANGE_DID").pipe(
+      Config.withDefault("did:web:exchange.local"),
+    ),
+    // "1"/"0"-style flag (default-on): any value except "0" is truthy,
+    // so we read the raw string and replicate `!== "0"` exactly rather
+    // than risk Config.boolean's stricter truth table.
+    autorespond: Config.string("COCORE_AUTORESPOND").pipe(Config.withDefault("1")),
+    autorespondProviderDid: Config.string("COCORE_AUTORESPOND_PROVIDER_DID").pipe(
+      Config.withDefault("did:plc:bridge-autoresponder"),
+    ),
+    exchangeApiKey: secretOption("COCORE_EXCHANGE_API_KEY"),
+    exchangeApiBase: Config.string("COCORE_EXCHANGE_API_BASE").pipe(
+      Config.withDefault("https://console.cocore.dev"),
+    ),
+    exchangePrivateJwk: secretOption("COCORE_EXCHANGE_PRIVATE_KEY_JWK"),
+    feeBps: Config.integer("COCORE_FEE_BPS").pipe(Config.withDefault(500)),
+    feeMinMinor: Config.integer("COCORE_FEE_MIN_MINOR").pipe(Config.withDefault(0)),
+    feeCurrency: Config.string("COCORE_FEE_CURRENCY").pipe(Config.withDefault("CC")),
+    tokenRateInputPerMTok: Config.integer("COCORE_TOKEN_RATE_INPUT_PER_MTOK").pipe(
+      Config.withDefault(10),
+    ),
+    tokenRateOutputPerMTok: Config.integer("COCORE_TOKEN_RATE_OUTPUT_PER_MTOK").pipe(
+      Config.withDefault(10),
+    ),
+    tokenRateCurrency: Config.string("COCORE_TOKEN_RATE_CURRENCY").pipe(Config.option),
+    tokenGrant: Config.integer("COCORE_TOKEN_GRANT").pipe(Config.withDefault(1_000_000)),
+    tokenFloor: Config.integer("COCORE_TOKEN_FLOOR").pipe(Config.withDefault(100_000)),
+    treasuryDid: Config.string("COCORE_TREASURY_DID").pipe(Config.option),
+    weeklyRefreshAmount: Config.integer("COCORE_WEEKLY_REFRESH_AMOUNT").pipe(
+      Config.withDefault(70_000),
+    ),
+    refreshCadenceMinutes: Config.integer("COCORE_REFRESH_CADENCE_MINUTES").pipe(
+      Config.withDefault(7 * 24 * 60),
+    ),
+    patronageFractionBps: Config.integer("COCORE_PATRONAGE_FRACTION_BPS").pipe(
+      Config.withDefault(8000),
+    ),
+    patronageCadenceDays: Config.integer("COCORE_PATRONAGE_CADENCE_DAYS").pipe(
+      Config.withDefault(30),
+    ),
+    patronageAuto: Config.string("COCORE_PATRONAGE_AUTO").pipe(Config.withDefault("1")),
+    tokenLedgerDb: Config.string("COCORE_TOKEN_LEDGER_DB").pipe(Config.option),
+    railwayVolumeMountPath: Config.string("RAILWAY_VOLUME_MOUNT_PATH").pipe(Config.option),
+    internalApiKey: secretOption("COCORE_INTERNAL_API_KEY"),
+    relayUrl: Config.string("COCORE_RELAY_URL").pipe(Config.withDefault("wss://bsky.network")),
+    relayUnauthenticated: Config.string("COCORE_RELAY_UNAUTHENTICATED_COMMITS").pipe(
+      Config.withDefault("0"),
+    ),
+    reconcileIntervalSeconds: Config.integer("COCORE_RECONCILE_INTERVAL_SECONDS").pipe(
+      Config.withDefault(60),
+    ),
+    reconcileBatchSize: Config.integer("COCORE_RECONCILE_BATCH_SIZE").pipe(Config.withDefault(200)),
+    selfLoopFeeWaived: Config.string("COCORE_SELF_LOOP_FEE_WAIVED").pipe(Config.withDefault("1")),
+    softwareVersion: Config.string("COCORE_SOFTWARE_VERSION").pipe(
+      Config.withDefault("cocore-services@dev"),
+    ),
+    termsVersion: Config.string("COCORE_TERMS_VERSION").pipe(Config.withDefault("v2-2026-06-13")),
+    termsUri: Config.string("COCORE_TERMS_URI").pipe(Config.option),
+    consolePublicUrl: Config.string("CONSOLE_PUBLIC_URL").pipe(Config.option),
+    leaderboardTtlMs: Config.integer("COCORE_LEADERBOARD_TTL_MS").pipe(Config.withDefault(60_000)),
+    internalSecret: secretOption("COCORE_INTERNAL_SECRET"),
+    bridgeUrl: Config.string("COCORE_BRIDGE_URL").pipe(Config.option),
+    advisorUrl: Config.string("COCORE_ADVISOR_URL").pipe(Config.option),
+    // Operator-only wipe gate: enabled only when set to exactly "1".
+    allowWipe: Config.string("COCORE_ALLOW_WIPE").pipe(Config.withDefault("0")),
+  }),
+);
+
+const PORT = CONFIG.bridgePort;
+const APPVIEW_PORT = CONFIG.appviewPort;
+const DB_PATH = CONFIG.dbPath;
 // Operational account state (API keys, OAuth sessions) lives in its own
 // DB so it survives a receipt-cache rebuild. The dev.cocore.account.*
 // methods only register when COCORE_APPVIEW_DID (the service-auth
 // audience) is also set.
-const APPVIEW_DID = process.env["COCORE_APPVIEW_DID"];
-const ACCOUNT_DB = process.env["COCORE_ACCOUNT_DB"] ?? ":memory:";
-const EXCHANGE_DID = process.env["COCORE_EXCHANGE_DID"] ?? "did:web:exchange.local";
-const AUTORESPOND = (process.env["COCORE_AUTORESPOND"] ?? "1") !== "0";
-const AUTORESPOND_PROVIDER_DID =
-  process.env["COCORE_AUTORESPOND_PROVIDER_DID"] ?? "did:plc:bridge-autoresponder";
+const APPVIEW_DID = Option.getOrUndefined(CONFIG.appviewDid);
+const ACCOUNT_DB = CONFIG.accountDb;
+const EXCHANGE_DID = CONFIG.exchangeDid;
+const AUTORESPOND = CONFIG.autorespond !== "0";
+const AUTORESPOND_PROVIDER_DID = CONFIG.autorespondProviderDid;
 
 // Real-PDS publishing for settlements + the new tokenPatronage
 // records. When COCORE_EXCHANGE_API_KEY is set, the exchange routes
 // records through the cocore console's proxy (Bearer-key auth → DPoP
 // OAuth → real bsky PDS write under the exchange's DID). When unset
 // we use in-process transports — fine for tests, useless in prod.
-const EXCHANGE_API_KEY = process.env["COCORE_EXCHANGE_API_KEY"];
-const EXCHANGE_API_BASE = process.env["COCORE_EXCHANGE_API_BASE"] ?? "https://console.cocore.dev";
+// Kept Redacted (Option<Redacted<string>>); unwrapped only at the
+// transport/fetch boundary.
+const EXCHANGE_API_KEY = CONFIG.exchangeApiKey;
+const EXCHANGE_API_BASE = CONFIG.exchangeApiBase;
 
-const EXCHANGE_PRIVATE_JWK = process.env["COCORE_EXCHANGE_PRIVATE_KEY_JWK"];
+const EXCHANGE_PRIVATE_JWK = CONFIG.exchangePrivateJwk;
 
 // Treasury fee in basis points routed to the treasury DID on every
 // receipt. Conservation 95/5: 500 bps = 5% to treasury, the rest
 // to the provider.
-const FEE_BPS = Number(process.env["COCORE_FEE_BPS"] ?? 500);
-const FEE_MIN_MINOR = Number(process.env["COCORE_FEE_MIN_MINOR"] ?? 0);
+const FEE_BPS = CONFIG.feeBps;
+const FEE_MIN_MINOR = CONFIG.feeMinMinor;
 // Currency the exchange's policy + tokenRate records advertise. The
 // strict receipt verifier compares `receipt.price.currency` (set by
 // the agent in `provider/src/pricing.rs`) against
@@ -74,48 +170,48 @@ const FEE_MIN_MINOR = Number(process.env["COCORE_FEE_MIN_MINOR"] ?? 0);
 // with what every actual receipt + job carries (we previously
 // defaulted to "USD", which silently drifted from the receipts and
 // rejected every settlement — the deceptive failure we hit today).
-const FEE_CURRENCY = process.env["COCORE_FEE_CURRENCY"] ?? "CC";
+const FEE_CURRENCY = CONFIG.feeCurrency;
 
 // Per-token rate published in the policy. Rendered as informational
 // only — tokens are the unit of account and there's
 // no exchange rate to fiat.
-const TOKEN_RATE_INPUT_PER_MTOK = Number(process.env["COCORE_TOKEN_RATE_INPUT_PER_MTOK"] ?? 10);
-const TOKEN_RATE_OUTPUT_PER_MTOK = Number(process.env["COCORE_TOKEN_RATE_OUTPUT_PER_MTOK"] ?? 10);
-const TOKEN_RATE_CURRENCY = process.env["COCORE_TOKEN_RATE_CURRENCY"] ?? FEE_CURRENCY;
+const TOKEN_RATE_INPUT_PER_MTOK = CONFIG.tokenRateInputPerMTok;
+const TOKEN_RATE_OUTPUT_PER_MTOK = CONFIG.tokenRateOutputPerMTok;
+const TOKEN_RATE_CURRENCY = Option.getOrUndefined(CONFIG.tokenRateCurrency) ?? FEE_CURRENCY;
 
 // Onboarding grant + admission floor.
-const TOKEN_GRANT = Number(process.env["COCORE_TOKEN_GRANT"] ?? 1_000_000);
-const TOKEN_FLOOR = Number(process.env["COCORE_TOKEN_FLOOR"] ?? 100_000);
+const TOKEN_GRANT = CONFIG.tokenGrant;
+const TOKEN_FLOOR = CONFIG.tokenFloor;
 
 // Treasury identity. Defaults to the exchange's own DID — the
 // cooperative's treasury IS the exchange's balance sheet.
-const TREASURY_DID = process.env["COCORE_TREASURY_DID"] ?? EXCHANGE_DID;
+const TREASURY_DID = Option.getOrUndefined(CONFIG.treasuryDid) ?? EXCHANGE_DID;
 
 // Weekly refresh: amount + cadence. Lazy — only fires on balance
 // touch (receipt, getBalance, governance act).
-const WEEKLY_REFRESH_AMOUNT = Number(process.env["COCORE_WEEKLY_REFRESH_AMOUNT"] ?? 70_000);
-const REFRESH_CADENCE_MINUTES = Number(
-  process.env["COCORE_REFRESH_CADENCE_MINUTES"] ?? 7 * 24 * 60,
-);
+const WEEKLY_REFRESH_AMOUNT = CONFIG.weeklyRefreshAmount;
+const REFRESH_CADENCE_MINUTES = CONFIG.refreshCadenceMinutes;
 
 // Patronage rebate: monthly distribution of 80% of treasury to
 // active members in proportion to their patronage during the period.
-const PATRONAGE_FRACTION_BPS = Number(process.env["COCORE_PATRONAGE_FRACTION_BPS"] ?? 8000);
-const PATRONAGE_CADENCE_DAYS = Number(process.env["COCORE_PATRONAGE_CADENCE_DAYS"] ?? 30);
-const PATRONAGE_AUTO = (process.env["COCORE_PATRONAGE_AUTO"] ?? "1") !== "0";
+const PATRONAGE_FRACTION_BPS = CONFIG.patronageFractionBps;
+const PATRONAGE_CADENCE_DAYS = CONFIG.patronageCadenceDays;
+const PATRONAGE_AUTO = CONFIG.patronageAuto !== "0";
 
 // Sqlite path for the TokenLedger. Defaults to Railway volume so
 // balances survive redeploys; :memory: for dev/CI. Blast the file
 // to reset.
+const RAILWAY_VOLUME_MOUNT_PATH = Option.getOrUndefined(CONFIG.railwayVolumeMountPath);
 const TOKEN_LEDGER_DB =
-  process.env["COCORE_TOKEN_LEDGER_DB"] ??
-  (process.env["RAILWAY_VOLUME_MOUNT_PATH"]
-    ? `${process.env["RAILWAY_VOLUME_MOUNT_PATH"].replace(/\/$/, "")}/token-ledger.sqlite`
+  Option.getOrUndefined(CONFIG.tokenLedgerDb) ??
+  (RAILWAY_VOLUME_MOUNT_PATH
+    ? `${RAILWAY_VOLUME_MOUNT_PATH.replace(/\/$/, "")}/token-ledger.sqlite`
     : ":memory:");
 
 // Shared secret for operator-only endpoints (wipe, manual
-// distributePatronage, etc.). Unset → those endpoints reject.
-const INTERNAL_API_KEY = process.env["COCORE_INTERNAL_API_KEY"];
+// distributePatronage, etc.). Unset → those endpoints reject. Kept
+// Redacted; unwrapped only inside the constant-time compare in authOk.
+const INTERNAL_API_KEY = CONFIG.internalApiKey;
 
 // AT Protocol relay to subscribe to for the AppView indexer. Default
 // is the Bluesky public relay, which mirrors every PDS that subscribes
@@ -125,13 +221,13 @@ const INTERNAL_API_KEY = process.env["COCORE_INTERNAL_API_KEY"];
 // in-process Firehose, and the indexer's store.upsert is keyed by
 // uri, so duplicate dispatches are no-ops. Set to "" or "off" to
 // disable (useful for dev / tests that don't want to hit the wire).
-const RELAY_URL = process.env["COCORE_RELAY_URL"] ?? "wss://bsky.network";
+const RELAY_URL = CONFIG.relayUrl;
 const RELAY_ENABLED = !!RELAY_URL && RELAY_URL !== "off";
 // unauthenticatedCommits: false in production — the IdResolver checks
 // every commit's signing key against the publishing DID's document
 // via plc.directory. Tests that drive a local PDS without a real PLC
 // flip this to true.
-const RELAY_UNAUTHENTICATED = (process.env["COCORE_RELAY_UNAUTHENTICATED_COMMITS"] ?? "0") === "1";
+const RELAY_UNAUTHENTICATED = CONFIG.relayUnauthenticated === "1";
 
 // Reconcile loop cadence. Every N seconds the services container
 // scans the indexed-receipt table for receipts that don't yet have a
@@ -141,27 +237,41 @@ const RELAY_UNAUTHENTICATED = (process.env["COCORE_RELAY_UNAUTHENTICATED_COMMITS
 // attestation — arrived seconds later but the exchange doesn't
 // retry on its own). Also catches anything that landed during a
 // services-container restart.
-const RECONCILE_INTERVAL_SECONDS = Number(process.env["COCORE_RECONCILE_INTERVAL_SECONDS"] ?? 60);
+const RECONCILE_INTERVAL_SECONDS = CONFIG.reconcileIntervalSeconds;
 // Maximum number of receipts to attempt per reconcile tick. Caps work
 // done per pass on a large backfill; the loop will pick up where it
 // left off on the next tick.
-const RECONCILE_BATCH_SIZE = Number(process.env["COCORE_RECONCILE_BATCH_SIZE"] ?? 200);
+const RECONCILE_BATCH_SIZE = CONFIG.reconcileBatchSize;
 
 // Self-loop: waive the treasury fee when requester DID == provider
 // DID. Settlement record is still published as audit trail.
-const SELF_LOOP_FEE_WAIVED = (process.env["COCORE_SELF_LOOP_FEE_WAIVED"] ?? "1") !== "0";
+const SELF_LOOP_FEE_WAIVED = CONFIG.selfLoopFeeWaived !== "0";
 
-const SOFTWARE_VERSION = process.env["COCORE_SOFTWARE_VERSION"] ?? "cocore-services@dev";
+const SOFTWARE_VERSION = CONFIG.softwareVersion;
 
 // Terms-of-service version. Bumping forces re-acceptance — the next
 // bootstrap publishes a fresh exchangePolicy with the new version
 // and console clients prompt the user.
-const TERMS_VERSION = process.env["COCORE_TERMS_VERSION"] ?? "v2-2026-06-13";
+const TERMS_VERSION = CONFIG.termsVersion;
+const CONSOLE_PUBLIC_URL = Option.getOrUndefined(CONFIG.consolePublicUrl);
 const TERMS_URI =
-  process.env["COCORE_TERMS_URI"] ??
-  (process.env["CONSOLE_PUBLIC_URL"]
-    ? `${process.env["CONSOLE_PUBLIC_URL"].replace(/\/$/, "")}/terms`
+  Option.getOrUndefined(CONFIG.termsUri) ??
+  (CONSOLE_PUBLIC_URL
+    ? `${CONSOLE_PUBLIC_URL.replace(/\/$/, "")}/terms`
     : "https://console.cocore.dev/terms");
+
+// Shared secret used to authenticate the bridge's internal write path.
+// Kept Redacted; unwrapped only where buildAppviewSplit consumes it.
+const INTERNAL_SECRET = CONFIG.internalSecret;
+// Bridge runs in this same process; default to the local loopback URL
+// derived from the bridge port when COCORE_BRIDGE_URL is unset.
+const BRIDGE_URL = Option.getOrUndefined(CONFIG.bridgeUrl) ?? `http://127.0.0.1:${PORT}`;
+const ADVISOR_URL = Option.getOrUndefined(CONFIG.advisorUrl);
+// Operator-only wipe gate: enabled only when COCORE_ALLOW_WIPE === "1".
+const ALLOW_WIPE = CONFIG.allowWipe === "1";
+// Aggregating the ledger three ways per request would be wasteful for
+// a page that turns over slowly; memoize per-limit for a short TTL.
+const LEADERBOARD_TTL_MS = CONFIG.leaderboardTtlMs;
 
 async function main() {
   const firehose = new Firehose();
@@ -218,14 +328,16 @@ async function main() {
 
   // 2. Exchange. Verifies receipts + publishes settlement records.
   //    Tokens move via the TokenLedger in the firehose hook below.
-  const transport = EXCHANGE_API_KEY
+  const transport = Option.isSome(EXCHANGE_API_KEY)
     ? new ConsoleProxySettlementTransport({
         apiBase: EXCHANGE_API_BASE,
-        apiKey: EXCHANGE_API_KEY,
+        apiKey: Redacted.value(EXCHANGE_API_KEY.value),
       })
     : undefined;
   const publisher = new SettlementPublisher(EXCHANGE_DID, transport);
-  const signingKey = EXCHANGE_PRIVATE_JWK ? parsePrivateJwk(EXCHANGE_PRIVATE_JWK) : undefined;
+  const signingKey = Option.isSome(EXCHANGE_PRIVATE_JWK)
+    ? parsePrivateJwk(Redacted.value(EXCHANGE_PRIVATE_JWK.value))
+    : undefined;
   const feePolicy = { bps: FEE_BPS, minMinor: FEE_MIN_MINOR };
   const selfLoop = { feeWaived: SELF_LOOP_FEE_WAIVED };
 
@@ -233,12 +345,12 @@ async function main() {
   //     exchange API key (no real PDS to publish to).
   let policyRef: { uri: string; cid: string } | undefined;
   let attestationRef: { uri: string; cid: string } | undefined;
-  if (EXCHANGE_API_KEY) {
+  if (Option.isSome(EXCHANGE_API_KEY)) {
     try {
       const refs = await bootstrapExchangeRecords({
         exchangeDid: EXCHANGE_DID,
         apiBase: EXCHANGE_API_BASE,
-        apiKey: EXCHANGE_API_KEY,
+        apiKey: Redacted.value(EXCHANGE_API_KEY.value),
         feePolicy,
         feeCurrency: FEE_CURRENCY,
         supportedCurrencies: [FEE_CURRENCY],
@@ -323,6 +435,12 @@ async function main() {
     `token-ledger: db=${TOKEN_LEDGER_DB} grant=${TOKEN_GRANT} floor=${TOKEN_FLOOR} treasuryFee=${FEE_BPS}bps treasury=${TREASURY_DID}`,
   );
 
+  // o11y runtime for the processing boundary. Long-lived (the scoped
+  // OTel tracer stays open for the process lifetime); a no-op until
+  // OTEL_EXPORTER_OTLP_* is configured. Shared by the receipt pipeline
+  // for its per-receipt spans + cross-cutting metrics.
+  const runtime = makeRuntime({ serviceName: "cocore-services" });
+
   // Settlement pipeline: wires exchange.onReceipt + the pending-
   // receipt queue + token-ledger application together. See
   // `receipt-pipeline.ts` for the full design rationale.
@@ -335,6 +453,7 @@ async function main() {
     treasuryDid: TREASURY_DID,
     feeBps: FEE_BPS,
     reconcileBatchSize: RECONCILE_BATCH_SIZE,
+    runtime,
   });
   pipeline.attach();
 
@@ -362,43 +481,103 @@ async function main() {
   //     just no-op once a settlement exists.
   // Kick off the reconcile loop. The actual work lives in
   // `pipeline.reconcileUnsettledReceipts()` — see receipt-pipeline.ts
-  // for the design. Use setInterval rather than a recursive
-  // setTimeout so a slow reconcile pass doesn't shift the schedule.
-  async function reconcileTick(): Promise<void> {
-    try {
-      const summary = await pipeline.reconcileUnsettledReceipts();
-      if (summary.attempted > 0) {
-        console.error(
-          `reconcile: scanned ${summary.scanned} receipts, attempted ${summary.attempted}, settled ${summary.settled}, still resolve-failed ${summary.stillResolveFailed}, rejected ${summary.rejected}, skipped-terminal ${summary.skippedRejected}`,
-        );
-      }
-    } catch (e) {
-      console.error(`reconcile: pass failed: ${(e as Error).message}`);
-    }
-  }
+  // for the design. A single Effect (`reconcileEffect`) holds one
+  // pass; `Effect.repeat(Schedule.spaced(...))` gives the fixed-delay
+  // cadence (the next pass starts N seconds after the previous one
+  // *finishes*, so a slow pass never overlaps/shifts the schedule —
+  // the same property the old setInterval-with-unref relied on). A
+  // failed pass is caught + logged so the fiber survives (matches the
+  // old try/catch).
+  const reconcileEffect = Effect.tryPromise(() => pipeline.reconcileUnsettledReceipts()).pipe(
+    Effect.tap((summary) =>
+      Effect.sync(() => {
+        if (summary.attempted > 0) {
+          console.error(
+            `reconcile: scanned ${summary.scanned} receipts, attempted ${summary.attempted}, settled ${summary.settled}, still resolve-failed ${summary.stillResolveFailed}, rejected ${summary.rejected}, skipped-terminal ${summary.skippedRejected}`,
+          );
+        }
+      }),
+    ),
+    Effect.catchAll((e) =>
+      Effect.sync(() => console.error(`reconcile: pass failed: ${(e as Error).message}`)),
+    ),
+    Effect.withSpan("services.reconcile"),
+  );
   if (RECONCILE_INTERVAL_SECONDS > 0) {
     // One eager pass at boot — catches receipts indexed during a
     // services-container outage. Run after a short delay so the
     // appview API + bridge are listening; we want operators to be
     // able to peek at /xrpc state while the reconcile is grinding.
-    setTimeout(() => {
-      void reconcileTick();
-    }, 5_000).unref();
-    setInterval(() => {
-      void reconcileTick();
-    }, RECONCILE_INTERVAL_SECONDS * 1_000).unref();
+    // `Effect.sleep("5 seconds")` is the boot delay; the first repeat
+    // execution IS the eager pass, then `Schedule.spaced` fires every
+    // N seconds thereafter. Forked onto the o11y runtime so spans
+    // export; the running HTTP servers keep the process alive (the
+    // fiber replaces the old `.unref()`'d timers).
+    runtime.runFork(
+      Effect.sleep("5 seconds").pipe(
+        Effect.zipRight(
+          reconcileEffect.pipe(
+            Effect.repeat(Schedule.spaced(Duration.seconds(RECONCILE_INTERVAL_SECONDS))),
+          ),
+        ),
+      ),
+    );
     console.error(
       `reconcile: enabled (every ${RECONCILE_INTERVAL_SECONDS}s, batch=${RECONCILE_BATCH_SIZE})`,
     );
   }
 
-  // 2d. Monthly patronage scheduler. Fires once on boot for the
-  //     window covering the prior calendar month; thereafter sleeps
-  //     until the next UTC-month boundary and fires again. Disabled
-  //     with COCORE_PATRONAGE_AUTO=0 (manual trigger still works
-  //     via the internal endpoint below).
+  // 2d. Monthly patronage scheduler. One pass distributes patronage
+  //     for the window covering the prior calendar month; the ledger's
+  //     idempotency on (start, end) makes re-runs for the same period
+  //     a no-op, so firing on boot AND on every month boundary is
+  //     safe. `Effect.repeat(Schedule.cron(...))` runs the effect once
+  //     immediately (the boot run for the prior month) then repeats at
+  //     00:00 UTC on the first of each month. Disabled with
+  //     COCORE_PATRONAGE_AUTO=0 (manual trigger still works via the
+  //     internal endpoint below).
+  const patronageApiKey = Option.getOrUndefined(Option.map(EXCHANGE_API_KEY, Redacted.value));
+  const distributePatronageEffect = Effect.tryPromise(async () => {
+    const now = new Date();
+    const start = firstOfPriorMonthUtc(now);
+    const end = firstOfMonthUtc(now);
+    const result = ledger.distributePatronage(start, end, ledgerPolicy);
+    if (result.alreadyDistributed) {
+      console.error(
+        `patronage: period ${start.toISOString()}/${end.toISOString()} already distributed`,
+      );
+    } else if (result.totalDistributed > 0) {
+      console.error(
+        `patronage: distributed ${result.totalDistributed} tokens to ${result.recipients.length} recipients`,
+      );
+      if (patronageApiKey && policyRef && result.recipients.length > 0) {
+        await emitPatronageRecords(
+          EXCHANGE_API_BASE,
+          patronageApiKey,
+          ledgerPolicy.treasuryDid,
+          policyRef,
+          { start, end },
+          result,
+        ).catch((e) => {
+          console.error(`patronage: emit records failed: ${(e as Error).message}`);
+        });
+      }
+    } else {
+      console.error(`patronage: no recipients in period ${start.toISOString()}`);
+    }
+  }).pipe(
+    Effect.catchAll((e) =>
+      Effect.sync(() => console.error(`patronage: distribution failed: ${(e as Error).message}`)),
+    ),
+    Effect.withSpan("services.patronage"),
+  );
   if (PATRONAGE_AUTO && PATRONAGE_FRACTION_BPS > 0) {
-    schedulePatronage(ledger, ledgerPolicy, EXCHANGE_API_KEY, EXCHANGE_API_BASE, policyRef);
+    // "0 0 1 * *" — second/minute/hour are the leading fields here?
+    // No: this is standard 5-field cron (minute hour day-of-month
+    // month day-of-week) = 00:00 on the 1st of every month, UTC.
+    runtime.runFork(
+      distributePatronageEffect.pipe(Effect.repeat(Schedule.cron("0 0 1 * *", "UTC"))),
+    );
   }
 
   if (AUTORESPOND) {
@@ -414,80 +593,120 @@ async function main() {
   }
 
   const accountStore = APPVIEW_DID ? new AccountStore(ACCOUNT_DB) : undefined;
-  // Build the AppView request handler ONCE and share it across both the
-  // internal :8081 listener (kept for COCORE_APPVIEW_URL consumers) and the
-  // public bridge port below. One handler instance == one OAuth client over
-  // one session store; two would dual-refresh the same session.
-  const appviewHandle = buildAppviewHandler(store, {
+  // Build BOTH AppView views from ONE set of shared resources (single OAuth
+  // client + session store + PairStore). `full` includes the shared-secret
+  // /internal/* endpoints; `public` excludes them. We serve `full` on the
+  // private :8081 listener (the console reaches it over the Railway internal
+  // network) and `public` on the bridge port below — keeping /internal off
+  // the wire while still answering appview.* reads / account.* / /pds there.
+  const appview = buildAppviewSplit(store, {
     accountStore,
     appviewDid: APPVIEW_DID,
     // The bridge runs in this same process; mirror PDS writes to it.
-    bridgeUrl: process.env["COCORE_BRIDGE_URL"] ?? `http://127.0.0.1:${PORT}`,
-    internalSecret: process.env["COCORE_INTERNAL_SECRET"],
+    bridgeUrl: BRIDGE_URL,
+    internalSecret: Option.isSome(INTERNAL_SECRET)
+      ? Redacted.value(INTERNAL_SECRET.value)
+      : undefined,
     // inference.dispatch routes through the advisor and publishes the job
     // under the requester's AppView-owned session; both enable the SSE route.
-    advisorUrl: process.env["COCORE_ADVISOR_URL"],
+    advisorUrl: ADVISOR_URL,
     exchangeDid: EXCHANGE_DID,
   });
-  const appviewServer = createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      if (!(await appviewHandle(req, res, url))) json(res, 404, { error: "no such route" });
-    } catch (e) {
-      json(res, 500, { error: (e as Error).message });
-    }
-  });
+
+  // Internal :8081 listener serves the FULL app (incl /internal/*). Traced
+  // via @effect/platform under makeNodeHandler (a span per request, exported
+  // to Honeycomb when OTLP is configured).
+  const appviewFull = await makeNodeHandler(appview.full, { serviceName: "cocore-appview" });
+  const appviewServer = createServer(appviewFull);
   await new Promise<void>((r) => appviewServer.listen(APPVIEW_PORT, r));
   console.error(
     `appview-api: listening on :${APPVIEW_PORT} db=${DB_PATH}` +
       (APPVIEW_DID ? ` account=on(aud=${APPVIEW_DID} db=${ACCOUNT_DB})` : ""),
   );
 
-  // 4. Bridge HTTP.
-  const bridge = createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    try {
-      if (url.pathname === "/healthz") {
-        return json(res, 200, { ok: true, exchangeDid: EXCHANGE_DID });
+  // 4. Bridge HTTP, as an @effect/platform HttpRouter. Each route is an
+  //    Effect returning an HttpServerResponse (`ok(data)` for 200, `err(status,
+  //    {...})` for everything else) under a `services.*` span. Bodies are read
+  //    via `Effect.either(jsonBody)` (400 on malformed JSON); operator-gated
+  //    routes re-use the constant-time `authOk` check on the Authorization
+  //    header. All the original closures (firehose, store, publisher, ledger,
+  //    signingKey, refs, pipeline, caches, emit helpers) are captured here.
+
+  // admin.reconcile answers GET (read-only audit) and POST (audit + rebuild
+  // on drift); share one handler parameterised by `wantsRebuild`.
+  const reconcileHandler = (wantsRebuild: boolean) =>
+    Effect.gen(function* () {
+      if (!authOk(yield* header("authorization"))) return err(401, { error: "unauthorized" });
+      try {
+        let report = ledger.reconcile();
+        let rebuilt: { changed: number } | null = null;
+        if (wantsRebuild && report.balanceCacheDrifts.length > 0) {
+          rebuilt = ledger.rebuildBalanceCache();
+          report = ledger.reconcile();
+        }
+        if (!report.ok) {
+          console.error(
+            `admin.reconcile: drift detected — ${JSON.stringify({
+              drifts: report.balanceCacheDrifts.length,
+              negatives: report.negativeBalances.length,
+              totalDeltaMatchesMints: report.totalDeltaMatchesMints,
+              totalBalanceMatchesMints: report.totalBalanceMatchesMints,
+            })}`,
+          );
+        }
+        return ok({ report, ...(rebuilt ? { rebuilt } : {}) });
+      } catch (e) {
+        return err(500, { error: (e as Error).message });
       }
-      if (url.pathname === "/xrpc/dev.cocore.bridge.publish" && req.method === "POST") {
-        const body = await readJson<IndexedRecord>(req);
+    }).pipe(Effect.withSpan("services.admin.reconcile"));
+
+  const bridgeRouter = HttpRouter.empty.pipe(
+    // NB: no `/healthz` here. `appview.public` (concatenated below) already
+    // registers `GET /healthz`, and `HttpRouter.concatAll` throws
+    // "Method 'GET' already declared for route '/healthz'" on a duplicate —
+    // which fails the *entire* merged router, 500ing every bridge request.
+    // The liveness contract (Railway healthcheckPath, docker-compose probe,
+    // infra/smoke.ts) only needs a 200; appview's `/healthz` provides it.
+    HttpRouter.post(
+      "/xrpc/dev.cocore.bridge.publish",
+      Effect.gen(function* () {
+        const parsed = yield* Effect.either(jsonBody);
+        if (parsed._tag === "Left") return err(400, { error: "body must be JSON" });
+        const body = parsed.right as IndexedRecord;
         if (!body.uri || !body.cid || !body.collection || !body.repo) {
-          return json(res, 400, { error: "missing uri/cid/collection/repo" });
+          return err(400, { error: "missing uri/cid/collection/repo" });
         }
-        await firehose.dispatch(body);
-        return json(res, 202, { ok: true });
-      }
-      // Countersign a terms-of-service acceptance with the exchange's
-      // signing key, so the published record is a cocore ATTESTATION the
-      // exchange witnessed the acceptance — not merely a record the user
-      // wrote unilaterally. Internal-only (the signing key never leaves
-      // this container); the console calls it with COCORE_INTERNAL_API_KEY,
-      // gets back the COMPLETE signed record, and persists it verbatim to
-      // the user's PDS under their OAuth session. We build the exact record
-      // here (incl `$type` + the `attestation` strong-ref) and sign over its
-      // canonical bytes minus `sig`, so a verifier strips `sig`,
-      // re-canonicalises, and checks against the key in the referenced
-      // exchangeAttestation — the same chain receipts/settlements use.
-      if (
-        url.pathname === "/xrpc/dev.cocore.exchange.signTermsAcceptance" &&
-        req.method === "POST"
-      ) {
-        if (!authOk(req.headers.authorization)) return json(res, 401, { error: "unauthorized" });
-        if (!signingKey) {
-          return json(res, 503, { error: "exchange signing key not configured" });
-        }
-        const body = await readJson<{
+        yield* Effect.promise(() => firehose.dispatch(body));
+        return err(202, { ok: true });
+      }).pipe(Effect.withSpan("services.bridge.publish")),
+    ),
+    // Countersign a terms-of-service acceptance with the exchange's signing
+    // key, so the published record is a cocore ATTESTATION the exchange
+    // witnessed the acceptance — not merely a record the user wrote
+    // unilaterally. Internal-only (the signing key never leaves this
+    // container); the console calls it with COCORE_INTERNAL_API_KEY, gets back
+    // the COMPLETE signed record, and persists it verbatim to the user's PDS
+    // under their OAuth session. We build the exact record here (incl `$type` +
+    // the `attestation` strong-ref) and sign over its canonical bytes minus
+    // `sig`, so a verifier strips `sig`, re-canonicalises, and checks against
+    // the key in the referenced exchangeAttestation — the same chain
+    // receipts/settlements use.
+    HttpRouter.post(
+      "/xrpc/dev.cocore.exchange.signTermsAcceptance",
+      Effect.gen(function* () {
+        if (!authOk(yield* header("authorization"))) return err(401, { error: "unauthorized" });
+        if (!signingKey) return err(503, { error: "exchange signing key not configured" });
+        const parsed = yield* Effect.either(jsonBody);
+        if (parsed._tag === "Left") return err(400, { error: "body must be JSON" });
+        const body = parsed.right as {
           policyUri?: string;
           policyCid?: string;
           termsVersion?: string;
           termsUri?: string;
           userAgent?: string;
-        }>(req);
+        };
         if (!body.policyUri || !body.policyCid || !body.termsVersion || !body.termsUri) {
-          return json(res, 400, {
-            error: "missing policyUri/policyCid/termsVersion/termsUri",
-          });
+          return err(400, { error: "missing policyUri/policyCid/termsVersion/termsUri" });
         }
         const record: Record<string, unknown> = {
           $type: "dev.cocore.compute.termsAcceptance",
@@ -501,44 +720,59 @@ async function main() {
             ? { attestation: { uri: attestationRef.uri, cid: attestationRef.cid } }
             : {}),
         };
-        const sig = await signRecord(record, signingKey);
-        return json(res, 200, { record: { ...record, sig } });
-      }
-      if (url.pathname === "/xrpc/dev.cocore.bridge.unpublish" && req.method === "POST") {
-        const body = await readJson<{ uri?: string }>(req);
-        if (!body.uri) return json(res, 400, { error: "missing uri" });
+        const sig = yield* Effect.promise(() => signRecord(record, signingKey));
+        return ok({ record: { ...record, sig } });
+      }).pipe(Effect.withSpan("services.exchange.signTermsAcceptance")),
+    ),
+    HttpRouter.post(
+      "/xrpc/dev.cocore.bridge.unpublish",
+      Effect.gen(function* () {
+        const parsed = yield* Effect.either(jsonBody);
+        if (parsed._tag === "Left") return err(400, { error: "body must be JSON" });
+        const body = parsed.right as { uri?: string };
+        if (!body.uri) return err(400, { error: "missing uri" });
         store.delete(body.uri);
-        return json(res, 200, { ok: true });
-      }
-      if (url.pathname === "/xrpc/dev.cocore.bridge.purge" && req.method === "POST") {
-        const body = await readJson<{ did?: string }>(req);
-        if (!body.did) return json(res, 400, { error: "missing did" });
+        return ok({ ok: true });
+      }).pipe(Effect.withSpan("services.bridge.unpublish")),
+    ),
+    HttpRouter.post(
+      "/xrpc/dev.cocore.bridge.purge",
+      Effect.gen(function* () {
+        const parsed = yield* Effect.either(jsonBody);
+        if (parsed._tag === "Left") return err(400, { error: "body must be JSON" });
+        const body = parsed.right as { did?: string };
+        if (!body.did) return err(400, { error: "missing did" });
         const removed = store.purgeForDid(body.did);
-        return json(res, 200, { ok: true, removed });
-      }
-      if (url.pathname === "/xrpc/dev.cocore.bridge.stats" && req.method === "GET") {
-        return json(res, 200, {
+        return ok({ ok: true, removed });
+      }).pipe(Effect.withSpan("services.bridge.purge")),
+    ),
+    HttpRouter.get(
+      "/xrpc/dev.cocore.bridge.stats",
+      Effect.sync(() =>
+        ok({
           settled: publisher.alreadySettled().size,
           treasuryBalance: ledger.peekBalance(TREASURY_DID),
-        });
-      }
-
-      // Read-only diagnostic surface for the receipt pipeline. No
-      // auth: the data is pipeline state (URIs, outcome kinds, retry
-      // counts) — nothing secret, all of it derivable from public
-      // PDS records anyway. Without this endpoint a settlement bug
-      // is invisible from outside Railway (the silent-bail failure
-      // mode that hit us today). With it, operators can curl this
-      // and see exactly why each receipt did or didn't settle:
-      //
-      //   curl /xrpc/dev.cocore.admin.pipelineState | jq .recentOutcomes
-      //
-      // Optional ?since=<ISO-8601> filters the recentOutcomes ring
-      // to entries newer than the cursor. ?limit=<N> caps the count
-      // (default 50, max 200 — the ring buffer size).
-      if (url.pathname === "/xrpc/dev.cocore.admin.pipelineState" && req.method === "GET") {
-        const since = url.searchParams.get("since");
-        const limitRaw = url.searchParams.get("limit");
+        }),
+      ).pipe(Effect.withSpan("services.bridge.stats")),
+    ),
+    // Read-only diagnostic surface for the receipt pipeline. No auth: the data
+    // is pipeline state (URIs, outcome kinds, retry counts) — nothing secret,
+    // all of it derivable from public PDS records anyway. Without this endpoint
+    // a settlement bug is invisible from outside Railway (the silent-bail
+    // failure mode that hit us today). With it, operators can curl this and see
+    // exactly why each receipt did or didn't settle:
+    //
+    //   curl /xrpc/dev.cocore.admin.pipelineState | jq .recentOutcomes
+    //
+    // Optional ?since=<ISO-8601> filters the recentOutcomes ring to entries
+    // newer than the cursor. ?limit=<N> caps the count (default 50, max 200 —
+    // the ring buffer size).
+    HttpRouter.get(
+      "/xrpc/dev.cocore.admin.pipelineState",
+      Effect.gen(function* () {
+        const sp = yield* searchParams;
+        const since = sp.get("since");
+        const limitRaw = sp.get("limit");
         const limit = (() => {
           const n = limitRaw ? Number(limitRaw) : 50;
           if (!Number.isFinite(n) || n <= 0) return 50;
@@ -550,15 +784,14 @@ async function main() {
           recent = recent.filter((e) => Date.parse(e.at) > sinceMs);
         }
         recent = recent.slice(0, limit);
-        return json(res, 200, {
+        return ok({
           generatedAt: new Date().toISOString(),
           pending: pipeline.pendingSnapshot(),
           recentOutcomes: recent,
           publisherSettled: publisher.alreadySettled().size,
-          // Quick at-a-glance counters across the ring buffer:
-          // helps operators see "are we mostly resolve-failing, or
-          // mostly settling, or mostly rejecting?" without
-          // scrolling the per-receipt list.
+          // Quick at-a-glance counters across the ring buffer: helps operators
+          // see "are we mostly resolve-failing, or mostly settling, or mostly
+          // rejecting?" without scrolling the per-receipt list.
           summary: pipeline.recentOutcomes().reduce(
             (acc, e) => {
               acc[e.kind] = (acc[e.kind] ?? 0) + 1;
@@ -567,28 +800,31 @@ async function main() {
             {} as Record<string, number>,
           ),
         });
-      }
-
-      // --- Token-ledger HTTP surface -------------------------------
-      if (url.pathname === "/xrpc/dev.cocore.exchange.getBalance" && req.method === "GET") {
-        const did = url.searchParams.get("did") || "";
-        if (!did.startsWith("did:")) return json(res, 400, { error: "invalid did" });
-        // Use touchAndGetBalance so a balance read also (a) mints the
-        // one-time onboarding grant on first touch and (b) applies any
-        // pending weekly refresh. The old peekBalance read was a
-        // catch-22: balance read returns 0, admission needs >=floor,
-        // grant only fires inside admission or applyReceipt — neither
-        // of which a fresh user can reach with a 0 balance.
+      }).pipe(Effect.withSpan("services.admin.pipelineState")),
+    ),
+    // --- Token-ledger HTTP surface -------------------------------
+    HttpRouter.get(
+      "/xrpc/dev.cocore.exchange.getBalance",
+      Effect.gen(function* () {
+        const sp = yield* searchParams;
+        const did = sp.get("did") || "";
+        if (!did.startsWith("did:")) return err(400, { error: "invalid did" });
+        // Use touchAndGetBalance so a balance read also (a) mints the one-time
+        // onboarding grant on first touch and (b) applies any pending weekly
+        // refresh. The old peekBalance read was a catch-22: balance read
+        // returns 0, admission needs >=floor, grant only fires inside admission
+        // or applyReceipt — neither of which a fresh user can reach with a 0
+        // balance.
         const touched = ledger.touchAndGetBalance(did, ledgerPolicy);
-        // If the grant just fired, publish the tokenGrant record onto
-        // the exchange's PDS so the audit trail is durable beyond
-        // the local ledger DB.
-        if (touched.pendingGrant && EXCHANGE_API_KEY) {
+        // If the grant just fired, publish the tokenGrant record onto the
+        // exchange's PDS so the audit trail is durable beyond the local ledger
+        // DB.
+        if (touched.pendingGrant && Option.isSome(EXCHANGE_API_KEY)) {
           emitTokenGrantRecord(did, ledgerPolicy.tokenGrant, policyRef).catch((e) => {
             console.error(`grant: emit record failed for ${did}: ${(e as Error).message}`);
           });
         }
-        return json(res, 200, {
+        return ok({
           did,
           balance: touched.balance,
           policy: {
@@ -599,139 +835,126 @@ async function main() {
             refreshCadenceMinutes: ledgerPolicy.refreshCadenceMinutes,
             patronageFractionBps: ledgerPolicy.patronageFractionBps,
             patronageCadenceDays: ledgerPolicy.patronageCadenceDays,
-            // Back-compat for the earnings/jobs/machines dashboards
-            // that still render USD-equivalents. Display only; not
-            // a real exchange rate.
+            // Back-compat for the earnings/jobs/machines dashboards that still
+            // render USD-equivalents. Display only; not a real exchange rate.
             averagePricePerMTok: Math.floor(
               (TOKEN_RATE_INPUT_PER_MTOK + TOKEN_RATE_OUTPUT_PER_MTOK) / 2,
             ),
           },
         });
-      }
-      if (url.pathname === "/xrpc/dev.cocore.exchange.leaderboard" && req.method === "GET") {
-        // Public leaderboard: largest wallets + biggest earners +
-        // biggest spenders. Reads straight off the token ledger (the
-        // source of truth for balances and receipt flows). System DIDs
-        // (treasury, exchange, autoresponder) are excluded so the board
-        // reflects real members, not the cooperative's own books.
+      }).pipe(Effect.withSpan("services.exchange.getBalance")),
+    ),
+    HttpRouter.get(
+      "/xrpc/dev.cocore.exchange.leaderboard",
+      Effect.gen(function* () {
+        // Public leaderboard: largest wallets + biggest earners + biggest
+        // spenders. Reads straight off the token ledger (the source of truth
+        // for balances and receipt flows). System DIDs (treasury, exchange,
+        // autoresponder) are excluded so the board reflects real members, not
+        // the cooperative's own books.
         //
-        // Memoized for LEADERBOARD_TTL_MS so a hot page doesn't re-scan
-        // the ledger per request — the new caching this view needs. The
-        // cache key folds in the requested limit.
-        const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 20), 1), 100);
+        // Memoized for LEADERBOARD_TTL_MS so a hot page doesn't re-scan the
+        // ledger per request. The cache key folds in the requested limit.
+        const sp = yield* searchParams;
+        const limit = Math.min(Math.max(Number(sp.get("limit") ?? 20), 1), 100);
         const cached = readLeaderboardCache(limit);
-        if (cached) return json(res, 200, cached);
+        if (cached) return ok(cached);
         const board = ledger.leaderboard({
           limit,
           excludeDids: [TREASURY_DID, EXCHANGE_DID, AUTORESPOND_PROVIDER_DID],
         });
         writeLeaderboardCache(limit, board);
-        return json(res, 200, board);
-      }
-      if (url.pathname === "/xrpc/dev.cocore.exchange.listEvents" && req.method === "GET") {
-        const did = url.searchParams.get("did") || "";
-        if (!did.startsWith("did:")) return json(res, 400, { error: "invalid did" });
-        const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
-        return json(res, 200, { events: ledger.listEvents(did, limit) });
-      }
-      // Account-page activity bundle: lifetime per-kind aggregates
-      // (credited / debited / patronage roll-ups) PLUS a newest-first
-      // recent feed, in one round-trip. The summary is over the whole
-      // history (so the headline numbers don't drift as the feed
-      // window scrolls); `recent` is "desc" so a just-landed patronage
-      // rebate shows at the top instead of falling off the end of an
-      // oldest-first window — the reason rebates were invisible before.
-      if (url.pathname === "/xrpc/dev.cocore.exchange.eventSummary" && req.method === "GET") {
-        const did = url.searchParams.get("did") || "";
-        if (!did.startsWith("did:")) return json(res, 400, { error: "invalid did" });
-        const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
-        return json(res, 200, {
+        return ok(board);
+      }).pipe(Effect.withSpan("services.exchange.leaderboard")),
+    ),
+    HttpRouter.get(
+      "/xrpc/dev.cocore.exchange.listEvents",
+      Effect.gen(function* () {
+        const sp = yield* searchParams;
+        const did = sp.get("did") || "";
+        if (!did.startsWith("did:")) return err(400, { error: "invalid did" });
+        const limit = Math.min(Number(sp.get("limit") ?? 100), 500);
+        return ok({ events: ledger.listEvents(did, limit) });
+      }).pipe(Effect.withSpan("services.exchange.listEvents")),
+    ),
+    // Account-page activity bundle: lifetime per-kind aggregates (credited /
+    // debited / patronage roll-ups) PLUS a newest-first recent feed, in one
+    // round-trip. The summary is over the whole history (so the headline
+    // numbers don't drift as the feed window scrolls); `recent` is "desc" so a
+    // just-landed patronage rebate shows at the top instead of falling off the
+    // end of an oldest-first window — the reason rebates were invisible before.
+    HttpRouter.get(
+      "/xrpc/dev.cocore.exchange.eventSummary",
+      Effect.gen(function* () {
+        const sp = yield* searchParams;
+        const did = sp.get("did") || "";
+        if (!did.startsWith("did:")) return err(400, { error: "invalid did" });
+        const limit = Math.min(Number(sp.get("limit") ?? 100), 500);
+        return ok({
           summary: ledger.summarizeEvents(did),
           recent: ledger.listEvents(did, limit, "desc"),
         });
-      }
-      if (url.pathname === "/xrpc/dev.cocore.exchange.checkAdmission" && req.method === "POST") {
-        const body = await readJson<{ did?: string; priceCeilingTokens?: number }>(req);
+      }).pipe(Effect.withSpan("services.exchange.eventSummary")),
+    ),
+    HttpRouter.post(
+      "/xrpc/dev.cocore.exchange.checkAdmission",
+      Effect.gen(function* () {
+        const parsed = yield* Effect.either(jsonBody);
+        if (parsed._tag === "Left") return err(400, { error: "body must be JSON" });
+        const body = parsed.right as { did?: string; priceCeilingTokens?: number };
         if (!body.did || typeof body.priceCeilingTokens !== "number") {
-          return json(res, 400, { error: "missing did or priceCeilingTokens" });
+          return err(400, { error: "missing did or priceCeilingTokens" });
         }
-        return json(
-          res,
-          200,
-          ledger.checkAdmission(body.did, body.priceCeilingTokens, ledgerPolicy),
-        );
-      }
-
-      // --- Operator-only ---
-      if (
-        url.pathname === "/xrpc/dev.cocore.exchange.distributePatronage" &&
-        req.method === "POST"
-      ) {
-        if (!authOk(req.headers.authorization)) {
-          return json(res, 401, { error: "unauthorized" });
-        }
-        const body = await readJson<{ start?: string; end?: string }>(req);
-        // Default window: prior calendar month in UTC. The scheduler
-        // uses the same default; this manual endpoint exists so an
-        // operator can backfill a missed cycle or run a one-off
-        // out-of-cadence rebate.
+        return ok(ledger.checkAdmission(body.did, body.priceCeilingTokens, ledgerPolicy));
+      }).pipe(Effect.withSpan("services.exchange.checkAdmission")),
+    ),
+    // --- Operator-only ---
+    HttpRouter.post(
+      "/xrpc/dev.cocore.exchange.distributePatronage",
+      Effect.gen(function* () {
+        if (!authOk(yield* header("authorization"))) return err(401, { error: "unauthorized" });
+        const parsed = yield* Effect.either(jsonBody);
+        if (parsed._tag === "Left") return err(400, { error: "body must be JSON" });
+        const body = parsed.right as { start?: string; end?: string };
+        // Default window: prior calendar month in UTC. The scheduler uses the
+        // same default; this manual endpoint exists so an operator can backfill
+        // a missed cycle or run a one-off out-of-cadence rebate.
         const now = new Date();
         const start = body.start ? new Date(body.start) : firstOfPriorMonthUtc(now);
         const end = body.end ? new Date(body.end) : firstOfMonthUtc(now);
         const result = ledger.distributePatronage(start, end, ledgerPolicy);
         // Best-effort emit one tokenPatronage record per recipient.
-        if (EXCHANGE_API_KEY && policyRef && result.recipients.length > 0) {
-          await emitPatronageRecords(
-            EXCHANGE_API_BASE,
-            EXCHANGE_API_KEY,
-            EXCHANGE_DID,
-            policyRef,
-            { start, end },
-            result,
-          ).catch((e) => {
-            console.error(`patronage: emit records failed: ${(e as Error).message}`);
-          });
+        if (Option.isSome(EXCHANGE_API_KEY) && policyRef && result.recipients.length > 0) {
+          const ref = policyRef;
+          const apiKey = Redacted.value(EXCHANGE_API_KEY.value);
+          yield* Effect.promise(() =>
+            emitPatronageRecords(
+              EXCHANGE_API_BASE,
+              apiKey,
+              EXCHANGE_DID,
+              ref,
+              { start, end },
+              result,
+            ).catch((e) => {
+              console.error(`patronage: emit records failed: ${(e as Error).message}`);
+            }),
+          );
         }
-        return json(res, 200, result);
-      }
-      // GET: read-only audit, returns the report. POST: same, but
-      // also rebuilds the balance cache if drift is detected. Both
-      // gated behind the internal API key — even a read leaks the
-      // balance snapshot for every DID, and we'd rather not expose
-      // that publicly.
-      if (url.pathname === "/xrpc/dev.cocore.admin.reconcile") {
-        if (!authOk(req.headers.authorization)) {
-          return json(res, 401, { error: "unauthorized" });
-        }
-        const wantsRebuild = req.method === "POST";
-        try {
-          let report = ledger.reconcile();
-          let rebuilt: { changed: number } | null = null;
-          if (wantsRebuild && report.balanceCacheDrifts.length > 0) {
-            rebuilt = ledger.rebuildBalanceCache();
-            report = ledger.reconcile();
-          }
-          if (!report.ok) {
-            console.error(
-              `admin.reconcile: drift detected — ${JSON.stringify({
-                drifts: report.balanceCacheDrifts.length,
-                negatives: report.negativeBalances.length,
-                totalDeltaMatchesMints: report.totalDeltaMatchesMints,
-                totalBalanceMatchesMints: report.totalBalanceMatchesMints,
-              })}`,
-            );
-          }
-          return json(res, 200, { report, ...(rebuilt ? { rebuilt } : {}) });
-        } catch (e) {
-          return json(res, 500, { error: (e as Error).message });
-        }
-      }
-      if (url.pathname === "/xrpc/dev.cocore.admin.wipe" && req.method === "POST") {
-        if (!authOk(req.headers.authorization)) {
-          return json(res, 401, { error: "unauthorized" });
-        }
-        if (process.env["COCORE_ALLOW_WIPE"] !== "1") {
-          return json(res, 403, {
+        return ok(result);
+      }).pipe(Effect.withSpan("services.exchange.distributePatronage")),
+    ),
+    // GET: read-only audit, returns the report. POST: same, but also rebuilds
+    // the balance cache if drift is detected. Both gated behind the internal
+    // API key — even a read leaks the balance snapshot for every DID, and we'd
+    // rather not expose that publicly.
+    HttpRouter.get("/xrpc/dev.cocore.admin.reconcile", reconcileHandler(false)),
+    HttpRouter.post("/xrpc/dev.cocore.admin.reconcile", reconcileHandler(true)),
+    HttpRouter.post(
+      "/xrpc/dev.cocore.admin.wipe",
+      Effect.gen(function* () {
+        if (!authOk(yield* header("authorization"))) return err(401, { error: "unauthorized" });
+        if (!ALLOW_WIPE) {
+          return err(403, {
             error: "wipe disabled; set COCORE_ALLOW_WIPE=1 on the services container",
           });
         }
@@ -752,38 +975,31 @@ async function main() {
             }
           }
           console.error(`admin.wipe: cleared ${JSON.stringify(counts)}`);
-          return json(res, 200, { ok: true, counts });
+          return ok({ ok: true, counts });
         } catch (e) {
-          return json(res, 500, { error: (e as Error).message });
+          return err(500, { error: (e as Error).message });
         }
-      }
-      // Fall back to the AppView handler so the public bridge port also
-      // serves the AppView XRPC API (appview.* reads, account.*, /pds).
-      // /internal/* (session handoff, mint-key) is deliberately NOT
-      // exposed publicly — those are reachable only on the private :8081
-      // listener (the console reaches them over services.railway.internal).
-      if (!url.pathname.startsWith("/internal/") && (await appviewHandle(req, res, url))) return;
-      json(res, 404, { error: "no such route" });
-    } catch (e) {
-      json(res, 500, { error: (e as Error).message });
-    }
-  });
+      }).pipe(Effect.withSpan("services.admin.wipe")),
+    ),
+  );
+
+  // Public bridge port: bridge routes + the PUBLIC AppView routes (appview.*
+  // reads, account.*, /pds). /internal/* is NOT in `appview.public`, so it's
+  // reachable only on the private :8081 listener (the console reaches it over
+  // services.railway.internal) — keeping it off the public wire. Unmatched
+  // paths 404 via the platform default.
+  const bridgeApp = HttpRouter.concatAll(bridgeRouter, appview.public);
+  const bridgeHandler = await makeNodeHandler(bridgeApp, { serviceName: "cocore-services" });
+  const bridge = createServer(bridgeHandler);
   await new Promise<void>((r) => bridge.listen(PORT, r));
   console.error(`bridge: listening on :${PORT}`);
 
   await new Promise(() => {});
 }
 
-function json(res: ServerResponse, status: number, body: unknown): void {
-  res.statusCode = status;
-  res.setHeader("content-type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(body));
-}
-
 // ─── leaderboard cache ───────────────────────────────────────────
-// Aggregating the ledger three ways per request would be wasteful for
-// a page that turns over slowly; memoize per-limit for a short TTL.
-const LEADERBOARD_TTL_MS = Number(process.env["COCORE_LEADERBOARD_TTL_MS"] ?? 60_000);
+// Memoize per-limit for LEADERBOARD_TTL_MS (defined with the rest of
+// the config above).
 const leaderboardCache = new Map<number, { at: number; body: unknown }>();
 
 function readLeaderboardCache(limit: number): unknown | null {
@@ -797,32 +1013,14 @@ function writeLeaderboardCache(limit: number, body: unknown): void {
 }
 
 function authOk(header: string | string[] | undefined): boolean {
-  if (!INTERNAL_API_KEY) return false;
+  if (Option.isNone(INTERNAL_API_KEY)) return false;
+  const key = Redacted.value(INTERNAL_API_KEY.value);
   if (typeof header !== "string") return false;
   const m = /^Bearer\s+(.+)$/.exec(header);
   if (!m) return false;
   const presented = m[1] ?? "";
-  if (presented.length !== INTERNAL_API_KEY.length) return false;
-  return timingSafeEqual(Buffer.from(presented), Buffer.from(INTERNAL_API_KEY));
-}
-
-/** Hard cap on bridge/admin request bodies. The publish path carries a
- *  single indexed record (record body + envelope); 4 MiB is generous and
- *  bounds an otherwise-unbounded read against memory exhaustion. */
-const MAX_BRIDGE_BODY_BYTES = 4 * 1024 * 1024;
-
-async function readJson<T>(req: IncomingMessage): Promise<T> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-    total += buf.length;
-    if (total > MAX_BRIDGE_BODY_BYTES) {
-      throw new Error(`request body exceeds ${MAX_BRIDGE_BODY_BYTES} bytes`);
-    }
-    chunks.push(buf);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf-8")) as T;
+  if (presented.length !== key.length) return false;
+  return timingSafeEqual(Buffer.from(presented), Buffer.from(key));
 }
 
 function firstOfMonthUtc(d: Date): Date {
@@ -831,60 +1029,6 @@ function firstOfMonthUtc(d: Date): Date {
 
 function firstOfPriorMonthUtc(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1, 0, 0, 0, 0));
-}
-
-/** Boot-time scheduler: on every UTC-month boundary, distribute
- *  patronage for the just-completed month. Fires once immediately
- *  for the prior month so a redeploy doesn't skip a cycle. The
- *  ledger's idempotency on (start, end) makes the "fire on boot"
- *  step safe — a second invocation for the same period is a no-op. */
-function schedulePatronage(
-  ledger: TokenLedger,
-  policy: TokenLedgerPolicy,
-  apiKey: string | undefined,
-  apiBase: string,
-  policyRef: { uri: string; cid: string } | undefined,
-): void {
-  const tick = async () => {
-    const now = new Date();
-    const start = firstOfPriorMonthUtc(now);
-    const end = firstOfMonthUtc(now);
-    try {
-      const result = ledger.distributePatronage(start, end, policy);
-      if (result.alreadyDistributed) {
-        console.error(
-          `patronage: period ${start.toISOString()}/${end.toISOString()} already distributed`,
-        );
-      } else if (result.totalDistributed > 0) {
-        console.error(
-          `patronage: distributed ${result.totalDistributed} tokens to ${result.recipients.length} recipients`,
-        );
-        if (apiKey && policyRef && result.recipients.length > 0) {
-          await emitPatronageRecords(
-            apiBase,
-            apiKey,
-            (policy as TokenLedgerPolicy).treasuryDid,
-            policyRef,
-            { start, end },
-            result,
-          ).catch((e) => {
-            console.error(`patronage: emit records failed: ${(e as Error).message}`);
-          });
-        }
-      } else {
-        console.error(`patronage: no recipients in period ${start.toISOString()}`);
-      }
-    } catch (e) {
-      console.error(`patronage: distribution failed: ${(e as Error).message}`);
-    }
-    // Next tick: first of next month.
-    const next = firstOfMonthUtc(new Date(Date.now() + 32 * 24 * 60 * 60_000));
-    const delay = Math.max(60_000, next.getTime() - Date.now());
-    setTimeout(tick, delay);
-  };
-  // Fire on boot for prior month; subsequent firings are scheduled
-  // by tick() itself.
-  setTimeout(tick, 5_000);
 }
 
 interface PatronageResult {
@@ -906,7 +1050,8 @@ async function emitTokenGrantRecord(
   amount: number,
   policyRef: { uri: string; cid: string } | undefined,
 ): Promise<void> {
-  if (!EXCHANGE_API_KEY) return;
+  if (Option.isNone(EXCHANGE_API_KEY)) return;
+  const apiKey = Redacted.value(EXCHANGE_API_KEY.value);
   if (!policyRef) {
     console.error(
       `grant: skipping PDS publish for ${recipientDid}: no active policyRef yet (bootstrap incomplete?)`,
@@ -924,7 +1069,7 @@ async function emitTokenGrantRecord(
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${EXCHANGE_API_KEY}`,
+      authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({ collection: "dev.cocore.account.tokenGrant", record }),
   });

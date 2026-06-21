@@ -1,5 +1,5 @@
-// Device-pairing XRPC handlers, served by the AppView over the in-memory
-// PairStore.
+// Device-pairing XRPC handlers, served by the AppView as an @effect/platform
+// HttpRouter over the in-memory PairStore.
 //
 //   /xrpc/dev.cocore.devicePair.start    (POST, public)        — agent begins a pairing
 //   /xrpc/dev.cocore.devicePair.poll     (GET,  public)        — agent polls for the session
@@ -10,15 +10,19 @@
 // approve the AppView mints a `cocore-...` key scoped to the verified DID,
 // builds the ProviderSession, and binds it to the pairing. start/poll are
 // agent-facing and need no auth.
+//
+// Handlers close over the PairStore and DevicePairContext (dependency
+// injection by closure — no Context tags). Each route is an Effect returning
+// an HttpServerResponse and carries an `appview.devicePair.<op>` span.
 
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { HttpRouter, HttpServerRequest } from "@effect/platform";
+import { Effect } from "effect";
 
 import { verifyServiceAuthToken } from "../auth/service-auth.ts";
 import type { AccountStore } from "../operational/account-store.ts";
 import { hydrateDids } from "../bsky-hydrate.ts";
+import { bearer, err, jsonBody, ok, searchParams } from "../api/http-app.ts";
 import { PairError, type PairStore, type ProviderSession } from "./pair-store.ts";
-
-type Handler = (req: IncomingMessage, res: ServerResponse, url: URL) => void | Promise<void>;
 
 export interface DevicePairContext {
   /** Mints the scoped API key handed to the paired agent. */
@@ -26,130 +30,136 @@ export interface DevicePairContext {
   /** This AppView's service DID — the `aud` that confirm's service-auth
    *  JWT must target. */
   appviewDid: string;
-  /** Base URL the paired agent posts records to (the AppView's own public
-   *  origin; the agent appends `/api/pds/createRecord`). */
+  /** Console origin agents append `/api/pds/*` to (console resolves the
+   *  Bearer key and forwards the write here internally). */
   apiBase: string;
 }
 
-function json(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" });
-  res.end(JSON.stringify(body));
+function isProviderSession(v: unknown): v is ProviderSession {
+  if (typeof v !== "object" || v === null) return false;
+  const s = v as Record<string, unknown>;
+  return (
+    typeof s.did === "string" &&
+    s.did.startsWith("did:") &&
+    typeof s.handle === "string" &&
+    typeof s.apiKey === "string" &&
+    s.apiKey.startsWith("cocore-") &&
+    typeof s.apiBase === "string" &&
+    s.apiBase.startsWith("http")
+  );
 }
 
-function bearer(req: IncomingMessage): string | null {
-  const h = req.headers["authorization"];
-  if (typeof h !== "string") return null;
-  const m = /^Bearer\s+(.+)$/i.exec(h);
-  return m ? m[1]!.trim() : null;
-}
-
-function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on("data", (c: Buffer) => {
-      size += c.length;
-      if (size > 256 * 1024) {
-        reject(new Error("body too large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8").trim();
-      if (raw.length === 0) return resolve({});
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new Error("body must be JSON"));
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-export function devicePairRoutes(
+export function buildDevicePairRouter(
   store: PairStore,
   ctx: DevicePairContext,
-): Record<string, Handler> {
-  return {
-    "/xrpc/dev.cocore.devicePair.start": (req, res) => {
-      if (req.method !== "POST") return json(res, 405, { error: "MethodNotAllowed" });
-      json(res, 200, store.start());
-    },
+): HttpRouter.HttpRouter<never, never> {
+  return HttpRouter.empty.pipe(
+    // start is mounted with `all` so a wrong method reaches the handler and
+    // gets an explicit 405 (the test asserts GET → 405) rather than the
+    // router's default 404.
+    HttpRouter.all(
+      "/xrpc/dev.cocore.devicePair.start",
+      Effect.gen(function* () {
+        const req = yield* HttpServerRequest.HttpServerRequest;
+        if (req.method !== "POST") return err(405, { error: "MethodNotAllowed" });
+        return ok(store.start());
+      }).pipe(Effect.withSpan("appview.devicePair.start")),
+    ),
 
-    "/xrpc/dev.cocore.devicePair.poll": (req, res, url) => {
-      if (req.method !== "GET") return json(res, 405, { error: "MethodNotAllowed" });
-      const deviceId = url.searchParams.get("deviceId");
-      if (!deviceId)
-        return json(res, 400, { error: "InvalidRequest", message: "missing deviceId" });
-      const r = store.poll(deviceId);
-      switch (r.kind) {
-        case "unknown":
-          return json(res, 404, { status: "unknown" });
-        case "pending":
-          return json(res, 200, { status: "pending" });
-        case "denied":
-          return json(res, 403, { status: "denied" });
-        case "expired":
-          return json(res, 410, { status: "expired" });
-        case "consumed":
-          return json(res, 410, { status: "consumed" });
-        case "session":
-          return json(res, 200, { status: "session", session: r.session });
-      }
-    },
-
-    "/xrpc/dev.cocore.devicePair.confirm": async (req, res) => {
-      if (req.method !== "POST") return json(res, 405, { error: "MethodNotAllowed" });
-      const auth = await verifyServiceAuthToken(bearer(req), {
-        audience: ctx.appviewDid,
-        lxm: "dev.cocore.devicePair.confirm",
-      });
-      if (!auth.ok) return json(res, auth.status, { error: auth.error, message: auth.message });
-      const did = auth.did;
-
-      let body: { userCode?: unknown; decision?: unknown };
-      try {
-        body = (await readJsonBody(req)) as typeof body;
-      } catch (e) {
-        return json(res, 400, { error: "InvalidRequest", message: (e as Error).message });
-      }
-      const code = (typeof body.userCode === "string" ? body.userCode : "").trim().toUpperCase();
-      if (!code) return json(res, 400, { error: "InvalidRequest", message: "missing userCode" });
-
-      if (body.decision === "deny") {
-        try {
-          store.deny(code);
-        } catch {
-          return json(res, 404, { error: "unknown code" });
+    HttpRouter.get(
+      "/xrpc/dev.cocore.devicePair.poll",
+      Effect.gen(function* () {
+        const sp = yield* searchParams;
+        const deviceId = sp.get("deviceId");
+        if (!deviceId) return err(400, { error: "InvalidRequest", message: "missing deviceId" });
+        const r = store.poll(deviceId);
+        switch (r.kind) {
+          case "unknown":
+            return err(404, { status: "unknown" });
+          case "pending":
+            return ok({ status: "pending" });
+          case "denied":
+            return err(403, { status: "denied" });
+          case "expired":
+            return err(410, { status: "expired" });
+          case "consumed":
+            return err(410, { status: "consumed" });
+          case "session":
+            return ok({ status: "session", session: r.session });
         }
-        return json(res, 200, { ok: true, status: "denied" });
-      }
-      if (body.decision !== "approve") {
-        return json(res, 400, {
-          error: "InvalidRequest",
-          message: "decision must be approve|deny",
-        });
-      }
+      }).pipe(Effect.withSpan("appview.devicePair.poll")),
+    ),
 
-      // Approve: mint a scoped key for the verified DID and bind the
-      // ProviderSession to the pairing.
-      const hydrated = await hydrateDids([did]).catch(() => new Map());
-      const handle = hydrated.get(did)?.handle ?? did;
-      const { secret } = ctx.accountStore.createKey({
-        did,
-        name: `paired machine (${new Date().toISOString().slice(0, 10)})`,
-      });
-      const session: ProviderSession = { did, handle, apiKey: secret, apiBase: ctx.apiBase };
-      try {
-        const entry = store.approve(code, session);
-        return json(res, 200, { ok: true, status: entry.status });
-      } catch (e) {
-        if (e instanceof PairError) return json(res, 409, { error: e.message });
-        return json(res, 409, { error: e instanceof Error ? e.message : String(e) });
-      }
-    },
-  };
+    HttpRouter.post(
+      "/xrpc/dev.cocore.devicePair.confirm",
+      Effect.gen(function* () {
+        const token = yield* bearer;
+        const auth = yield* Effect.promise(() =>
+          verifyServiceAuthToken(token, {
+            audience: ctx.appviewDid,
+            lxm: "dev.cocore.devicePair.confirm",
+          }),
+        );
+        if (!auth.ok) return err(auth.status, { error: auth.error, message: auth.message });
+        const did = auth.did;
+
+        const parsed = yield* Effect.either(jsonBody);
+        if (parsed._tag === "Left")
+          return err(400, { error: "InvalidRequest", message: parsed.left.message });
+        const body = parsed.right as {
+          userCode?: unknown;
+          decision?: unknown;
+          providerSession?: unknown;
+        };
+
+        const code = (typeof body.userCode === "string" ? body.userCode : "").trim().toUpperCase();
+        if (!code) return err(400, { error: "InvalidRequest", message: "missing userCode" });
+
+        if (body.decision === "deny") {
+          try {
+            store.deny(code);
+          } catch {
+            return err(404, { error: "unknown code" });
+          }
+          return ok({ ok: true, status: "denied" });
+        }
+        if (body.decision !== "approve") {
+          return err(400, {
+            error: "InvalidRequest",
+            message: "decision must be approve|deny",
+          });
+        }
+
+        // Approve: bind a ProviderSession to the pairing. When the console
+        // forwards confirm it mints the key in its own store (so Bearer
+        // auth on `/api/pds/*` resolves) and passes the session here.
+        // Fall back to minting on the AppView for direct callers / tests.
+        const bodySession = body.providerSession;
+        let session: ProviderSession;
+        if (isProviderSession(bodySession)) {
+          session = {
+            did,
+            handle: bodySession.handle,
+            apiKey: bodySession.apiKey,
+            apiBase: bodySession.apiBase,
+          };
+        } else {
+          const hydrated = yield* Effect.promise(() => hydrateDids([did]).catch(() => new Map()));
+          const handle = hydrated.get(did)?.handle ?? did;
+          const { secret } = ctx.accountStore.createKey({
+            did,
+            name: `paired machine (${new Date().toISOString().slice(0, 10)})`,
+          });
+          session = { did, handle, apiKey: secret, apiBase: ctx.apiBase };
+        }
+        try {
+          const entry = store.approve(code, session);
+          return ok({ ok: true, status: entry.status });
+        } catch (e) {
+          if (e instanceof PairError) return err(409, { error: e.message });
+          return err(409, { error: e instanceof Error ? e.message : String(e) });
+        }
+      }).pipe(Effect.withSpan("appview.devicePair.confirm")),
+    ),
+  );
 }

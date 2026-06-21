@@ -19,8 +19,11 @@
     "start": "node --experimental-strip-types src/index.ts"
   },
   "dependencies": {
+    "@cocore/o11y": "workspace:*",
     "@cocore/sdk": "workspace:*",
-    "better-sqlite3": "^11.5.0"
+    "@effect/platform": "^0.96.2",
+    "better-sqlite3": "^11.5.0",
+    "effect": "^3.21.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

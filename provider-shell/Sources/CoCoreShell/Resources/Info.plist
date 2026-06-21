@@ -5,7 +5,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>co/core</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.cocore.shell</string>
+	<string>dev.cocore.menubar</string>
 	<key>CFBundleName</key>
 	<string>co/core</string>
 	<key>CFBundleShortVersionString</key>
@@ -27,8 +27,6 @@
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
-	<key>LSUIElement</key>
-	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

@@ -18,7 +18,8 @@
 import type { Did } from "@atcute/lexicons";
 import { isDid } from "@atcute/lexicons/syntax";
 import type { OAuthSession } from "@atcute/oauth-node-client";
-import { Effect } from "effect";
+
+import { runTraced } from "@/lib/o11y.server.ts";
 
 import { restoreAtprotoSessionEffect } from "@/integrations/auth/atproto.server.ts";
 import { type DispatchInputs, runDispatch } from "@/lib/inference-dispatch.server.ts";
@@ -70,7 +71,10 @@ async function authenticate(
   // Restore the OAuth session for this DID. The session store is
   // SQLite-backed and persists across deploys, so as long as the user
   // hasn't explicitly revoked the chain, this resolves.
-  const oauthSession = await Effect.runPromise(restoreAtprotoSessionEffect(resolved.did as Did));
+  const oauthSession = await runTraced(
+    "auth.restoreSession",
+    restoreAtprotoSessionEffect(resolved.did as Did),
+  );
   if (!oauthSession) {
     return jsonError(
       401,

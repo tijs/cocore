@@ -14,6 +14,7 @@ import {
   appviewGetReceiptsEffect,
 } from "@/integrations/appview/appview.server.ts";
 import { resolveActorsForDids } from "@/lib/friends.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { authMiddleware } from "@/middleware/auth.ts";
 
 type MyJobsPayload = {
@@ -29,7 +30,8 @@ type MyJobsPayload = {
 const listMyJobsServerFn = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(({ context }) =>
-    Effect.runPromise(
+    runTraced(
+      "jobs.listMine",
       Effect.gen(function* () {
         const now = Date.now();
         const did = context.did;

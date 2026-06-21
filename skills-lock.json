@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "effect-ts": {
+      "source": "paulrberg/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/effect-ts/SKILL.md",
+      "computedHash": "e4cc00910729e830697eaaf59fcdb7bb29645d4f86f026dbb4505bf529aa62fd"
+    },
     "tanstack-query": {
       "source": "tanstack-skills/tanstack-skills",
       "sourceType": "github",

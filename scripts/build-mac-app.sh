@@ -59,7 +59,7 @@ if [[ "$DEV" == "1" ]]; then
   readonly DISPLAY_NAME="co/core (dev)"
 else
   readonly APP_NAME="cocore"
-  readonly BUNDLE_ID="dev.cocore.shell"
+  readonly BUNDLE_ID="dev.cocore.menubar"
   readonly DISPLAY_NAME="co/core"
 fi
 readonly APP="$OUT_DIR/$APP_NAME.app"
@@ -309,7 +309,7 @@ fi
 
 bold "==> done"
 note "app: $APP"
-note "run: open \"$APP\"   (icon appears in the menu bar; LSUIElement = no dock icon)"
+note "run: open \"$APP\"   (tray icon; Dock hidden once tray lands on Tahoe)"
 
 if [[ "$OPEN" == "1" ]]; then
   bold "==> launch"

@@ -1322,9 +1322,7 @@ pub fn handle_code_challenge_payload(
     json_str: &str,
 ) -> Result<Option<CodeAttestationResponse>> {
     match parse_code_challenge_payload(json_str) {
-        Some((epk, sealed)) => {
-            recover_code_challenge(encryption, signer, &epk, &sealed).map(Some)
-        }
+        Some((epk, sealed)) => recover_code_challenge(encryption, signer, &epk, &sealed).map(Some),
         None => Ok(None),
     }
 }
@@ -1505,9 +1503,8 @@ mod tests {
             .unwrap();
         let sealed_b64 = B64.encode(&sealed);
 
-        let resp =
-            recover_code_challenge(&k, &*signer, &advisor_eph.public_key_b64(), &sealed_b64)
-                .unwrap();
+        let resp = recover_code_challenge(&k, &*signer, &advisor_eph.public_key_b64(), &sealed_b64)
+            .unwrap();
         assert_eq!(resp.nonce, nonce);
 
         // Signature verifies against the attestation public key.
@@ -1567,12 +1564,8 @@ mod tests {
             .seal_to(&k.public_key_b64(), b"deadbeef")
             .unwrap();
         let sealed_b64 = B64.encode(&sealed);
-        let err = recover_code_challenge(
-            &not_k,
-            &*signer,
-            &advisor_eph.public_key_b64(),
-            &sealed_b64,
-        );
+        let err =
+            recover_code_challenge(&not_k, &*signer, &advisor_eph.public_key_b64(), &sealed_b64);
         assert!(err.is_err(), "opening with the wrong K must fail");
     }
 
