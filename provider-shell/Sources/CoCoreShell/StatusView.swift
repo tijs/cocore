@@ -11,6 +11,12 @@ import SwiftUI
 struct StatusRows: View {
     @EnvironmentObject private var state: AppState
 
+    /// When provided, the Security section shows an "Enable Secure Mode…"
+    /// action (the MDM/attestation wizard). Left `nil` where there's no place
+    /// to host the wizard (e.g. the read-only standalone Status window), which
+    /// just hides the button.
+    var onEnableSecureMode: (() -> Void)? = nil
+
     var body: some View {
         Section("Identity") {
             if let s = state.session {
@@ -35,34 +41,41 @@ struct StatusRows: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            LabeledContent("Attestation") {
+        }
+        // Two ORTHOGONAL postures, deliberately separated so neither is mistaken
+        // for the other:
+        //   • Secure Mode (attestation) — proves this is genuine Apple hardware.
+        //   • Confidential — seals inference so the operator can't read prompts.
+        Section("Security") {
+            LabeledContent("Secure Mode") {
                 Text(state.trustLevel == .hardwareAttested
-                    ? "Hardware-attested"
-                    : "Self-attested (software)")
+                    ? "On — hardware-attested"
+                    : "Off — self-attested (software)")
                     .foregroundStyle(state.trustLevel == .hardwareAttested ? .green : .secondary)
             }
-            LabeledContent("Confidential tier") {
-                if state.confidential {
-                    // The honest, stronger claim: the operator can't read prompts.
-                    Text("🔒 Confidential")
-                        .foregroundStyle(.green)
-                } else {
-                    Text("Best-effort")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            // Honest one-liner so nobody mistakes hardware-attested (genuine Mac,
-            // SIP verified) for confidential (operator can't read prompts).
-            Text(state.confidential
-                ? "Your prompts run inside the measured, signed agent — the operator can't read them."
-                : state.trustLevel == .hardwareAttested
-                    ? "Genuine Apple hardware, SIP verified. Inference still runs in a helper the operator can read — upgrade to confidential to seal it."
-                    : "Fast best-effort serving. The operator can read prompts. Upgrade in the console to go confidential.")
+            Text(state.trustLevel == .hardwareAttested
+                ? "This Mac is enrolled and proven to be genuine Apple hardware (SIP verified)."
+                : "Proves this is genuine, untampered Apple hardware (SIP verified). Optional.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let exp = state.attestationExpiresAt {
                 LabeledContent("Attestation expires", value: exp.formatted(.dateTime))
             }
+            if state.trustLevel != .hardwareAttested, let enable = onEnableSecureMode {
+                Button("Enable Secure Mode…", action: enable)
+            }
+
+            LabeledContent("Confidential tier") {
+                Text(state.confidential ? "🔒 Confidential" : "Best-effort")
+                    .foregroundStyle(state.confidential ? .green : .secondary)
+            }
+            // Honest one-liner so nobody mistakes Secure Mode (genuine Mac, SIP
+            // verified) for confidential (operator can't read prompts).
+            Text(state.confidential
+                ? "Your prompts run inside the measured, signed agent — the operator can't read them."
+                : "Seals inference so the operator can't read your prompts. Enable per-machine from the console (\u{201C}Upgrade to confidential\u{201D}).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         Section("Credits") {
             if let bal = state.balanceCredits {

@@ -31,6 +31,7 @@ final class MainWindowController {
     private let onOpenProfile: () -> Void
     private let onOpenSetupGuide: () -> Void
     private let onSignOut: () -> Void
+    private let onEnableSecureMode: () -> Void
     private let onSendBugReport: () -> Void
     private let onCheckUpdates: () -> Void
     private let onInstallUpdate: () -> Void
@@ -44,6 +45,7 @@ final class MainWindowController {
         onOpenProfile: @escaping () -> Void,
         onOpenSetupGuide: @escaping () -> Void,
         onSignOut: @escaping () -> Void,
+        onEnableSecureMode: @escaping () -> Void,
         onSendBugReport: @escaping () -> Void,
         onCheckUpdates: @escaping () -> Void,
         onInstallUpdate: @escaping () -> Void,
@@ -56,6 +58,7 @@ final class MainWindowController {
         self.onOpenProfile = onOpenProfile
         self.onOpenSetupGuide = onOpenSetupGuide
         self.onSignOut = onSignOut
+        self.onEnableSecureMode = onEnableSecureMode
         self.onSendBugReport = onSendBugReport
         self.onCheckUpdates = onCheckUpdates
         self.onInstallUpdate = onInstallUpdate
@@ -71,7 +74,8 @@ final class MainWindowController {
                     StatusTab(
                         onOpenProfile: onOpenProfile,
                         onOpenSetupGuide: onOpenSetupGuide,
-                        onSignOut: onSignOut)),
+                        onSignOut: onSignOut,
+                        onEnableSecureMode: onEnableSecureMode)),
                 tab("Models", "cpu", ModelsView(manager: modelManager)),
                 tab("Settings", "gearshape", PreferencesView(supervisor: supervisor)),
                 tab("About", "info.circle",
@@ -139,11 +143,12 @@ private struct StatusTab: View {
     let onOpenProfile: () -> Void
     let onOpenSetupGuide: () -> Void
     let onSignOut: () -> Void
+    let onEnableSecureMode: () -> Void
     @EnvironmentObject private var state: AppState
 
     var body: some View {
         Form {
-            StatusRows()
+            StatusRows(onEnableSecureMode: onEnableSecureMode)
             Section {
                 Button("View my profile on console", action: onOpenProfile)
                     .disabled(state.session == nil)
