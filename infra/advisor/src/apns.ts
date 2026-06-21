@@ -10,6 +10,7 @@
 // (provider/spikes/apns) — this is the same flow in TypeScript.
 
 import crypto from "node:crypto";
+import http2 from "node:http2";
 import nacl from "tweetnacl";
 
 const APNS_HOST = "https://api.push.apple.com";
@@ -102,39 +103,83 @@ export interface ApnsSendResult {
   apnsId?: string;
 }
 
-/** Push a sealed code-identity challenge to a provider's device token. */
+/** How long to wait for the whole APNs round-trip before giving up. */
+const APNS_TIMEOUT_MS = 10_000;
+
+/** Push a sealed code-identity challenge to a provider's device token.
+ *
+ *  APNs REQUIRES HTTP/2. Node's global `fetch` (undici) is HTTP/1.1 only and
+ *  fails every push to `api.push.apple.com` with `TypeError: fetch failed`
+ *  (status 0) — which is exactly why code-attestation never completed in the
+ *  field. We therefore open an HTTP/2 session with `node:http2` directly. The
+ *  S5 spike used Swift/URLSession (HTTP/2 by default), so this gap only
+ *  surfaced once the TypeScript advisor tried to send. */
 export async function sendCodeChallenge(
   cfg: ApnsConfig,
   deviceToken: string,
   encryptionPubKeyB64: string,
   nonce: string,
-  fetchImpl: typeof fetch = fetch,
 ): Promise<ApnsSendResult> {
   const cc = sealCodeChallenge(nonce, encryptionPubKeyB64);
-  const body = JSON.stringify({ aps: { "content-available": 1 }, cc });
-  let res: Response;
+  const body = Buffer.from(JSON.stringify({ aps: { "content-available": 1 }, cc }));
+  let jwt: string;
   try {
-    res = await fetchImpl(`${APNS_HOST}/3/device/${deviceToken}`, {
-      method: "POST",
-      headers: {
-        authorization: `bearer ${buildApnsJwt(cfg)}`,
-        "apns-topic": cfg.topic,
-        "apns-push-type": "background",
-        "apns-priority": "5",
-        "apns-expiration": "0",
-      },
-      body,
-    });
+    jwt = buildApnsJwt(cfg);
   } catch (e) {
-    return { ok: false, status: 0, reason: String(e) };
+    return { ok: false, status: 0, reason: `jwt: ${String(e)}` };
   }
-  const apnsId = res.headers.get("apns-id") ?? undefined;
-  if (res.status === 200) return { ok: true, status: 200, apnsId };
-  let reason: string | undefined;
-  try {
-    reason = (JSON.parse(await res.text()) as { reason?: string }).reason;
-  } catch {
-    // non-JSON body; leave reason undefined
-  }
-  return { ok: false, status: res.status, reason, apnsId };
+  return await new Promise<ApnsSendResult>((resolve) => {
+    let settled = false;
+    const client = http2.connect(APNS_HOST);
+    const finish = (r: ApnsSendResult): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        client.close();
+      } catch {
+        // already closing
+      }
+      resolve(r);
+    };
+    client.on("error", (e) => finish({ ok: false, status: 0, reason: String(e) }));
+    const req = client.request({
+      ":method": "POST",
+      ":path": `/3/device/${deviceToken}`,
+      authorization: `bearer ${jwt}`,
+      "apns-topic": cfg.topic,
+      "apns-push-type": "background",
+      "apns-priority": "5",
+      "apns-expiration": "0",
+      "content-type": "application/json",
+      "content-length": String(body.length),
+    });
+    req.setTimeout(APNS_TIMEOUT_MS, () => {
+      req.close();
+      finish({ ok: false, status: 0, reason: "apns request timeout" });
+    });
+    let status = 0;
+    let apnsId: string | undefined;
+    const chunks: Buffer[] = [];
+    req.on("response", (headers) => {
+      status = Number(headers[":status"]) || 0;
+      apnsId = (headers["apns-id"] as string | undefined) ?? undefined;
+    });
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("error", (e) => finish({ ok: false, status: 0, reason: String(e) }));
+    req.on("end", () => {
+      if (status === 200) {
+        finish({ ok: true, status: 200, apnsId });
+        return;
+      }
+      let reason: string | undefined;
+      try {
+        reason = (JSON.parse(Buffer.concat(chunks).toString()) as { reason?: string }).reason;
+      } catch {
+        // non-JSON body; leave reason undefined
+      }
+      finish({ ok: false, status, reason, apnsId });
+    });
+    req.write(body);
+    req.end();
+  });
 }

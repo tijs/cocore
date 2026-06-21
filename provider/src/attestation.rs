@@ -109,6 +109,33 @@ pub struct AttestationRecord {
 ///
 /// Used by `cmd_serve` to publish a fresh attestation on each boot
 /// so receipts have something to strong-ref.
+/// Apple Silicon Secure Boot status. There's no cheap syscall for the boot
+/// policy (`bputil` needs sudo), but `system_profiler SPiBridgeDataType`
+/// reports it as `Secure Boot: Full Security` — the ONLY level that counts as
+/// fully enabled (Reduced / Permissive do not). Returns false on any
+/// uncertainty so the confidential posture is never over-claimed. ~1–2s; run
+/// once per attestation build (boot + the 23h refresh).
+#[cfg(target_os = "macos")]
+fn detect_secure_boot() -> bool {
+    use std::process::Command;
+    let out = match Command::new("/usr/sbin/system_profiler")
+        .arg("SPiBridgeDataType")
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return false,
+    };
+    String::from_utf8_lossy(&out).lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("Secure Boot:") && l.contains("Full Security")
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_secure_boot() -> bool {
+    false
+}
+
 pub fn build_stub_inputs(provider_did: &str, encryption_pub_key_b64: &str) -> AttestationInputs {
     let binary_path =
         std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cocore-provider"));
@@ -128,11 +155,13 @@ pub fn build_stub_inputs(provider_did: &str, encryption_pub_key_b64: &str) -> At
         serial_number: "stub-serial".into(),
         os_version,
         binary_path,
-        // sysctl exposes `kern.bootargs` etc but reading them
-        // reliably across macOS versions is fiddly; we report the
-        // honest "we did not verify" state for the stub build.
+        // SIP is verified ON before we ever get here: `security::apply_all`
+        // runs `csrutil status` at startup and refuses to serve if it's off.
         sip_enabled: true,
-        secure_boot_enabled: false,
+        // Apple Silicon Secure Boot policy, measured live (Full Security only).
+        // Reduced/Permissive and any read failure report false (the honest
+        // floor) so we never over-claim the confidential posture.
+        secure_boot_enabled: detect_secure_boot(),
         secure_enclave_available: false,
         authenticated_root_enabled: false,
         rdma_disabled: true,
@@ -226,11 +255,20 @@ pub fn build(
     };
     let mda_chain_b64: Vec<String> = mda_chain.iter().map(|c| B64.encode(c)).collect();
 
-    // Producer's HONEST self-asserted tier. `attested-confidential` requires
-    // the full confidential posture AND a bound MDA chain that survived
-    // verification above; everything else is best-effort. Verifiers recompute
-    // this from evidence (and the requester's known-good set + session key) and
-    // never trust the field — but the producer must not over-claim.
+    // Producer's HONEST self-asserted tier. `attested-confidential` is the
+    // CONFIDENTIALITY axis — "the prompt is handled only inside this measured,
+    // signed binary, and the operator can't read it." It is ORTHOGONAL to
+    // `trustLevel` (the hardware-attestation axis): the bound Apple MDA chain
+    // gates `trustLevel: hardware-attested` (computed by the caller from
+    // `mda_cert_chain`), NOT the tier. A machine can therefore be
+    // self-attested (software) AND attested-confidential — its confidentiality
+    // is backed by the in-process native engine + the hardened posture +
+    // (off-record) the advisor's APNs code-identity challenge + cdHash
+    // known-good gate, while its hardware is not independently Apple-attested.
+    // The tier requires the FULL confidential posture; everything else is
+    // best-effort. Verifiers recompute this from evidence (known-good set +
+    // session key + code-attestation) and never trust the field — but the
+    // producer must not over-claim.
     let confidential_capable = inputs.in_process_backend
         && !inputs.get_task_allow
         && inputs.hardened_runtime
@@ -240,8 +278,7 @@ pub fn build(
         && inputs.env_scrubbed
         && inputs.sip_enabled
         && inputs.secure_boot_enabled
-        && inputs.cd_hash.is_some()
-        && !mda_chain_b64.is_empty();
+        && inputs.cd_hash.is_some();
     let tier = if confidential_capable {
         "attested-confidential"
     } else {
@@ -394,8 +431,9 @@ mod tests {
         assert!(!rec.selfSignature.is_empty());
         assert_eq!(rec.serialNumberHash.len(), 64);
         assert!(rec.expiresAt > rec.attestedAt);
-        // No MDA chain + no native engine → must self-assert best-effort,
-        // never attested-confidential.
+        // No native in-process engine (inProcessBackend=false) → must
+        // self-assert best-effort, never attested-confidential. (The MDA chain
+        // is irrelevant to the tier; it gates trustLevel only.)
         assert_eq!(rec.tier, "best-effort");
         assert!(!rec.inProcessBackend);
     }
@@ -440,11 +478,14 @@ mod tests {
             rec.mdaCertChain.is_empty(),
             "an unverifiable / unbound chain must be dropped, not embedded"
         );
-        // Even with a full in-process confidential posture, a DROPPED MDA chain
-        // means the producer must NOT self-assert attested-confidential.
+        // tier ⊥ trustLevel: a dropped/absent MDA chain caps the HARDWARE axis
+        // (the caller computes trustLevel: self-attested), but does NOT cap the
+        // CONFIDENTIALITY tier — a full in-process confidential posture still
+        // earns attested-confidential. The chain being dropped only means this
+        // machine isn't ALSO hardware-attested.
         assert_eq!(
-            rec.tier, "best-effort",
-            "without a bound MDA chain the tier caps at best-effort"
+            rec.tier, "attested-confidential",
+            "a full confidential posture earns the tier regardless of the MDA chain"
         );
     }
 }

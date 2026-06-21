@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Agent(AgentCmd::Pair { console }) => cmd_pair(&console).await,
-        Cmd::Agent(AgentCmd::Serve { advisor }) => cmd_serve(&advisor).await,
+        Cmd::Agent(AgentCmd::Serve { advisor }) => cmd_serve_entry(advisor).await,
         Cmd::Agent(AgentCmd::Whoami) => cmd_whoami(),
         Cmd::Agent(AgentCmd::Doctor { console, fix }) => doctor::run(&console, fix).await,
         Cmd::Agent(AgentCmd::Update { console, check }) => update::run(&console, check).await,
@@ -586,7 +586,62 @@ async fn wait_until_active(pds: &cocore_provider::pds::PdsClient, rkey: Option<&
     }
 }
 
-async fn cmd_serve(advisor_url: &str) -> Result<()> {
+/// Serve entrypoint. On the confidential (`apns`) build it hands the process
+/// **main thread** to the AppKit APNs push host while the tokio serve loop runs
+/// on a dedicated thread's runtime: AppKit's run loop must own the main thread,
+/// and the measured worker binary (this process — it holds `K` and the SE key)
+/// must be the push receiver, so the code-identity challenge can only be
+/// answered with this split. On every other build it's a thin async
+/// passthrough with no push receiver.
+#[cfg(all(target_os = "macos", feature = "apns"))]
+async fn cmd_serve_entry(advisor: String) -> Result<()> {
+    use tokio::sync::mpsc::unbounded_channel;
+    // The push host (main thread) forwards `E_K(nonce)` challenges on this
+    // channel; the serve loop (worker thread) drains it. Unbounded so the
+    // Cocoa-thread callback never blocks.
+    let (push_tx, push_rx) = unbounded_channel::<String>();
+    // Drive the async serve loop on its own multi-threaded runtime, leaving the
+    // main OS thread free for `NSApplication.run`.
+    std::thread::Builder::new()
+        .name("cocore-serve".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to build serve runtime");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) = rt.block_on(cmd_serve(&advisor, Some(push_rx))) {
+                tracing::error!(error = %e, "serve loop exited with error");
+            }
+            // The serve loop only returns on a fatal / owner-stop path; the push
+            // host owns main and never returns, so exit and let the supervisor
+            // restart us cleanly rather than leaving a half-dead process.
+            std::process::exit(0);
+        })
+        .map_err(|e| anyhow::anyhow!("spawn serve thread: {e}"))?;
+    // Hand the main thread to the push host. Never returns.
+    cocore_provider::push_host::run_blocking(push_tx)
+}
+
+/// Non-confidential builds: no push host, serve directly on the main runtime.
+#[cfg(not(all(target_os = "macos", feature = "apns")))]
+async fn cmd_serve_entry(advisor: String) -> Result<()> {
+    cmd_serve(&advisor, None).await
+}
+
+async fn cmd_serve(
+    advisor_url: &str,
+    // APNs code-identity push receiver (confidential tier; `apns` build). The
+    // process main thread runs the AppKit push host and forwards challenges
+    // here; we thread it into every `AdvisorClient::run` so it survives
+    // reconnects. `None` on non-apns builds / headless sessions.
+    mut push_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Result<()> {
     // No session yet → the user installed but hasn't paired. Sleep
     // forever in this process rather than exit-1 → launchd
     // restart → exit-1 → launchd restart… The KeepAlive loop fills
@@ -1072,6 +1127,7 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
                             &desired_at_start,
                             &model_schedules,
                             &configured_models,
+                            push_rx.as_mut(),
                         )
                         .await;
                     let lived = connected_at.elapsed();
@@ -1131,7 +1187,7 @@ async fn cmd_serve(advisor_url: &str) -> Result<()> {
                         );
                         let client = AdvisorClient::new(advisor_url);
                         tokio::select! {
-                            res = client.run(register.clone(), &*signer, &enc, &pds, attestation, &eng, provider_rkey.as_deref(), &desired_at_start, &model_schedules, &configured_models) => {
+                            res = client.run(register.clone(), &*signer, &enc, &pds, attestation, &eng, provider_rkey.as_deref(), &desired_at_start, &model_schedules, &configured_models, push_rx.as_mut()) => {
                                 if let Err(e) = res {
                                     tracing::warn!(error = %e, "advisor run ended; reconnecting within window in 5s");
                                 }
