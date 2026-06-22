@@ -155,7 +155,10 @@ export function verifyAppAttest(
       throw new AppAttestError("leaf-is-ca", "leaf (credCert) must be an end-entity, not a CA");
     }
     if (i > 0 && !isCa) {
-      throw new AppAttestError("non-ca-issuer", `chain cert ${i} is not a CA but signs cert ${i - 1}`);
+      throw new AppAttestError(
+        "non-ca-issuer",
+        `chain cert ${i} is not a CA but signs cert ${i - 1}`,
+      );
     }
   }
 
@@ -165,7 +168,11 @@ export function verifyAppAttest(
   const clientDataHash = sha256(signingPubkeyRaw);
   const expectedNonce = sha256(concat(obj.authData, clientDataHash));
 
-  const rawDer = new Uint8Array(credCert.raw.buffer, credCert.raw.byteOffset, credCert.raw.byteLength);
+  const rawDer = new Uint8Array(
+    credCert.raw.buffer,
+    credCert.raw.byteOffset,
+    credCert.raw.byteLength,
+  );
   const nonceExt = parseExtensions(rawDer).find((e) => e.oid === OID_APP_ATTEST_NONCE);
   if (!nonceExt) {
     throw new AppAttestError("no-nonce-extension", "credCert has no nonce extension");
@@ -194,8 +201,7 @@ export function verifyAppAttest(
     throw new AppAttestError("shape", "rpIdHash != sha256(appId)");
   }
   const aaguidOk =
-    ctEq(ad.aaguid, AAGUID_PRODUCTION) ||
-    (allowDevelopment && ctEq(ad.aaguid, AAGUID_DEVELOPMENT));
+    ctEq(ad.aaguid, AAGUID_PRODUCTION) || (allowDevelopment && ctEq(ad.aaguid, AAGUID_DEVELOPMENT));
   if (!aaguidOk) {
     throw new AppAttestError(
       "bad-aaguid",
@@ -317,7 +323,10 @@ function parseAuthData(ad: Uint8Array): AuthData {
   const credIdLen = (ad[53]! << 8) | ad[54]!;
   const end = 55 + credIdLen;
   if (end > ad.length) {
-    throw new AppAttestError("short-auth-data", `authData too short for credId (${ad.length} bytes)`);
+    throw new AppAttestError(
+      "short-auth-data",
+      `authData too short for credId (${ad.length} bytes)`,
+    );
   }
   const credentialId = ad.slice(55, end);
   return { rpIdHash, aaguid, credentialId };

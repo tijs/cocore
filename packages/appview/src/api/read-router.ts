@@ -333,13 +333,17 @@ export function buildReadRouter(store: Store): HttpRouter.HttpRouter<never, neve
         const aa = att.appAttest;
         let appAttestBound = false;
         if (aa && aa.object && aa.keyId) {
-          appAttestBound = verifyAppAttestB64(aa.object, aa.keyId, att.publicKey, APP_ATTEST_APP_ID);
+          appAttestBound = verifyAppAttestB64(
+            aa.object,
+            aa.keyId,
+            att.publicKey,
+            APP_ATTEST_APP_ID,
+          );
           if (!appAttestBound) {
             findings.push({
               severity: "error",
               code: "appattest-not-bound",
-              message:
-                "App Attest object did not verify or is not bound to attestation.publicKey",
+              message: "App Attest object did not verify or is not bound to attestation.publicKey",
             });
           }
         }

@@ -71,8 +71,9 @@ const OID_APP_ATTEST_NONCE: &[u8] = &[42, 134, 72, 134, 247, 99, 100, 8, 2];
 
 /// AAGUID stamped into authData for genuine production App Attest:
 /// ASCII "appattest" padded to 16 bytes with zeros.
-pub const AAGUID_PRODUCTION: &[u8; 16] =
-    &[0x61, 0x70, 0x70, 0x61, 0x74, 0x74, 0x65, 0x73, 0x74, 0, 0, 0, 0, 0, 0, 0];
+pub const AAGUID_PRODUCTION: &[u8; 16] = &[
+    0x61, 0x70, 0x70, 0x61, 0x74, 0x74, 0x65, 0x73, 0x74, 0, 0, 0, 0, 0, 0, 0,
+];
 /// AAGUID for the development environment: ASCII "appattestdevelop" (16 bytes).
 pub const AAGUID_DEVELOPMENT: &[u8; 16] = b"appattestdevelop";
 
@@ -150,7 +151,8 @@ pub fn verify(
     signing_pubkey_raw: &[u8],
     app_id: &str,
 ) -> Result<AppAttestResult, AppAttestError> {
-    let root_der = pem_to_der(APPLE_APP_ATTEST_ROOT_CA_PEM).map_err(AppAttestError::BadTrustAnchor)?;
+    let root_der =
+        pem_to_der(APPLE_APP_ATTEST_ROOT_CA_PEM).map_err(AppAttestError::BadTrustAnchor)?;
     verify_against(
         object_der,
         key_id,
@@ -266,7 +268,8 @@ pub fn verify_against(
         .iter()
         .find(|ext| ext.oid.as_bytes() == OID_APP_ATTEST_NONCE)
         .ok_or(AppAttestError::NoNonceExtension)?;
-    let got_nonce = parse_nonce_extension(nonce_ext.value).ok_or(AppAttestError::BadNonceExtension)?;
+    let got_nonce =
+        parse_nonce_extension(nonce_ext.value).ok_or(AppAttestError::BadNonceExtension)?;
     if !ct_eq(&got_nonce, expected_nonce.as_slice()) {
         return Err(AppAttestError::NonceMismatch);
     }
@@ -315,12 +318,7 @@ pub fn verify_against(
 
 /// Convenience: decode base64 `object` + `keyId` + `publicKey` and verify.
 /// Returns `true` iff the App Attest evidence is valid AND bound to `public_key_b64`.
-pub fn verify_b64(
-    object_b64: &str,
-    key_id_b64: &str,
-    public_key_b64: &str,
-    app_id: &str,
-) -> bool {
+pub fn verify_b64(object_b64: &str, key_id_b64: &str, public_key_b64: &str, app_id: &str) -> bool {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let (Ok(object), Ok(key_id), Ok(pubkey)) = (
         B64.decode(object_b64),
@@ -348,7 +346,11 @@ impl AttestationObject {
         let map = v
             .as_map()
             .ok_or_else(|| AppAttestError::Shape("top-level is not a CBOR map".into()))?;
-        let get = |key: &str| map.iter().find(|(k, _)| k.as_text() == Some(key)).map(|(_, val)| val);
+        let get = |key: &str| {
+            map.iter()
+                .find(|(k, _)| k.as_text() == Some(key))
+                .map(|(_, val)| val)
+        };
 
         let fmt = get("fmt")
             .and_then(|x| x.as_text())
@@ -375,7 +377,11 @@ impl AttestationObject {
             .and_then(|x| x.as_bytes())
             .ok_or_else(|| AppAttestError::Shape("authData".into()))?
             .clone();
-        Ok(AttestationObject { fmt, x5c, auth_data })
+        Ok(AttestationObject {
+            fmt,
+            x5c,
+            auth_data,
+        })
     }
 }
 
@@ -463,7 +469,11 @@ fn read_tlv(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
 
 /// Constant-time byte-slice equality (length-checked).
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 fn pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
@@ -538,7 +548,9 @@ mod tests {
         int_params.not_before = nb;
         int_params.not_after = na;
         let int_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-        let int_cert = int_params.signed_by(&int_key, &root_cert, &root_key).unwrap();
+        let int_cert = int_params
+            .signed_by(&int_key, &root_cert, &root_key)
+            .unwrap();
 
         // Leaf (credCert): generate its key first so we can derive credentialId
         // and the authData the nonce commits to.
@@ -573,12 +585,17 @@ mod tests {
         let mut ext = CustomExtension::from_oid_content(NONCE_OID, nonce_extension_der(&nonce));
         ext.set_criticality(false);
         leaf_params.custom_extensions.push(ext);
-        let leaf_cert = leaf_params.signed_by(&leaf_key, &int_cert, &int_key).unwrap();
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &int_cert, &int_key)
+            .unwrap();
 
         // CBOR object.
         use ciborium::value::Value;
         let obj = Value::Map(vec![
-            (Value::Text("fmt".into()), Value::Text("apple-appattest".into())),
+            (
+                Value::Text("fmt".into()),
+                Value::Text("apple-appattest".into()),
+            ),
             (
                 Value::Text("attStmt".into()),
                 Value::Map(vec![
@@ -619,8 +636,16 @@ mod tests {
     fn happy_path_binds_and_verifies() {
         let signing = vec![7u8; 64];
         let (object, key_id, root) = synth_object(&signing, AAGUID_PRODUCTION);
-        let res = verify_against(&object, &key_id, &signing, TEST_APP_ID, &root, &now(), false)
-            .expect("should verify");
+        let res = verify_against(
+            &object,
+            &key_id,
+            &signing,
+            TEST_APP_ID,
+            &root,
+            &now(),
+            false,
+        )
+        .expect("should verify");
         assert!(res.valid);
         assert!(res.binds_signing_key);
         assert_eq!(res.key_id, key_id);
@@ -644,9 +669,20 @@ mod tests {
         let (object, key_id, _root) = synth_object(&signing, AAGUID_PRODUCTION);
         // Verify against Apple's real root, which did not sign the synthetic chain.
         let apple = pem_to_der(APPLE_APP_ATTEST_ROOT_CA_PEM).unwrap();
-        let err = verify_against(&object, &key_id, &signing, TEST_APP_ID, &apple, &now(), false)
-            .unwrap_err();
-        assert!(matches!(err, AppAttestError::BadSignature { .. }), "got {err:?}");
+        let err = verify_against(
+            &object,
+            &key_id,
+            &signing,
+            TEST_APP_ID,
+            &apple,
+            &now(),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AppAttestError::BadSignature { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -671,8 +707,16 @@ mod tests {
         let signing = vec![7u8; 64];
         let (object, key_id, root) = synth_object(&signing, AAGUID_DEVELOPMENT);
         // Default (production-only) rejects the development AAGUID.
-        let err = verify_against(&object, &key_id, &signing, TEST_APP_ID, &root, &now(), false)
-            .unwrap_err();
+        let err = verify_against(
+            &object,
+            &key_id,
+            &signing,
+            TEST_APP_ID,
+            &root,
+            &now(),
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(err, AppAttestError::BadAaguid(_)), "got {err:?}");
         // With allow_development it passes.
         let res = verify_against(&object, &key_id, &signing, TEST_APP_ID, &root, &now(), true)
@@ -696,7 +740,7 @@ mod tests {
         let der = nonce_extension_der(&nonce);
         assert_eq!(parse_nonce_extension(&der), Some(nonce));
         // A 31-byte "nonce" (wrong length) is rejected.
-        let bad = nonce_extension_der(&vec![0u8; 31]);
+        let bad = nonce_extension_der(&[0u8; 31]);
         assert_eq!(parse_nonce_extension(&bad), None);
     }
 }

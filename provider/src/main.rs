@@ -44,11 +44,7 @@ enum AgentCmd {
     /// approves the pairing and delivers a session blob to this
     /// agent. Persists the session at `~/.cocore/session.json`.
     Pair {
-        #[arg(
-            long,
-            env = "COCORE_CONSOLE",
-            default_value = "https://console.cocore.dev"
-        )]
+        #[arg(long, env = "COCORE_CONSOLE", default_value = "https://cocore.dev")]
         console: String,
     },
     /// Run the agent: connect to the advisor, register, heartbeat,
@@ -97,11 +93,7 @@ enum AgentCmd {
     /// commands the user runs themselves, since they require a
     /// browser or write to the binary on disk.
     Doctor {
-        #[arg(
-            long,
-            env = "COCORE_CONSOLE",
-            default_value = "https://console.cocore.dev"
-        )]
+        #[arg(long, env = "COCORE_CONSOLE", default_value = "https://cocore.dev")]
         console: String,
         /// Apply the safe fixes (kickstart the LaunchAgent if it's
         /// stopped or stale). Re-pair / update suggestions are
@@ -117,11 +109,7 @@ enum AgentCmd {
     /// kickstarts the LaunchAgent (macOS) so the daemon picks up the
     /// new binary.
     Update {
-        #[arg(
-            long,
-            env = "COCORE_CONSOLE",
-            default_value = "https://console.cocore.dev"
-        )]
+        #[arg(long, env = "COCORE_CONSOLE", default_value = "https://cocore.dev")]
         console: String,
         /// Print the latest version + comparison only; don't replace
         /// the installed binary.
@@ -2061,7 +2049,7 @@ fn build_engines(
                  so the configured model(s) [{}] could not load even after retrying. \
                  The machine is online but only serving the no-op `stub` engine, so \
                  it won't be matched to real inference jobs. Fix: re-run the installer \
-                 to (re)provision the environment — `curl -fsSL https://console.cocore.dev/agent | sh` \
+                 to (re)provision the environment — `curl -fsSL https://cocore.dev/agent | sh` \
                  — then start serving again.",
                 venv_python.display(),
                 failed.join(", "),

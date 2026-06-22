@@ -74,7 +74,7 @@ call (secrets stay on your machine + the dashboard).
 
    ```sh
    STEPPATH=~/cocore-mdm/stepca-client step ca provisioner webhook add cocore-attest \
-     cocore-chain --url https://console.cocore.dev/api/agent/mdm/attestation-chain \
+     cocore-chain --url https://cocore.dev/api/agent/mdm/attestation-chain \
      --kind ENRICHING \
      --bearer-token "$COCORE_MDM_CHAIN_INGEST_KEY"
    ```
@@ -139,7 +139,7 @@ Redeploy the console. (The `/data` volume already backs the new
 **4a. Coordinator is live (not 503).** With any valid agent API key:
 
 ```sh
-curl -s -X POST https://console.cocore.dev/api/agent/mdm/enroll-profile \
+curl -s -X POST https://cocore.dev/api/agent/mdm/enroll-profile \
   -H "Authorization: Bearer $COCORE_API_KEY" -H 'content-type: application/json' \
   -d '{"serial":"H2WHW38LQ6NV","udid":"00008103-001869192E20801E"}' | jq '{enrollmentId, signed, len: (.profile|length)}'
 ```
@@ -153,7 +153,7 @@ from step 3 is unset.
 **4b. push-attestation no longer 400s:**
 
 ```sh
-curl -s -X POST https://console.cocore.dev/api/agent/mdm/push-attestation \
+curl -s -X POST https://cocore.dev/api/agent/mdm/push-attestation \
   -H "Authorization: Bearer $COCORE_API_KEY" -H 'content-type: application/json' \
   -d '{"serial":"H2WHW38LQ6NV"}' | jq .   # → {queued:true, status:"bundled"}
 ```
@@ -189,7 +189,7 @@ Watch:
 
 ## Option-B: key-bound hardware-attested (DeviceInformation + DeviceAttestationNonce)
 
-The ACME flow above proves *genuine Apple hardware* but its attestation can't
+The ACME flow above proves _genuine Apple hardware_ but its attestation can't
 **bind to the receipt-signing key**: the ACME path attests an OS-managed P-384
 key (not our P-256 signer), and its freshness = `sha256(challenge token)` (step-ca
 chosen). App Attest — which lets an app bind an arbitrary key via clientDataHash —
@@ -199,8 +199,8 @@ on a Mac.
 
 **The fix (no App Attest, no forked step-ca): MDM `DeviceInformation`
 attestation with a key-bound nonce.** Apple's security guide: for
-DeviceInformation attestation, *the leaf's freshness code = the
-`DeviceAttestationNonce` the MDM sends*. Set
+DeviceInformation attestation, _the leaf's freshness code = the
+`DeviceAttestationNonce` the MDM sends_. Set
 
 ```
 DeviceAttestationNonce = sha256(agent P-256 publicKey)
@@ -216,7 +216,7 @@ publishes while the signing key is stable.
 ### Wire-up (code is done; these are the config/ops steps)
 
 1. **NanoMDM → console webhook.** Run NanoMDM with
-   `-webhook-url 'https://console.cocore.dev/api/agent/mdm/nanomdm-webhook?key=<SECRET>'`
+   `-webhook-url 'https://cocore.dev/api/agent/mdm/nanomdm-webhook?key=<SECRET>'`
    and set the console env `COCORE_NANOMDM_WEBHOOK_KEY=<SECRET>` to the same
    value (NanoMDM doesn't send an Authorization header, so the secret rides in
    the URL `?key=`; a Bearer header is also accepted). The webhook captures the
@@ -226,10 +226,10 @@ publishes while the signing key is stable.
 2. **Agent env** (set by the Secure Mode wizard / installer next to the existing
    chain-URL wiring):
    ```
-   COCORE_MDA_REQUEST_URL=https://console.cocore.dev/api/agent/mdm/request-attestation
+   COCORE_MDA_REQUEST_URL=https://cocore.dev/api/agent/mdm/request-attestation
    COCORE_MDA_DEVICE_SERIAL=<device serial>
    COCORE_MDA_DEVICE_UDID=<NanoMDM enrollment UDID>
-   COCORE_MDA_CHAIN_URL=https://console.cocore.dev/api/agent/mdm/attestation-chain?serial=<serial>
+   COCORE_MDA_CHAIN_URL=https://cocore.dev/api/agent/mdm/attestation-chain?serial=<serial>
    COCORE_API_KEY=<agent bearer>            # already set
    ```
    On serve the agent POSTs its pubkey to `request-attestation` (best-effort,

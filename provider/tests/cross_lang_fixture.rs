@@ -326,7 +326,8 @@ fn synth_app_attest(signing_pubkey_raw: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let na = now + time::Duration::days(365);
 
     // Root (CA).
-    let mut root_params = CertificateParams::new(vec!["cocore AppAttest Test Root".into()]).unwrap();
+    let mut root_params =
+        CertificateParams::new(vec!["cocore AppAttest Test Root".into()]).unwrap();
     root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     root_params.not_before = nb;
     root_params.not_after = na;
@@ -339,7 +340,9 @@ fn synth_app_attest(signing_pubkey_raw: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     int_params.not_before = nb;
     int_params.not_after = na;
     let int_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-    let int_cert = int_params.signed_by(&int_key, &root_cert, &root_key).unwrap();
+    let int_cert = int_params
+        .signed_by(&int_key, &root_cert, &root_key)
+        .unwrap();
 
     // Leaf (credCert) key → credentialId.
     let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -377,10 +380,15 @@ fn synth_app_attest(signing_pubkey_raw: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let mut ext = CustomExtension::from_oid_content(&[1, 2, 840, 113635, 100, 8, 2], seq);
     ext.set_criticality(false);
     leaf_params.custom_extensions.push(ext);
-    let leaf_cert = leaf_params.signed_by(&leaf_key, &int_cert, &int_key).unwrap();
+    let leaf_cert = leaf_params
+        .signed_by(&leaf_key, &int_cert, &int_key)
+        .unwrap();
 
     let obj = Value::Map(vec![
-        (Value::Text("fmt".into()), Value::Text("apple-appattest".into())),
+        (
+            Value::Text("fmt".into()),
+            Value::Text("apple-appattest".into()),
+        ),
         (
             Value::Text("attStmt".into()),
             Value::Map(vec![

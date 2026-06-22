@@ -194,7 +194,10 @@ describe("option-B DeviceInformation attestation (freshness binding)", () => {
 
   it("builds a DeviceInformation command carrying DevicePropertiesAttestation + the nonce", () => {
     const nonce = attestationNonceBytes(PUBKEY_B64);
-    const cmd = buildDeviceInformationAttestationCommand("ABCDEF01-2345-6789-ABCD-EF0123456789", nonce);
+    const cmd = buildDeviceInformationAttestationCommand(
+      "ABCDEF01-2345-6789-ABCD-EF0123456789",
+      nonce,
+    );
     expect(cmd).toContain("<string>DeviceInformation</string>");
     expect(cmd).toContain("<string>DevicePropertiesAttestation</string>");
     expect(cmd).toContain("<key>DeviceAttestationNonce</key>");
@@ -246,7 +249,9 @@ describe("option-B DeviceInformation attestation (freshness binding)", () => {
   });
 
   it("returns null for a webhook with no attestation (e.g. a TokenUpdate)", () => {
-    expect(parseNanomdmAttestationWebhook({ topic: "mdm.TokenUpdate", serial: "H2WHW38LQ6NV" })).toBeNull();
+    expect(
+      parseNanomdmAttestationWebhook({ topic: "mdm.TokenUpdate", serial: "H2WHW38LQ6NV" }),
+    ).toBeNull();
     expect(parseNanomdmAttestationWebhook(null)).toBeNull();
     expect(parseNanomdmAttestationWebhook("nope")).toBeNull();
   });
@@ -276,14 +281,19 @@ describe("option-B DeviceInformation attestation (freshness binding)", () => {
 
   it("authenticateNanomdmWebhook accepts the ?key= URL secret and a bearer; rejects wrong/unset", () => {
     process.env["COCORE_NANOMDM_WEBHOOK_KEY"] = "s3cr3t-webhook-key-value";
-    const viaQuery = new Request("https://c.test/api/agent/mdm/nanomdm-webhook?key=s3cr3t-webhook-key-value", {
-      method: "POST",
-    });
+    const viaQuery = new Request(
+      "https://c.test/api/agent/mdm/nanomdm-webhook?key=s3cr3t-webhook-key-value",
+      {
+        method: "POST",
+      },
+    );
     const viaBearer = new Request("https://c.test/api/agent/mdm/nanomdm-webhook", {
       method: "POST",
       headers: { authorization: "Bearer s3cr3t-webhook-key-value" },
     });
-    const wrong = new Request("https://c.test/api/agent/mdm/nanomdm-webhook?key=nope", { method: "POST" });
+    const wrong = new Request("https://c.test/api/agent/mdm/nanomdm-webhook?key=nope", {
+      method: "POST",
+    });
     expect(authenticateNanomdmWebhook(viaQuery)).toBe(true);
     expect(authenticateNanomdmWebhook(viaBearer)).toBe(true);
     expect(authenticateNanomdmWebhook(wrong)).toBe(false);

@@ -52,7 +52,12 @@ export const Route = createFileRoute("/api/agent/mdm/nanomdm-webhook")({
           );
         }
         ingestAttestationChain(parsed.serial, parsed.chain, new Date().toISOString());
-        return mdmJson({ ok: true, captured: true, serial: parsed.serial, certs: parsed.chain.length });
+        return mdmJson({
+          ok: true,
+          captured: true,
+          serial: parsed.serial,
+          certs: parsed.chain.length,
+        });
       },
     },
   },

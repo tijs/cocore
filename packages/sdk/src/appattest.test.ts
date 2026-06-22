@@ -30,13 +30,9 @@ function b64(s: string): Uint8Array {
 
 test("cross-language App Attest fixture: TS verifies an object produced by Rust", () => {
   const f = loadFixture();
-  const res = verifyAppAttest(
-    b64(f.objectB64),
-    b64(f.keyIdB64),
-    b64(f.publicKeyB64),
-    f.appId,
-    { trustAnchorDer: b64(f.rootDerB64) },
-  );
+  const res = verifyAppAttest(b64(f.objectB64), b64(f.keyIdB64), b64(f.publicKeyB64), f.appId, {
+    trustAnchorDer: b64(f.rootDerB64),
+  });
   assert.equal(res.valid, true);
   assert.equal(res.bindsSigningKey, true);
   // keyId is sha256(attested pubkey) → 32 bytes; equals the fixture's keyId.

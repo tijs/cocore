@@ -848,7 +848,9 @@ export function parseNanomdmAttestationWebhook(
     pushStr(cr["payload"]);
   }
   // Some webhook configs nest the device plist under `checkin`/`acknowledge`.
-  pushStr((obj["acknowledge_event"] as Record<string, unknown> | undefined)?.["raw_payload"] as unknown);
+  pushStr(
+    (obj["acknowledge_event"] as Record<string, unknown> | undefined)?.["raw_payload"] as unknown,
+  );
 
   const serial = typeof obj["serial"] === "string" ? (obj["serial"] as string) : null;
 
