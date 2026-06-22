@@ -198,6 +198,60 @@ pub fn model_prefills_think(model: &str) -> bool {
         })
 }
 
+/// Substrings that mark a vision / multimodal (image-input) model. The
+/// subprocess inference path is text-only (vllm-mlx serves text LLMs and the
+/// chat sends no images), so these can't be served — loading one just makes the
+/// Python child exit with status 1 and fails provisioning. Mirrors the console's
+/// `isVisionModel` (packages/console/src/lib/model-directory.server.ts).
+const VISION_MODEL_MARKERS: &[&str] = &[
+    "vl",
+    "vlm",
+    "vision",
+    "llava",
+    "internvl",
+    "pixtral",
+    "moondream",
+    "minicpm-v",
+    "idefics",
+    "smolvlm",
+    "paligemma",
+    "florence",
+];
+
+/// Whether `model` looks like a vision/multimodal model the text-only path
+/// can't serve. Single-token markers match only at id-segment boundaries (ids
+/// split on `/-._`) so a bare `vl` doesn't match unrelated words; multi-token
+/// markers (those containing `-`) match as plain substrings.
+pub fn is_vision_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    VISION_MODEL_MARKERS.iter().any(|marker| {
+        if marker.contains('-') {
+            lower.contains(marker)
+        } else {
+            marker_at_boundary(&lower, marker)
+        }
+    })
+}
+
+/// True if `marker` occurs in `haystack` not flanked by ASCII letters on either
+/// side — the Rust equivalent of the console's `(^|[^a-z])marker([^a-z]|$)`.
+fn marker_at_boundary(haystack: &str, marker: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mlen = marker.len();
+    let mut search_from = 0;
+    while let Some(rel) = haystack[search_from..].find(marker) {
+        let start = search_from + rel;
+        let end = start + mlen;
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_lowercase();
+        let after_ok = end == bytes.len() || !bytes[end].is_ascii_lowercase();
+        if before_ok && after_ok {
+            return true;
+        }
+        search_from = start + 1;
+    }
+    false
+}
+
 /// Splits a plaintext content stream into [`Content`](DeltaChannel::Content)
 /// and [`Reasoning`](DeltaChannel::Reasoning) fragments by recognizing inline
 /// `<think>` / `</think>` markers. Local MLX models (Qwen, R1-distills) emit
@@ -578,6 +632,33 @@ mod tests {
         assert!(!model_prefills_think(
             "mlx-community/Qwen2.5-3B-Instruct-4bit"
         ));
+    }
+
+    #[test]
+    fn vision_models_are_detected() {
+        for id in [
+            "McG-221/gemma-3-12b-it-vl-Polaris-GLM-4.7-Flash-VAR-Thinking-Instruct-Heretic-Uncensored-mlx-8Bit",
+            "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+            "mlx-community/llava-1.5-7b-4bit",
+            "mlx-community/paligemma2-3b-mix-448-8bit",
+            "OpenGVLab/InternVL2-8B",
+            "mlx-community/pixtral-12b-4bit",
+        ] {
+            assert!(is_vision_model(id), "{id} should be vision");
+        }
+    }
+
+    #[test]
+    fn text_models_are_not_flagged_as_vision() {
+        for id in [
+            "lmstudio-community/Qwen3-4B-Thinking-2507-MLX-4bit",
+            "coderavi/Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-Claude-4.5-Opus-High-Reasoning-mlx-8Bit",
+            "AutisticAF/Qwen3.6-27B-Heretic2-Uncensored-Finetune-Thinking-mlx-4Bit",
+            "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "stub",
+        ] {
+            assert!(!is_vision_model(id), "{id} should NOT be vision");
+        }
     }
 
     /// Engine whose readiness is flippable, standing in for a subprocess
