@@ -29,6 +29,19 @@ import {
   mdmJson,
 } from "@/lib/mdm-coordinator.server.ts";
 
+// We STORE the chain as base64 DER (the ingest contract below), but the agent's
+// reader runs every entry through a PEM block parser — so a base64-DER entry
+// yields ZERO certs and the agent, despite a 200 with a real chain, parses
+// nothing, never embeds it, and stays self-attested. Wrap each cert in PEM
+// markers on the way out so the agent's PEM parser sees real certificates.
+// (The wizard's reader only checks the array is non-empty, so it's unaffected.)
+function derB64ToPem(entry: string): string {
+  if (entry.includes("-----BEGIN")) return entry; // already PEM
+  const b64 = entry.replace(/\s+/g, "");
+  const wrapped = b64.match(/.{1,64}/g)?.join("\n") ?? b64;
+  return `-----BEGIN CERTIFICATE-----\n${wrapped}\n-----END CERTIFICATE-----`;
+}
+
 export const Route = createFileRoute("/api/agent/mdm/attestation-chain")({
   server: {
     handlers: {
@@ -43,7 +56,8 @@ export const Route = createFileRoute("/api/agent/mdm/attestation-chain")({
 
         const result = await fetchAttestationChain(serial);
         const status = result.status === "error" ? 502 : 200;
-        return mdmJson(result, status);
+        const chain = result.chain ? result.chain.map(derB64ToPem) : result.chain;
+        return mdmJson({ ...result, chain }, status);
       },
 
       POST: async ({ request }) => {
