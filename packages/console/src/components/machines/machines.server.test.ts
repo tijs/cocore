@@ -373,9 +373,22 @@ test("applyAdvisorStanding flags an unhealthy machine and marks standing known",
     byMachineId: new Map([
       [
         "rkey-laptop",
-        { unhealthy: true, unhealthyReason: "preflight-no-response", silentFailure: false },
+        {
+          unhealthy: true,
+          unhealthyReason: "preflight-no-response",
+          silentFailure: false,
+          verifiedTier: "best-effort" as const,
+        },
       ],
-      ["rkey-desktop", { unhealthy: false, unhealthyReason: null, silentFailure: false }],
+      [
+        "rkey-desktop",
+        {
+          unhealthy: false,
+          unhealthyReason: null,
+          silentFailure: false,
+          verifiedTier: "hardware-attested" as const,
+        },
+      ],
     ]),
   };
   const [laptop, desktop] = applyAdvisorStanding(machines, standing);
@@ -385,6 +398,8 @@ test("applyAdvisorStanding flags an unhealthy machine and marks standing known",
   assert.equal(laptop!.advisorConnected, true);
   assert.equal(desktop!.unhealthy, false);
   assert.equal(desktop!.advisorConnected, true);
+  assert.equal(laptop!.verifiedTier, "best-effort");
+  assert.equal(desktop!.verifiedTier, "hardware-attested");
 });
 
 test("applyAdvisorStanding marks a machine absent from the advisor list as not connected", () => {

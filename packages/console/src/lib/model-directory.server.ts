@@ -33,6 +33,7 @@ import {
 } from "@/integrations/appview/appview.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
 import { RECOMMENDED_MODEL_IDS } from "@/lib/recommended-models.ts";
+import { verifiedTierFor, type VerifiedTier } from "@/lib/verified-standing.server.ts";
 
 interface PriceEntry {
   modelId?: string;
@@ -71,11 +72,14 @@ interface ModelMachine {
   ramGB: number | null;
   attestationPubKey: string | null;
   lastSeen: string | null;
-  /** True when the advisor currently routes this machine as
-   *  `attested-confidential` (hardware-attested + known-good build +
-   *  challenge-verified posture). Drives the "Confidential" badge.
-   *  Recomputed by the advisor; never the machine's self-asserted value. */
+  /** True when the machine's VERIFIED tier is `attested-confidential`.
+   *  Kept for back-compat; prefer `verifiedTier`. */
   confidential: boolean;
+  /** The machine's tier recomputed from its actual signed attestation —
+   *  `attested-confidential`, `hardware-attested`, or `best-effort`. Never the
+   *  self-asserted `trustLevel`; proof-backed (see verified-standing.server.ts).
+   *  Drives the directory trust badges. */
+  verifiedTier: VerifiedTier;
   /** Host profile chip (display name + handle + avatar). null when
    *  the DID has no `dev.cocore.account.profile` record yet — the UI
    *  falls back to a shortened DID in that case. */
@@ -268,6 +272,10 @@ interface AdvisorProviderRow {
    *  cdHash is known-good AND its challenge-verified posture holds. */
   trustTier?: string;
   confidentialEligible?: boolean;
+  /** Strong-ref to the machine's attestation record — verified offline to
+   *  prove the hardware-attested tier (see verified-standing.server.ts). */
+  attestationUri?: string | null;
+  codeAttested?: boolean;
 }
 
 /** DIDs the advisor currently considers routable — attested and not
@@ -277,7 +285,9 @@ interface AdvisorProviderRow {
  *  as offline rather than showing stale PDS records. */
 interface AdvisorOnline {
   lastSeen: string;
-  confidential: boolean;
+  /** The machine's tier recomputed from its ACTUAL signed attestation (the
+   *  SDK verifier), not the self-asserted label. Drives the directory badges. */
+  verifiedTier: VerifiedTier;
 }
 
 async function fetchAdvisorOnlineDids(): Promise<Map<string, AdvisorOnline> | null> {
@@ -286,16 +296,23 @@ async function fetchAdvisorOnlineDids(): Promise<Map<string, AdvisorOnline> | nu
     const r = await fetch(`${base}/providers`);
     if (!r.ok) return null;
     const list = (await r.json()) as AdvisorProviderRow[];
-    const online = new Map<string, AdvisorOnline>();
-    for (const p of list) {
-      if (!p.attestedAt) continue;
-      if (p.active === false) continue;
-      online.set(p.did, {
-        lastSeen: p.lastSeen ?? p.attestedAt,
-        confidential: p.confidentialEligible === true || p.trustTier === "attested-confidential",
-      });
-    }
-    return online;
+    const rows = list.filter((p) => p.attestedAt && p.active !== false);
+    // Recompute each machine's tier from its attestation — proof-backed, never
+    // the self-asserted trustLevel. The offline crypto is cached by attestation
+    // CID, so a warm directory is cheap; a machine whose attestation can't be
+    // fetched/verified degrades to best-effort rather than failing the page.
+    const entries = await Promise.all(
+      rows.map(async (p): Promise<[string, AdvisorOnline]> => {
+        const verifiedTier = await verifiedTierFor({
+          did: p.did,
+          attestationUri: p.attestationUri ?? null,
+          confidentialEligible: p.confidentialEligible,
+          codeAttested: p.codeAttested,
+        });
+        return [p.did, { lastSeen: p.lastSeen ?? p.attestedAt!, verifiedTier }];
+      }),
+    );
+    return new Map(entries);
   } catch (reason) {
     console.warn("[model-directory] Advisor /providers failed:", reason);
     return null;
@@ -416,7 +433,8 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
           ramGB: safeNumber(body.ramGB),
           attestationPubKey,
           lastSeen: seen,
-          confidential: onlineInfo?.confidential ?? false,
+          confidential: (onlineInfo?.verifiedTier ?? "best-effort") === "attested-confidential",
+          verifiedTier: onlineInfo?.verifiedTier ?? "best-effort",
           host: hostFor(did),
           activity: activityFor(activity, modelId, did),
         });

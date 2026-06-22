@@ -1,5 +1,6 @@
 import type { AppviewIndexedRecord } from "@/integrations/appview/appview.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
+import { verifiedTierFor, type VerifiedTier } from "@/lib/verified-standing.server.ts";
 
 import type { Machine, MachineState } from "./machines-data.ts";
 
@@ -467,6 +468,9 @@ interface AdvisorStanding {
   unhealthy: boolean;
   unhealthyReason: string | null;
   silentFailure: boolean;
+  /** Tier recomputed from the machine's actual signed attestation (proof-
+   *  backed; see verified-standing.server.ts), not its self-asserted value. */
+  verifiedTier: VerifiedTier;
 }
 
 export interface AdvisorStandingResult {
@@ -485,6 +489,9 @@ interface AdvisorProviderRow {
   unhealthy?: unknown;
   unhealthyReason?: unknown;
   silentFailure?: unknown;
+  attestationUri?: unknown;
+  confidentialEligible?: unknown;
+  codeAttested?: unknown;
 }
 
 /** Read live machine standing from the advisor's `/providers` and key it by
@@ -504,15 +511,27 @@ export async function fetchAdvisorStanding(did: string): Promise<AdvisorStanding
     if (!resp.ok) return { byMachineId, reachable: false };
     const rows = (await resp.json()) as AdvisorProviderRow[];
     if (!Array.isArray(rows)) return { byMachineId, reachable: false };
-    for (const r of rows) {
-      if (r.did !== did) continue;
-      if (typeof r.machineId !== "string" || r.machineId.length === 0) continue;
-      byMachineId.set(r.machineId, {
-        unhealthy: r.unhealthy === true,
-        unhealthyReason: typeof r.unhealthyReason === "string" ? r.unhealthyReason : null,
-        silentFailure: r.silentFailure === true,
-      });
-    }
+    const mine = rows.filter(
+      (r) => r.did === did && typeof r.machineId === "string" && r.machineId.length > 0,
+    );
+    // Recompute each machine's tier from its actual signed attestation
+    // (proof-backed, cached by attestation CID), in parallel with the rest.
+    await Promise.all(
+      mine.map(async (r) => {
+        const verifiedTier = await verifiedTierFor({
+          did,
+          attestationUri: typeof r.attestationUri === "string" ? r.attestationUri : null,
+          confidentialEligible: r.confidentialEligible === true,
+          codeAttested: r.codeAttested === true,
+        });
+        byMachineId.set(r.machineId as string, {
+          unhealthy: r.unhealthy === true,
+          unhealthyReason: typeof r.unhealthyReason === "string" ? r.unhealthyReason : null,
+          silentFailure: r.silentFailure === true,
+          verifiedTier,
+        });
+      }),
+    );
     return { byMachineId, reachable: true };
   } catch {
     return { byMachineId, reachable: false };
@@ -540,6 +559,7 @@ export function applyAdvisorStanding(
       unhealthy: s?.unhealthy ?? false,
       unhealthyReason: s?.unhealthyReason ?? undefined,
       silentFailure: s?.silentFailure ?? false,
+      verifiedTier: s?.verifiedTier ?? "best-effort",
     };
   });
 }

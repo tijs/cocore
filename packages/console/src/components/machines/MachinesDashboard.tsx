@@ -17,6 +17,7 @@ import {
   CardTitle,
 } from "@/design-system/card";
 import { CopyToClipboardButton } from "@/design-system/copy-to-clipboard-button";
+import { TrustTierBadge } from "@/components/TrustTierBadge.tsx";
 import {
   Dialog,
   DialogBody,
@@ -2141,6 +2142,7 @@ export function MachinesDashboard() {
                                 <Text size="xs" style={ui.textDim}>
                                   {m.id}
                                 </Text>
+                                {m.verifiedTier ? <TrustTierBadge tier={m.verifiedTier} /> : null}
                               </Flex>
                             </TableCell>
                           );

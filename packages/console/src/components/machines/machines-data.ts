@@ -1,3 +1,5 @@
+import type { VerifiedTier } from "@/lib/verified-standing.server.ts";
+
 export type MachineState = "running" | "idle" | "paused" | "offline" | "provisioning";
 
 export interface Machine {
@@ -38,6 +40,10 @@ export interface Machine {
    *  to the provider record's `desiredTier`). The agent reconciles toward it;
    *  the achieved {@link tier} only rises once earned. Absent = not opted in. */
   desiredTier?: string;
+  /** Tier recomputed from the machine's ACTUAL signed attestation (proof-
+   *  backed; see verified-standing.server.ts), overlaid from live advisor
+   *  standing. Drives the fleet trust badge. Absent until standing is known. */
+  verifiedTier?: VerifiedTier;
   /** The advisor's VERIFIED confidential standing — the machine passed every
    *  earned leg (known-good cdHash + challenge-verified SIP + code-identity).
    *  This is the honest "operator cannot read your prompt" signal, stricter
