@@ -127,6 +127,21 @@ CREATE TABLE IF NOT EXISTS bug_reports (
   size_bytes INTEGER NOT NULL,
   created_at TEXT NOT NULL
 );
+
+-- Captured Apple x5c attestation chains for Secure Mode (MDA), keyed by
+-- the device hardware serial. step-ca runs ACME device-attest-01 during
+-- enrollment and forwards the validated Apple attestation chain to the
+-- coordinator's authenticated ingest endpoint, which writes a row here.
+-- The agent later GETs /api/agent/mdm/attestation-chain?serial=… to
+-- staple the chain onto its dev.cocore.compute.attestation record. We
+-- store ONLY the public x5c chain (a JSON array of base64 DER certs) —
+-- no private key material ever lands here.
+CREATE TABLE IF NOT EXISTS mdm_attestation_chains (
+  serial TEXT PRIMARY KEY,
+  -- JSON array of base64-encoded DER certs, leaf-first (att.mdaCertChain).
+  chain_json TEXT NOT NULL,
+  captured_at TEXT NOT NULL
+);
 `;
 
 // Indexes run after runMigrations() so they can reference columns

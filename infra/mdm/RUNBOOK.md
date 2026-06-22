@@ -1,0 +1,180 @@
+# Secure Mode production cutover — runbook (2026-06-21)
+
+Goal: make the guided **Secure Mode** wizard work end-to-end through the
+console coordinator against the live `cocore-step-ca` + `cocore-nanomdm`
+services, so an enrolling Mac earns `trustLevel: hardware-attested`.
+
+The **code half is done** (this branch): the coordinator now mints a real
+per-device SCEP+MDM+ACME enrollment profile, the wizard's HTTP-400 bug is
+fixed (enrollmentId is returned in the JSON body), and there's a durable
+chain store + an authenticated ingest endpoint for step-ca to post the
+captured Apple x5c chain. What remains is **infra** — and the Railway API
+token in `~/.zshenv` is **read-only**, so these steps are done by hand in
+the Railway dashboard / with the `step` CLI. Nothing here transits a tool
+call (secrets stay on your machine + the dashboard).
+
+## Current live state (verified 2026-06-21)
+
+- `cocore-step-ca` (`4de1dff8-…`) — UP, ACME `cocore-attest` serving via
+  TCP proxy `reseau.proxy.rlwy.net:43462`. Root `6d7bcfec…` (still the
+  2026-06-20 root). **EPHEMERAL** — volume `cocore-step-ca-volume`
+  (`4ccbbb4b-…`) is detached (`serviceId: null`).
+- `cocore-nanomdm` (`277e36ce-…`) — UP at
+  `cocore-nanomdm-production.up.railway.app`, auth working. **EPHEMERAL** —
+  no volume; push cert lives in file storage and dies on redeploy.
+- `Client` (console, `e8f485a3-…`) — has the `/data` volume, so the new
+  chain store persists for free.
+
+> ⚠️ Re-initialising step-ca changes its **root fingerprint**, which
+> breaks NanoMDM's baked `-ca` *and* any Mac already trusting the old
+> root. Do steps 1→2→3 as one sequence, then enroll. Don't redeploy
+> step-ca after step 1.
+
+---
+
+## Step 1 — Persist step-ca (with SCEP + the attest webhook at boot)
+
+1. **Attach the volume.** Railway → `cocore-step-ca` → Settings → Volumes →
+   attach `cocore-step-ca-volume` at `/home/step`.
+2. **Init-once env** (Variables): keep `RAILWAY_RUN_UID=0`,
+   `DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT=true`, and
+   `DOCKER_STEPCA_INIT_DNS_NAMES=reseau.proxy.rlwy.net`. Redeploy → step-ca
+   inits **into the volume** (now durable). This mints a **new root** —
+   that's expected; capture it next.
+3. **Capture the new root + intermediate:**
+   ```sh
+   curl -sk https://reseau.proxy.rlwy.net:43462/roots.pem  > ~/cocore-mdm/stepca-root.pem
+   # intermediate is in ~/cocore-mdm/stepca-client after bootstrap, or:
+   STEPPATH=~/cocore-mdm/stepca-client step ca bootstrap \
+     --ca-url https://reseau.proxy.rlwy.net:43462 \
+     --fingerprint <new-fingerprint-from-roots.pem> --force
+   ```
+4. **Re-add the provisioners so they exist AT BOOT** (the `/scep` route
+   only mounts for provisioners present at boot — that was the blocker):
+   ```sh
+   STEPPATH=~/cocore-mdm/stepca-client step ca provisioner add cocore-attest \
+     --type ACME --challenge device-attest-01 --attestation-format apple \
+     --admin-provisioner admin --admin-subject step \
+     --password-file ~/cocore-mdm/stepca-password.txt
+   STEPPATH=~/cocore-mdm/stepca-client step ca provisioner add cocore-scep \
+     --type SCEP --challenge "$(cat ~/cocore-mdm/scep-challenge.txt)" \
+     --encryption-algorithm-identifier 2 \
+     --admin-provisioner admin --admin-subject step \
+     --password-file ~/cocore-mdm/stepca-password.txt
+   ```
+   Because the CA is now persistent, these survive restarts and `/scep`
+   mounts at boot. Verify:
+   ```sh
+   curl -sk https://reseau.proxy.rlwy.net:43462/acme/cocore-attest/directory   # 200 JSON
+   curl -sk https://reseau.proxy.rlwy.net:43462/scep/cocore-scep?operation=GetCACaps  # 200
+   ```
+5. **Wire the attestation webhook** on the `cocore-attest` provisioner so a
+   successful `device-attest-01` posts the captured Apple x5c chain to the
+   console ingest endpoint:
+   ```sh
+   STEPPATH=~/cocore-mdm/stepca-client step ca provisioner webhook add cocore-attest \
+     cocore-chain --url https://console.cocore.dev/api/agent/mdm/attestation-chain \
+     --kind ENRICHING \
+     --bearer-token "$COCORE_MDM_CHAIN_INGEST_KEY"
+   ```
+   The webhook body must be `{ "serial": "<permanent-identifier>", "chain":
+   ["<b64-DER-leaf>", …] }` (leaf-first Apple x5c). **Validate the payload
+   shape** against your step-ca version — if it doesn't surface the Apple
+   x5c directly, use the fallback shim below.
+
+   *Fallback if the webhook can't carry the x5c:* a 20-line poller that
+   reads the issued order's attestation off step-ca's admin API by
+   permanent-identifier (= serial) and `POST`s it to the same ingest URL.
+   The console side is already done; only the source differs.
+
+---
+
+## Step 2 — Persist NanoMDM
+
+1. **Add a Postgres** plugin to the project; attach to `cocore-nanomdm`.
+2. **Storage DSN** (Variables): switch the container args to
+   `-storage pgsql -dsn "$DATABASE_URL"` (keep `RAILWAY_RUN_UID=0`,
+   `[::]:9000` bind, target port 9000).
+3. **Re-bake `-ca`** = the **new** step-ca root+intermediate bundle from
+   step 1.3 (the `~/cocore-mdm/nanomdm-deploy/` image bakes `ca.pem`).
+   `railway up` the updated image.
+4. **Re-upload the push cert once** (now durable on Postgres):
+   ```sh
+   cat ~/cocore-mdm/apns_push.pem ~/cocore-mdm/push.key | \
+     curl -T - -u "nanomdm:$(cat ~/cocore-mdm/nanomdm-api-key.txt)" \
+     https://cocore-nanomdm-production.up.railway.app/v1/pushcert      # 200 + topic
+   ```
+
+---
+
+## Step 3 — Set the console (Client) env
+
+Railway → `Client` → Variables. Paste the secrets yourself (they never
+touch a tool call). Values come from `~/cocore-mdm/`:
+
+```
+COCORE_MDM_SCEP_URL=https://reseau.proxy.rlwy.net:43462/scep/cocore-scep
+COCORE_MDM_SCEP_NAME=cocore-scep
+COCORE_MDM_SCEP_CHALLENGE=<~/cocore-mdm/scep-challenge.txt>
+COCORE_MDM_SERVER_URL=https://cocore-nanomdm-production.up.railway.app/mdm
+COCORE_MDM_CHECKIN_URL=https://cocore-nanomdm-production.up.railway.app/mdm
+COCORE_MDM_TOPIC=com.apple.mgmt.External.7e4125e2-8e2b-4a0d-a148-23c33073bc61
+COCORE_MDM_ROOT_CA_PEM=<full PEM of ~/cocore-mdm/stepca-root.pem (step 1.3)>
+COCORE_MDM_INTERMEDIATE_CA_PEM=<step-ca intermediate PEM, optional>
+COCORE_MDM_ACME_URL=https://reseau.proxy.rlwy.net:43462/acme/cocore-attest/directory
+COCORE_NANOMDM_URL=https://cocore-nanomdm-production.up.railway.app
+COCORE_NANOMDM_API_KEY=<~/cocore-mdm/nanomdm-api-key.txt>
+COCORE_MDM_CHAIN_INGEST_KEY=<generate a fresh 32+ char secret; same value used in step 1.5>
+```
+
+Redeploy the console. (The `/data` volume already backs the new
+`mdm_attestation_chains` table — no extra volume needed.)
+
+---
+
+## Step 4 — Smoke test (no Mac required for 4a–4b)
+
+**4a. Coordinator is live (not 503).** With any valid agent API key:
+```sh
+curl -s -X POST https://console.cocore.dev/api/agent/mdm/enroll-profile \
+  -H "Authorization: Bearer $COCORE_API_KEY" -H 'content-type: application/json' \
+  -d '{"serial":"H2WHW38LQ6NV","udid":"00008103-001869192E20801E"}' | jq '{enrollmentId, signed, len: (.profile|length)}'
+```
+Expect a JSON envelope with `enrollmentId` + a base64 `profile`. Decode it
+and confirm it carries `com.apple.security.scep`, `com.apple.mdm`
+(AccessRights 3, SignMessage), and `com.apple.security.acme` (Attest) — and
+**no** `com.apple.security.pkcs12`. A `503 {missing:[…]}` means an env key
+from step 3 is unset.
+
+**4b. push-attestation no longer 400s:**
+```sh
+curl -s -X POST https://console.cocore.dev/api/agent/mdm/push-attestation \
+  -H "Authorization: Bearer $COCORE_API_KEY" -H 'content-type: application/json' \
+  -d '{"serial":"H2WHW38LQ6NV"}' | jq .   # → {queued:true, status:"bundled"}
+```
+
+**4c. Full run on the M1 (`H2WHW38LQ6NV`).** Open co/core → Status →
+Security → **Enable Secure Mode**. Install the profile (Touch ID). The Mac
+SCEP-enrolls, checks into NanoMDM, and runs `device-attest-01` against
+step-ca on install. step-ca's webhook posts the x5c → the wizard's
+chain poll (`GET …/attestation-chain?serial=H2WHW38LQ6NV`) returns
+`status:"captured"` → provider flips to **hardware-attested**.
+
+Watch:
+- NanoMDM logs: `Authenticate serial_number=H2WHW38LQ6NV` + `TokenUpdate`.
+- step-ca logs: `challenge device-attest-01 status=valid`.
+- `curl …/attestation-chain?serial=H2WHW38LQ6NV` (with the agent key) →
+  `{status:"captured", chain:[…]}`.
+
+---
+
+## Division of labour
+
+- ✅ **Code (this branch):** SCEP/MDM/ACME enrollment profile, fail-closed
+  503, wizard-400 fix (JSON envelope), push tolerance, durable chain store
+  + authenticated ingest endpoint, unit tests.
+- ⏳ **Infra (you, dashboard / `step` CLI):** steps 1–3 above, plus the one
+  judgment call in 1.5 (does your step-ca's webhook surface the Apple x5c,
+  or do you need the poller shim?).
+- 🔁 **No app release needed** for initial enrollment — the shipped 0.9.23
+  wizard drives this once the server + infra are in place.

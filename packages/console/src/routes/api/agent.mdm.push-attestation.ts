@@ -18,6 +18,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import {
   authenticateAgent,
   isValidSerial,
+  isValidUdid,
   mdmJson,
   pushAttestationCommand,
 } from "@/lib/mdm-coordinator.server.ts";
@@ -29,7 +30,7 @@ export const Route = createFileRoute("/api/agent/mdm/push-attestation")({
         const auth = authenticateAgent(request);
         if (!auth.ok) return auth.response;
 
-        let body: { serial?: unknown; enrollmentId?: unknown };
+        let body: { serial?: unknown; enrollmentId?: unknown; udid?: unknown };
         try {
           body = (await request.json()) as typeof body;
         } catch {
@@ -38,11 +39,20 @@ export const Route = createFileRoute("/api/agent/mdm/push-attestation")({
         if (!isValidSerial(body.serial)) {
           return mdmJson({ error: "serial required (8–24 alphanumeric chars)" }, 400);
         }
-        if (typeof body.enrollmentId !== "string" || body.enrollmentId.length === 0) {
-          return mdmJson({ error: "enrollmentId required" }, 400);
-        }
 
-        const result = await pushAttestationCommand(body.serial, body.enrollmentId);
+        // The NanoMDM enqueue target is the device's enrollment id — its
+        // UDID — when a real push (refresh) is wanted. The guided wizard
+        // sends neither (initial attestation runs from the enrollment
+        // profile), so a missing target is NOT an error: pushAttestation
+        // ACKs and the device attests on install. enrollmentId is kept as
+        // a fallback target for older callers.
+        const target = isValidUdid(body.udid)
+          ? body.udid
+          : typeof body.enrollmentId === "string" && body.enrollmentId.length > 0
+            ? body.enrollmentId
+            : null;
+
+        const result = await pushAttestationCommand(body.serial, target);
         const status = result.status === "error" ? 502 : 200;
         return mdmJson(result, status);
       },

@@ -1,53 +1,64 @@
 // Server side of Apple Managed Device Attestation (MDA) — the
 // coordinator endpoints that drive guided MDM enrollment for the
-// "Secure Mode" upgrade. We proved the flow manually with NanoMDM +
-// step-ca; this module is the honest HTTP surface over it.
+// "Secure Mode" upgrade. The live backend (proven end-to-end 2026-06-20)
+// is NanoMDM + step-ca on Railway; this module is the HTTP surface the
+// provider app's wizard calls, templating per-device profiles against
+// that backend and capturing the Apple attestation chain.
 //
-// SCOPE / HONESTY
-// ---------------
-// Real CA persistence (minting per-device identities, signing the
-// .mobileconfig with the MDM vendor cert) and capturing Apple's x5c
-// attestation chain out of step-ca are ops-gated: they require live CA
-// material and a running NanoMDM/step-ca pair. So the *external* calls
-// here are stubbed behind env vars with clearly-marked `TODO(ops)`
-// seams. What is NOT stubbed: the HTTP surface, the agent auth, input
-// validation, env wiring, and request/response shapes — those are real
-// and typecheck, so wiring the backend later is a localized change.
+// ENROLLMENT MODEL (SCEP + bundled ACME attestation)
+// --------------------------------------------------
+// `enroll-profile` mints ONE per-device .mobileconfig that, on install:
+//   1. installs step-ca's root as a trust anchor (so the Mac trusts
+//      step-ca's TLS for SCEP + ACME),
+//   2. enrolls a device identity via SCEP against step-ca's `cocore-scep`
+//      provisioner (each device generates its own key; no CA-issuing
+//      secret ever lives in the console, no PKCS12 packing),
+//   3. enrolls the Mac into NanoMDM (`com.apple.mdm`, AccessRights=3,
+//      SignMessage=true — the device signs check-ins via Mdm-Signature
+//      since Railway's TLS-terminating edge strips client certs), and
+//   4. (when COCORE_MDM_ACME_URL is set) runs ACME `device-attest-01`
+//      against step-ca's `cocore-attest` provisioner via a per-serial
+//      `com.apple.security.acme` payload — so the Mac hardware-attests on
+//      install, no separate MDM push required. step-ca validates the
+//      Apple attestation and forwards the captured x5c chain to the
+//      ingest endpoint, keyed by serial.
 //
-// All MDM/CA specifics come from env (see REQUIRED ENV below); nothing
-// is hardcoded except the .mobileconfig template skeleton, which is
-// itself overridable via COCORE_MDM_PROFILE_TEMPLATE.
+// FAIL-CLOSED: when the SCEP/MDM backend env isn't configured,
+// `buildEnrollmentProfile` returns null and the route answers 503 — we
+// never hand a Mac a structurally-broken profile (the old empty-PKCS12
+// stub is gone).
 //
-// REQUIRED ENV (documented; absent ones degrade to working stubs)
-// ---------------------------------------------------------------
-//   COCORE_MDM_PROFILE_TEMPLATE   Optional. A .mobileconfig template
-//                                 string with `{{SERIAL}}`, `{{UDID}}`,
-//                                 `{{PROFILE_UUID}}`, `{{MDM_TOPIC}}`,
-//                                 `{{MDM_SERVER_URL}}`, `{{CHECKIN_URL}}`
-//                                 placeholders. When unset, a built-in
-//                                 skeleton is used.
-//   COCORE_MDM_SERVER_URL         MDM command/server URL embedded in the
-//                                 profile's MDM payload (ServerURL).
-//   COCORE_MDM_CHECKIN_URL        MDM CheckInURL (defaults to server URL).
-//   COCORE_MDM_TOPIC              APNs push topic (the MDM payload Topic,
-//                                 e.g. com.apple.mgmt.External.<uuid>).
-//   COCORE_MDM_ROOT_CA_PEM        Root CA cert (PEM) to embed for trust.
-//   COCORE_MDM_INTERMEDIATE_CA_PEM Intermediate CA cert (PEM) to embed.
-//   COCORE_MDM_SIGNING_CERT_PEM   Vendor/identity cert used to *sign* the
-//                                 mobileconfig (CMS). TODO(ops): when set
-//                                 we must CMS-sign; today we return the
-//                                 templated profile unsigned.
-//   COCORE_MDM_SIGNING_KEY_PEM    Private key paired with the signing cert.
-//   COCORE_NANOMDM_URL            Base URL of NanoMDM (for /v1/enqueue +
-//                                 push). When unset, push-attestation
-//                                 returns a stubbed "queued" status.
-//   COCORE_NANOMDM_API_KEY        Bearer/basic secret NanoMDM expects.
-//   COCORE_MDM_CHAIN_STORE_URL    Base URL of the step-ca-fed store that
-//                                 holds captured Apple x5c chains keyed by
-//                                 serial. When unset, attestation-chain
-//                                 returns {chain: null, status:"pending"}.
+// REQUIRED ENV (Secure Mode is unavailable until these are set on the
+// console service; see infra/mdm/README.md for the values)
+// ----------------------------------------------------------------------
+//   COCORE_MDM_SCEP_URL        step-ca SCEP URL, e.g.
+//                              https://<step-ca-host>/scep/cocore-scep
+//   COCORE_MDM_SCEP_NAME       SCEP CA-IDENT / provisioner name
+//                              (default "cocore-scep").
+//   COCORE_MDM_SCEP_CHALLENGE  SCEP shared-secret challenge (sensitive).
+//   COCORE_MDM_SERVER_URL      NanoMDM MDM ServerURL (the device check-in
+//                              URL embedded in the MDM payload).
+//   COCORE_MDM_CHECKIN_URL     MDM CheckInURL (defaults to ServerURL).
+//   COCORE_MDM_TOPIC           APNs push topic (the MDM payload Topic,
+//                              com.apple.mgmt.External.<uuid>).
+//   COCORE_MDM_ROOT_CA_PEM     step-ca root cert (PEM) — trust anchor.
+//   COCORE_MDM_INTERMEDIATE_CA_PEM  step-ca intermediate (PEM), optional.
+//   COCORE_MDM_ACME_URL        step-ca ACME directory for cocore-attest,
+//                              e.g. https://<host>/acme/cocore-attest/directory.
+//                              When set, attestation is bundled into the
+//                              enrollment profile (recommended).
+//   COCORE_NANOMDM_URL         NanoMDM base URL (for the push refresh path
+//                              in push-attestation). Optional when
+//                              attestation is bundled.
+//   COCORE_NANOMDM_API_KEY     NanoMDM API key (HTTP Basic password).
+//   COCORE_MDM_CHAIN_STORE_URL Optional external chain store (fallback to
+//                              the console-local SQLite store).
+//   COCORE_MDM_CHAIN_INGEST_KEY Bearer secret step-ca's attestation
+//                              webhook presents to POST captured chains.
+//   COCORE_MDM_SIGNING_CERT_PEM / _KEY_PEM  CMS-sign the profile (TODO).
 
 import { resolveBearerKey, type ResolvedKey } from "@/lib/api-keys.server.ts";
+import { getAttestationChain, putAttestationChain } from "@/lib/mdm-chain-store.server.ts";
 
 // ---------------------------------------------------------------------------
 // Auth — same bearer-API-key surface every other /api/agent/* route uses.
@@ -84,6 +95,20 @@ export function authenticateAgent(request: Request): MdmAuthResult {
   return { ok: true, caller };
 }
 
+/** Authenticate step-ca's attestation webhook (the chain ingest). This
+ *  caller is NOT an agent — it's our own CA infra — so it presents the
+ *  shared COCORE_MDM_CHAIN_INGEST_KEY as a bearer. Constant-time compare;
+ *  401 when unset (fail-closed — never accept an unauthenticated chain). */
+export function authenticateChainIngest(request: Request): boolean {
+  const expected = env("COCORE_MDM_CHAIN_INGEST_KEY");
+  if (!expected) return false;
+  const got = readBearer(request);
+  if (!got || got.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= got.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
+}
+
 // ---------------------------------------------------------------------------
 // Validation helpers.
 // ---------------------------------------------------------------------------
@@ -107,124 +132,26 @@ export function isValidUdid(v: unknown): v is string {
   return typeof v === "string" && UDID_RE.test(v);
 }
 
-// ---------------------------------------------------------------------------
-// enroll-profile — mint a per-device .mobileconfig.
-// ---------------------------------------------------------------------------
-
-/** Built-in .mobileconfig skeleton used when COCORE_MDM_PROFILE_TEMPLATE
- *  is unset. Includes a root+intermediate trust payload, a device
- *  identity placeholder, and an MDM payload with AccessRights=3 and
- *  SignMessage=true (the MDA-relevant settings). Placeholders are
- *  substituted per request. */
-const DEFAULT_PROFILE_TEMPLATE = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>PayloadDisplayName</key>
-  <string>co/core Secure Mode Enrollment ({{SERIAL}})</string>
-  <key>PayloadIdentifier</key>
-  <string>dev.cocore.mdm.enroll.{{SERIAL}}</string>
-  <key>PayloadType</key>
-  <string>Configuration</string>
-  <key>PayloadUUID</key>
-  <string>{{PROFILE_UUID}}</string>
-  <key>PayloadVersion</key>
-  <integer>1</integer>
-  <key>PayloadContent</key>
-  <array>
-    <dict>
-      <key>PayloadType</key>
-      <string>com.apple.security.root</string>
-      <key>PayloadIdentifier</key>
-      <string>dev.cocore.mdm.trust.root.{{SERIAL}}</string>
-      <key>PayloadUUID</key>
-      <string>{{ROOT_PAYLOAD_UUID}}</string>
-      <key>PayloadVersion</key>
-      <integer>1</integer>
-      <key>PayloadCertificateFileName</key>
-      <string>cocore-root-ca.pem</string>
-      <key>PayloadContent</key>
-      <data>{{ROOT_CA_B64}}</data>
-    </dict>
-    <dict>
-      <key>PayloadType</key>
-      <string>com.apple.security.pkcs1</string>
-      <key>PayloadIdentifier</key>
-      <string>dev.cocore.mdm.trust.intermediate.{{SERIAL}}</string>
-      <key>PayloadUUID</key>
-      <string>{{INTERMEDIATE_PAYLOAD_UUID}}</string>
-      <key>PayloadVersion</key>
-      <integer>1</integer>
-      <key>PayloadCertificateFileName</key>
-      <string>cocore-intermediate-ca.pem</string>
-      <key>PayloadContent</key>
-      <data>{{INTERMEDIATE_CA_B64}}</data>
-    </dict>
-    <dict>
-      <key>PayloadType</key>
-      <string>com.apple.security.pkcs12</string>
-      <key>PayloadIdentifier</key>
-      <string>dev.cocore.mdm.identity.{{SERIAL}}</string>
-      <key>PayloadUUID</key>
-      <string>{{IDENTITY_PAYLOAD_UUID}}</string>
-      <key>PayloadVersion</key>
-      <integer>1</integer>
-      <key>PayloadCertificateFileName</key>
-      <string>cocore-device-identity.p12</string>
-      <!-- TODO(ops): real per-device identity PKCS#12 minted by step-ca.
-           Stub embeds an empty identity so the profile is structurally
-           complete and installable in a test ring. -->
-      <key>PayloadContent</key>
-      <data>{{IDENTITY_P12_B64}}</data>
-    </dict>
-    <dict>
-      <key>PayloadType</key>
-      <string>com.apple.mdm</string>
-      <key>PayloadIdentifier</key>
-      <string>dev.cocore.mdm.payload.{{SERIAL}}</string>
-      <key>PayloadUUID</key>
-      <string>{{MDM_PAYLOAD_UUID}}</string>
-      <key>PayloadVersion</key>
-      <integer>1</integer>
-      <key>IdentityCertificateUUID</key>
-      <string>{{IDENTITY_PAYLOAD_UUID}}</string>
-      <key>Topic</key>
-      <string>{{MDM_TOPIC}}</string>
-      <key>ServerURL</key>
-      <string>{{MDM_SERVER_URL}}</string>
-      <key>CheckInURL</key>
-      <string>{{CHECKIN_URL}}</string>
-      <key>AccessRights</key>
-      <integer>3</integer>
-      <key>SignMessage</key>
-      <true/>
-      <key>CheckOutWhenRemoved</key>
-      <true/>
-    </dict>
-  </array>
-</dict>
-</plist>
-`;
-
-export interface EnrollProfileResult {
-  /** The .mobileconfig body to return as application/x-apple-aspen-config. */
-  profile: string;
-  /** Whether the profile was CMS-signed. False today (stub returns the
-   *  templated-but-unsigned profile); flips true once signing is wired. */
-  signed: boolean;
-  /** The per-enrollment id callers thread into push-attestation. */
-  enrollmentId: string;
-}
-
 function env(name: string): string | undefined {
   const v = process.env[name];
   return v && v.length > 0 ? v : undefined;
 }
 
+/** XML-escape a value going into the .mobileconfig. Serials are already
+ *  alphanumeric, but URLs / SCEP challenge / names are operator-supplied,
+ *  so escape everything defensively. */
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 /** Base64 of a PEM cert's DER body — the form a `com.apple.security.*`
- *  PayloadContent expects. We strip the PEM armor and re-emit the inner
- *  base64 (which is already DER-base64). Returns "" when no PEM is
- *  configured so the template stays well-formed. */
+ *  PayloadContent expects. Strips PEM armor and re-emits the inner
+ *  base64 (already DER-base64). Returns "" when no PEM is configured. */
 function pemBodyB64(pem: string | undefined): string {
   if (!pem) return "";
   return pem
@@ -233,228 +160,283 @@ function pemBodyB64(pem: string | undefined): string {
     .replace(/\s+/g, "");
 }
 
-/** Build a per-device enrollment .mobileconfig for {serial, udid}.
- *
- *  Reads the template + CA material from env, substitutes the serial /
- *  udid / generated UUIDs, and returns the profile. CMS signing is the
- *  ops-gated seam (TODO below); today we return the templated profile
- *  unsigned but otherwise complete. */
-export function buildEnrollmentProfile(serial: string, udid: string): EnrollProfileResult {
-  const template = env("COCORE_MDM_PROFILE_TEMPLATE") ?? DEFAULT_PROFILE_TEMPLATE;
-  const enrollmentId = crypto.randomUUID();
+// ---------------------------------------------------------------------------
+// Secure Mode config — resolved from env, fail-closed when incomplete.
+// ---------------------------------------------------------------------------
 
-  const subs: Record<string, string> = {
-    SERIAL: serial,
-    UDID: udid,
-    PROFILE_UUID: enrollmentId.toUpperCase(),
-    ROOT_PAYLOAD_UUID: crypto.randomUUID().toUpperCase(),
-    INTERMEDIATE_PAYLOAD_UUID: crypto.randomUUID().toUpperCase(),
-    IDENTITY_PAYLOAD_UUID: crypto.randomUUID().toUpperCase(),
-    MDM_PAYLOAD_UUID: crypto.randomUUID().toUpperCase(),
-    MDM_TOPIC: env("COCORE_MDM_TOPIC") ?? "com.apple.mgmt.External.PLACEHOLDER",
-    MDM_SERVER_URL: env("COCORE_MDM_SERVER_URL") ?? "https://mdm.cocore.dev/mdm",
-    CHECKIN_URL:
-      env("COCORE_MDM_CHECKIN_URL") ?? env("COCORE_MDM_SERVER_URL") ?? "https://mdm.cocore.dev/mdm",
-    ROOT_CA_B64: pemBodyB64(env("COCORE_MDM_ROOT_CA_PEM")),
-    INTERMEDIATE_CA_B64: pemBodyB64(env("COCORE_MDM_INTERMEDIATE_CA_PEM")),
-    // TODO(ops): mint a real per-device PKCS#12 identity from step-ca,
-    // keyed to `serial`, and embed it here. Stub leaves it empty.
-    IDENTITY_P12_B64: "",
+export interface SecureMdmConfig {
+  scepUrl: string;
+  scepName: string;
+  scepChallenge: string;
+  mdmServerUrl: string;
+  checkInUrl: string;
+  topic: string;
+  rootCaB64: string;
+  intermediateCaB64: string;
+  /** ACME directory URL for cocore-attest; null disables bundled attestation. */
+  acmeUrl: string | null;
+}
+
+export type SecureMdmConfigResult =
+  | { ok: true; config: SecureMdmConfig }
+  | { ok: false; missing: string[] };
+
+/** Resolve the Secure Mode MDM config from env, or report which required
+ *  keys are missing so the route can answer 503 with a clear reason. */
+export function secureMdmConfig(): SecureMdmConfigResult {
+  const missing: string[] = [];
+  const scepUrl = env("COCORE_MDM_SCEP_URL");
+  if (!scepUrl) missing.push("COCORE_MDM_SCEP_URL");
+  const scepChallenge = env("COCORE_MDM_SCEP_CHALLENGE");
+  if (!scepChallenge) missing.push("COCORE_MDM_SCEP_CHALLENGE");
+  const mdmServerUrl = env("COCORE_MDM_SERVER_URL");
+  if (!mdmServerUrl) missing.push("COCORE_MDM_SERVER_URL");
+  const topic = env("COCORE_MDM_TOPIC");
+  if (!topic) missing.push("COCORE_MDM_TOPIC");
+  const rootPem = env("COCORE_MDM_ROOT_CA_PEM");
+  if (!rootPem) missing.push("COCORE_MDM_ROOT_CA_PEM");
+
+  if (missing.length > 0) return { ok: false, missing };
+
+  return {
+    ok: true,
+    config: {
+      scepUrl: scepUrl!,
+      scepName: env("COCORE_MDM_SCEP_NAME") ?? "cocore-scep",
+      scepChallenge: scepChallenge!,
+      mdmServerUrl: mdmServerUrl!,
+      checkInUrl: env("COCORE_MDM_CHECKIN_URL") ?? mdmServerUrl!,
+      topic: topic!,
+      rootCaB64: pemBodyB64(rootPem),
+      intermediateCaB64: pemBodyB64(env("COCORE_MDM_INTERMEDIATE_CA_PEM")),
+      acmeUrl: env("COCORE_MDM_ACME_URL") ?? null,
+    },
   };
+}
 
-  let profile = template;
-  for (const [key, value] of Object.entries(subs)) {
-    profile = profile.split(`{{${key}}}`).join(value);
-  }
+/** Whether attestation is bundled into the enrollment profile (vs. pushed
+ *  separately via NanoMDM). True iff a cocore-attest ACME URL is set. */
+export function attestationIsBundled(): boolean {
+  return Boolean(env("COCORE_MDM_ACME_URL"));
+}
 
-  // TODO(ops): when COCORE_MDM_SIGNING_CERT_PEM + COCORE_MDM_SIGNING_KEY_PEM
-  // are configured, CMS-sign the profile (openssl smime -sign equivalent)
-  // so it installs without the "unsigned profile" warning and so the MDM
-  // payload's SignMessage handshake is rooted in our vendor cert. Until
-  // the signer is wired we return the unsigned-but-complete profile.
-  const canSign = Boolean(env("COCORE_MDM_SIGNING_CERT_PEM") && env("COCORE_MDM_SIGNING_KEY_PEM"));
-  const signed = false; // flips true once CMS signing lands.
-  void canSign;
+// ---------------------------------------------------------------------------
+// enroll-profile — mint a per-device SCEP+MDM(+ACME) .mobileconfig.
+// ---------------------------------------------------------------------------
+
+export interface EnrollProfileResult {
+  /** The .mobileconfig body. */
+  profile: string;
+  /** Whether the profile was CMS-signed (false until signing is wired). */
+  signed: boolean;
+  /** The per-enrollment id callers thread into push-attestation. */
+  enrollmentId: string;
+}
+
+function rootTrustPayload(b64: string, serial: string, uuid: string): string {
+  return `    <dict>
+      <key>PayloadType</key><string>com.apple.security.root</string>
+      <key>PayloadIdentifier</key><string>dev.cocore.mdm.trust.root.${serial}</string>
+      <key>PayloadUUID</key><string>${uuid}</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>PayloadDisplayName</key><string>co/core Trust Root</string>
+      <key>PayloadCertificateFileName</key><string>cocore-root-ca.cer</string>
+      <key>PayloadContent</key>
+      <data>${b64}</data>
+    </dict>`;
+}
+
+function intermediateTrustPayload(b64: string, serial: string, uuid: string): string {
+  return `    <dict>
+      <key>PayloadType</key><string>com.apple.security.pkcs1</string>
+      <key>PayloadIdentifier</key><string>dev.cocore.mdm.trust.intermediate.${serial}</string>
+      <key>PayloadUUID</key><string>${uuid}</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>PayloadDisplayName</key><string>co/core Trust Intermediate</string>
+      <key>PayloadCertificateFileName</key><string>cocore-intermediate-ca.cer</string>
+      <key>PayloadContent</key>
+      <data>${b64}</data>
+    </dict>`;
+}
+
+function scepIdentityPayload(c: SecureMdmConfig, serial: string, uuid: string): string {
+  // Each device generates its own key and enrolls it against step-ca's
+  // SCEP provisioner — no CA-issuing secret or PKCS12 in the console.
+  return `    <dict>
+      <key>PayloadType</key><string>com.apple.security.scep</string>
+      <key>PayloadIdentifier</key><string>dev.cocore.mdm.scep.${serial}</string>
+      <key>PayloadUUID</key><string>${uuid}</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>PayloadDisplayName</key><string>co/core Device Identity (SCEP)</string>
+      <key>PayloadContent</key>
+      <dict>
+        <key>URL</key><string>${xmlEscape(c.scepUrl)}</string>
+        <key>Name</key><string>${xmlEscape(c.scepName)}</string>
+        <key>Subject</key>
+        <array>
+          <array><array><string>CN</string><string>${serial}</string></array></array>
+        </array>
+        <key>Challenge</key><string>${xmlEscape(c.scepChallenge)}</string>
+        <key>Key Type</key><string>RSA</string>
+        <key>Key Usage</key><integer>5</integer>
+        <key>Keysize</key><integer>2048</integer>
+        <key>Retries</key><integer>3</integer>
+        <key>RetryDelay</key><integer>10</integer>
+      </dict>
+    </dict>`;
+}
+
+function mdmPayload(
+  c: SecureMdmConfig,
+  serial: string,
+  uuid: string,
+  identityUuid: string,
+): string {
+  return `    <dict>
+      <key>PayloadType</key><string>com.apple.mdm</string>
+      <key>PayloadIdentifier</key><string>dev.cocore.mdm.payload.${serial}</string>
+      <key>PayloadUUID</key><string>${uuid}</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>PayloadDisplayName</key><string>co/core Device Management</string>
+      <key>IdentityCertificateUUID</key><string>${identityUuid}</string>
+      <key>Topic</key><string>${xmlEscape(c.topic)}</string>
+      <key>ServerURL</key><string>${xmlEscape(c.mdmServerUrl)}</string>
+      <key>CheckInURL</key><string>${xmlEscape(c.checkInUrl)}</string>
+      <key>AccessRights</key><integer>3</integer>
+      <key>SignMessage</key><true/>
+      <key>CheckOutWhenRemoved</key><true/>
+    </dict>`;
+}
+
+/** Per-serial ACME `device-attest-01` payload. ClientIdentifier AND the
+ *  Subject CN MUST both equal the device serial — step-ca matches them
+ *  against the hardware identifiers inside Apple's attestation statement
+ *  (a mismatch fails with badAttestationStatement / badCSR). */
+function acmeAttestPayload(acmeUrl: string, serial: string, uuid: string): string {
+  return `    <dict>
+      <key>PayloadType</key><string>com.apple.security.acme</string>
+      <key>PayloadIdentifier</key><string>dev.cocore.mdm.acme.${serial}</string>
+      <key>PayloadUUID</key><string>${uuid}</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>PayloadDisplayName</key><string>co/core Device Attestation (ACME)</string>
+      <key>DirectoryURL</key><string>${xmlEscape(acmeUrl)}</string>
+      <key>ClientIdentifier</key><string>${serial}</string>
+      <key>KeyType</key><string>ECSECPrimeRandom</string>
+      <key>KeySize</key><integer>384</integer>
+      <key>HardwareBound</key><true/>
+      <key>Attest</key><true/>
+      <key>KeyIsExtractable</key><false/>
+      <key>UsageFlags</key><integer>5</integer>
+      <key>Subject</key>
+      <array>
+        <array><array><string>CN</string><string>${serial}</string></array></array>
+        <array><array><string>O</string><string>Graze Social PBC</string></array></array>
+      </array>
+    </dict>`;
+}
+
+/** Build a per-device enrollment .mobileconfig for {serial, udid}, or
+ *  null when the Secure Mode backend isn't configured (route → 503).
+ *
+ *  CMS signing is the remaining ops seam (TODO below); today we return
+ *  the templated profile unsigned (it installs with the standard
+ *  "unverified profile" review prompt). */
+export function buildEnrollmentProfile(serial: string, udid: string): EnrollProfileResult | null {
+  const cfg = secureMdmConfig();
+  if (!cfg.ok) return null;
+  const c = cfg.config;
+  void udid; // reserved for future per-UDID templating; serial drives everything today.
+
+  const enrollmentId = crypto.randomUUID();
+  const identityUuid = crypto.randomUUID().toUpperCase();
+
+  const payloads: string[] = [];
+  if (c.rootCaB64)
+    payloads.push(rootTrustPayload(c.rootCaB64, serial, crypto.randomUUID().toUpperCase()));
+  if (c.intermediateCaB64)
+    payloads.push(
+      intermediateTrustPayload(c.intermediateCaB64, serial, crypto.randomUUID().toUpperCase()),
+    );
+  payloads.push(scepIdentityPayload(c, serial, identityUuid));
+  payloads.push(mdmPayload(c, serial, crypto.randomUUID().toUpperCase(), identityUuid));
+  if (c.acmeUrl)
+    payloads.push(acmeAttestPayload(c.acmeUrl, serial, crypto.randomUUID().toUpperCase()));
+
+  const profile = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadDisplayName</key>
+  <string>co/core Secure Mode Enrollment (${serial})</string>
+  <key>PayloadDescription</key>
+  <string>Enrolls this Mac with co/core device management and hardware-attests it so requesters can verify it.</string>
+  <key>PayloadOrganization</key>
+  <string>co/core</string>
+  <key>PayloadIdentifier</key>
+  <string>dev.cocore.mdm.enroll.${serial}</string>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>${enrollmentId.toUpperCase()}</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+  <key>PayloadContent</key>
+  <array>
+${payloads.join("\n")}
+  </array>
+</dict>
+</plist>
+`;
+
+  // TODO(ops): when COCORE_MDM_SIGNING_CERT_PEM + _KEY_PEM are set,
+  // CMS-sign the profile so it installs without the "unverified profile"
+  // prompt. Until then we return the unsigned-but-complete profile.
+  const signed = false;
 
   return { profile, signed, enrollmentId };
 }
 
 // ---------------------------------------------------------------------------
-// push-attestation — enqueue the ACME attestation profile to NanoMDM.
+// push-attestation — (re)trigger the ACME attestation.
 // ---------------------------------------------------------------------------
 
 export interface PushAttestationResult {
-  /** Whether NanoMDM accepted the enqueue+push. */
   queued: boolean;
-  /** NanoMDM command UUID, when it returned one. */
+  /** NanoMDM command UUID when a real push happened; null otherwise. */
   commandUuid: string | null;
-  /** Coarse status: "queued" (sent to NanoMDM or stubbed) | "error". */
+  /** "bundled" (attestation runs from the enroll profile), "queued"
+   *  (sent to NanoMDM or stubbed), "queued-no-push", or "error". */
   status: string;
-  /** True when no NanoMDM backend was configured and we stubbed. */
+  /** True when no real NanoMDM call was made. */
   stubbed: boolean;
-  /** Human-readable detail (NanoMDM error text, or the stub note). */
   detail: string | null;
 }
 
-/** Build the ACME attestation .mobileconfig that NanoMDM will deliver as
- *  an InstallProfile command. ClientIdentifier + the cert Subject CN are
- *  pinned to the device serial, which is what binds the captured Apple
- *  x5c chain back to this machine.
- *
- *  KEY-BINDING (option b, freshness-code) — TODO(ops): the verifier accepts
- *  the chain only when it binds to the agent's signing key, and we chose the
- *  freshness-code rule: the leaf's Apple freshness OID
- *  (1.2.840.113635.100.8.11.1) must equal `sha256(signing pubkey)` (the raw
- *  64-byte P-256 point published as `attestation.publicKey`). Stock
- *  `com.apple.security.acme` derives its freshness from the ACME challenge, so
- *  making Apple emit that exact value needs ONE of: (1) a custom step-ca
- *  `device-attest-01` nonce set to `sha256(signing pubkey)`, or (2) the App
- *  Attest companion where the agent controls `clientDataHash`. Until that's
- *  wired the captured chain verifies Apple-rooted but does NOT bind, so the
- *  provider stays best-effort (fail-closed). See infra/mdm/README.md
- *  "The binding decision". */
+/** Build the ACME attestation .mobileconfig that NanoMDM delivers as an
+ *  InstallProfile command (the push/refresh path — initial attestation
+ *  is bundled into the enrollment profile). ClientIdentifier + Subject CN
+ *  are pinned to the device serial. */
 function buildAttestationCommandProfile(serial: string): string {
-  const acmeUrl = env("COCORE_MDM_ACME_URL") ?? "https://ca.cocore.dev/acme/attest";
+  const acmeUrl =
+    env("COCORE_MDM_ACME_URL") ?? "https://ca.cocore.dev/acme/cocore-attest/directory";
   const uuid = crypto.randomUUID().toUpperCase();
+  const inner = acmeAttestPayload(acmeUrl, serial, crypto.randomUUID().toUpperCase());
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>PayloadDisplayName</key>
-  <string>co/core Device Attestation (${serial})</string>
-  <key>PayloadIdentifier</key>
-  <string>dev.cocore.mdm.attest.${serial}</string>
-  <key>PayloadType</key>
-  <string>Configuration</string>
-  <key>PayloadUUID</key>
-  <string>${uuid}</string>
-  <key>PayloadVersion</key>
-  <integer>1</integer>
+  <key>PayloadDisplayName</key><string>co/core Device Attestation (${serial})</string>
+  <key>PayloadIdentifier</key><string>dev.cocore.mdm.attest.${serial}</string>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadUUID</key><string>${uuid}</string>
+  <key>PayloadVersion</key><integer>1</integer>
   <key>PayloadContent</key>
   <array>
-    <dict>
-      <key>PayloadType</key>
-      <string>com.apple.security.acme</string>
-      <key>PayloadIdentifier</key>
-      <string>dev.cocore.mdm.acme.${serial}</string>
-      <key>PayloadUUID</key>
-      <string>${crypto.randomUUID().toUpperCase()}</string>
-      <key>PayloadVersion</key>
-      <integer>1</integer>
-      <key>ClientIdentifier</key>
-      <string>${serial}</string>
-      <key>DirectoryURL</key>
-      <string>${acmeUrl}</string>
-      <key>Subject</key>
-      <array>
-        <array>
-          <array>
-            <string>CN</string>
-            <string>${serial}</string>
-          </array>
-        </array>
-      </array>
-      <key>Attest</key>
-      <true/>
-      <key>HardwareBound</key>
-      <true/>
-    </dict>
+${inner}
   </array>
 </dict>
 </plist>
 `;
-}
-
-/** Enqueue the ACME attestation profile to NanoMDM for the given device
- *  and push it. Calls NanoMDM's /v1/enqueue/<udid-or-enrollment> then
- *  /v1/push/<...> using COCORE_NANOMDM_URL + COCORE_NANOMDM_API_KEY.
- *
- *  When NanoMDM isn't configured we return a stubbed "queued" status so
- *  the agent flow is exercisable end-to-end in a backendless dev ring. */
-export async function pushAttestationCommand(
-  serial: string,
-  enrollmentId: string,
-): Promise<PushAttestationResult> {
-  const base = env("COCORE_NANOMDM_URL");
-  const apiKey = env("COCORE_NANOMDM_API_KEY");
-
-  const profile = buildAttestationCommandProfile(serial);
-  // NanoMDM's enqueue command envelope: an InstallProfile command whose
-  // payload is the (base64) mobileconfig. NanoMDM accepts a raw plist
-  // command on POST /v1/enqueue/<id>.
-  const commandUuid = crypto.randomUUID().toUpperCase();
-  const enqueueBody = buildInstallProfileCommand(commandUuid, profile);
-
-  if (!base || !apiKey) {
-    // TODO(ops): wire COCORE_NANOMDM_URL + COCORE_NANOMDM_API_KEY to the
-    // live NanoMDM. Stub: pretend the enqueue+push succeeded so the
-    // guided-enrollment UX can be developed against a backendless ring.
-    return {
-      queued: true,
-      commandUuid,
-      status: "queued",
-      stubbed: true,
-      detail: "NanoMDM not configured (COCORE_NANOMDM_URL/API_KEY unset); enqueue stubbed",
-    };
-  }
-
-  const root = base.replace(/\/$/, "");
-  // NanoMDM authenticates with HTTP Basic where the password is the API
-  // key (username arbitrary, conventionally "nanomdm").
-  const authHeader = `Basic ${Buffer.from(`nanomdm:${apiKey}`).toString("base64")}`;
-  // We key the command by enrollmentId — the per-device enrollment whose
-  // identity the agent installed in step 1.
-  const target = encodeURIComponent(enrollmentId);
-
-  try {
-    const enqueueResp = await fetch(`${root}/v1/enqueue/${target}`, {
-      method: "POST",
-      headers: { authorization: authHeader, "content-type": "application/xml" },
-      body: enqueueBody,
-    });
-    if (!enqueueResp.ok) {
-      const text = await enqueueResp.text().catch(() => "");
-      return {
-        queued: false,
-        commandUuid,
-        status: "error",
-        stubbed: false,
-        detail: `NanoMDM enqueue failed (${enqueueResp.status}): ${text.slice(0, 200)}`,
-      };
-    }
-
-    // Push wakes the device so it checks in and pulls the queued command.
-    const pushResp = await fetch(`${root}/v1/push/${target}`, {
-      method: "GET",
-      headers: { authorization: authHeader },
-    });
-    if (!pushResp.ok) {
-      const text = await pushResp.text().catch(() => "");
-      return {
-        queued: true,
-        commandUuid,
-        status: "queued-no-push",
-        stubbed: false,
-        detail: `enqueued but push failed (${pushResp.status}): ${text.slice(0, 200)}`,
-      };
-    }
-
-    return {
-      queued: true,
-      commandUuid,
-      status: "queued",
-      stubbed: false,
-      detail: null,
-    };
-  } catch (e) {
-    return {
-      queued: false,
-      commandUuid,
-      status: "error",
-      stubbed: false,
-      detail: `NanoMDM request error: ${(e as Error).message}`,
-    };
-  }
 }
 
 /** Wrap a mobileconfig in NanoMDM's InstallProfile command plist. */
@@ -478,42 +460,139 @@ function buildInstallProfileCommand(commandUuid: string, profile: string): strin
 `;
 }
 
+/** (Re)trigger hardware attestation for a device.
+ *
+ *  Initial attestation runs from the bundled ACME payload in the
+ *  enrollment profile, so when no explicit MDM `target` (the device's
+ *  NanoMDM enrollment id, i.e. its UDID) is supplied we ACK without a
+ *  push — this is the path the guided wizard hits, and it must NOT 400.
+ *  When a target + NanoMDM creds are present we enqueue+push the
+ *  attestation profile as an InstallProfile command (the refresh path). */
+export async function pushAttestationCommand(
+  serial: string,
+  target: string | null,
+): Promise<PushAttestationResult> {
+  const base = env("COCORE_NANOMDM_URL");
+  const apiKey = env("COCORE_NANOMDM_API_KEY");
+
+  // No MDM target → attestation is driven by the enrollment profile.
+  if (!target) {
+    return {
+      queued: true,
+      commandUuid: null,
+      status: attestationIsBundled() ? "bundled" : "acknowledged",
+      stubbed: true,
+      detail: attestationIsBundled()
+        ? "attestation runs from the enrollment profile (ACME device-attest-01 on install)"
+        : "no MDM target supplied; attestation runs from the enrollment profile",
+    };
+  }
+
+  if (!base || !apiKey) {
+    return {
+      queued: true,
+      commandUuid: null,
+      status: "queued",
+      stubbed: true,
+      detail: "NanoMDM not configured (COCORE_NANOMDM_URL/API_KEY unset); enqueue stubbed",
+    };
+  }
+
+  const root = base.replace(/\/$/, "");
+  const authHeader = `Basic ${Buffer.from(`nanomdm:${apiKey}`).toString("base64")}`;
+  const enc = encodeURIComponent(target);
+  const commandUuid = crypto.randomUUID().toUpperCase();
+  const enqueueBody = buildInstallProfileCommand(
+    commandUuid,
+    buildAttestationCommandProfile(serial),
+  );
+
+  try {
+    const enqueueResp = await fetch(`${root}/v1/enqueue/${enc}`, {
+      method: "POST",
+      headers: { authorization: authHeader, "content-type": "application/xml" },
+      body: enqueueBody,
+    });
+    if (!enqueueResp.ok) {
+      const text = await enqueueResp.text().catch(() => "");
+      return {
+        queued: false,
+        commandUuid,
+        status: "error",
+        stubbed: false,
+        detail: `NanoMDM enqueue failed (${enqueueResp.status}): ${text.slice(0, 200)}`,
+      };
+    }
+    const pushResp = await fetch(`${root}/v1/push/${enc}`, {
+      method: "GET",
+      headers: { authorization: authHeader },
+    });
+    if (!pushResp.ok) {
+      const text = await pushResp.text().catch(() => "");
+      return {
+        queued: true,
+        commandUuid,
+        status: "queued-no-push",
+        stubbed: false,
+        detail: `enqueued but push failed (${pushResp.status}): ${text.slice(0, 200)}`,
+      };
+    }
+    return { queued: true, commandUuid, status: "queued", stubbed: false, detail: null };
+  } catch (e) {
+    return {
+      queued: false,
+      commandUuid,
+      status: "error",
+      stubbed: false,
+      detail: `NanoMDM request error: ${(e as Error).message}`,
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
-// attestation-chain — fetch the captured Apple x5c chain by serial.
+// attestation-chain — store (ingest) + read the captured Apple x5c chain.
 // ---------------------------------------------------------------------------
 
 export interface AttestationChainResult {
-  /** The captured Apple x5c chain (base64 DER certs, leaf-first) or null
-   *  when no chain has been captured for this serial yet. */
+  /** Captured Apple x5c chain (base64 DER, leaf-first) or null. */
   chain: string[] | null;
   /** "captured" | "pending" | "error". */
   status: string;
-  /** True when no chain store was configured and we stubbed. */
+  /** True when neither store had it and we report pending without a backend. */
   stubbed: boolean;
-  /** Detail for "error"/"pending"; null on success. */
   detail: string | null;
+  /** When captured, when the chain was ingested. */
+  capturedAt?: string;
+}
+
+/** Persist a captured Apple attestation chain (the step-ca webhook calls
+ *  this after a successful device-attest-01). `nowIso` is the caller's
+ *  timestamp so this stays a pure persistence step. */
+export function ingestAttestationChain(serial: string, chain: string[], nowIso: string): void {
+  putAttestationChain(serial, chain, nowIso);
 }
 
 /** Return the captured Apple x5c attestation chain for `serial`.
  *
- *  In production the chain is captured by step-ca during the ACME
- *  device-attest-01 challenge and persisted keyed by the cert Subject CN
- *  (= serial). We read it from an env-configured store URL. When the
- *  store isn't configured we stub a "pending" response.
- *
- *  TODO(ops): point COCORE_MDM_CHAIN_STORE_URL at the real step-ca-fed
- *  store (or replace this fetch with a direct step-ca admin API read).
- *  The store is expected to answer GET <base>/<serial> with
- *  {chain: string[]} or 404 when not-yet-captured. */
+ *  Checks the console-local SQLite store first (where the step-ca
+ *  attestation webhook writes), then falls back to an external store at
+ *  COCORE_MDM_CHAIN_STORE_URL when one is configured. Returns
+ *  status:"pending" until a chain has been captured. */
 export async function fetchAttestationChain(serial: string): Promise<AttestationChainResult> {
+  const local = getAttestationChain(serial);
+  if (local) {
+    return {
+      chain: local.chain,
+      status: "captured",
+      stubbed: false,
+      detail: null,
+      capturedAt: local.capturedAt,
+    };
+  }
+
   const base = env("COCORE_MDM_CHAIN_STORE_URL");
   if (!base) {
-    return {
-      chain: null,
-      status: "pending",
-      stubbed: true,
-      detail: "chain store not configured (COCORE_MDM_CHAIN_STORE_URL unset)",
-    };
+    return { chain: null, status: "pending", stubbed: true, detail: "no chain captured yet" };
   }
   const root = base.replace(/\/$/, "");
   try {

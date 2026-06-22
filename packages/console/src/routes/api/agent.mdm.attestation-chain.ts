@@ -1,24 +1,30 @@
-// GET /api/agent/mdm/attestation-chain?serial=...
+// GET  /api/agent/mdm/attestation-chain?serial=...   (agent reads the chain)
+// POST /api/agent/mdm/attestation-chain               (step-ca webhook ingests)
 //
-// Coordinator step 3 of guided MDM enrollment. Returns the captured
-// Apple x5c attestation chain for a device (keyed by serial) as JSON
-// {chain: string[] | null, status, ...}. The chain is captured by
-// step-ca during the ACME device-attest-01 challenge; this endpoint
-// reads it back so the SDK/console can staple it onto the provider's
-// attestation record (att.mdaCertChain) to earn `hardware-attested`.
+// Coordinator step 3 of guided MDM enrollment.
 //
-// Auth: the agent's bearer API key — same surface as the other
-// /api/agent/* routes.
+// GET returns the captured Apple x5c attestation chain for a device
+// (keyed by serial) as JSON {chain: string[] | null, status, ...}. The
+// chain is captured by step-ca during the ACME device-attest-01
+// challenge; the agent reads it here to staple onto its attestation
+// record (att.mdaCertChain) and earn `hardware-attested`. Auth: the
+// agent's bearer API key — same surface as the other /api/agent/* routes.
 //
-// Chain capture out of step-ca is ops-gated: when
-// COCORE_MDM_CHAIN_STORE_URL is unset, returns {chain:null,
-// status:"pending", stubbed:true}. See src/lib/mdm-coordinator.server.ts.
+// POST is the capture ingest: step-ca's attestation webhook forwards the
+// validated Apple x5c chain here keyed by serial; we persist it to the
+// console's durable store. Auth: the shared COCORE_MDM_CHAIN_INGEST_KEY
+// bearer (step-ca infra, not an agent). Fail-closed when the key is unset.
+//
+// Until either the webhook posts a chain or COCORE_MDM_CHAIN_STORE_URL is
+// configured, GET returns {chain:null, status:"pending"}.
 
 import { createFileRoute } from "@tanstack/react-router";
 
 import {
   authenticateAgent,
+  authenticateChainIngest,
   fetchAttestationChain,
+  ingestAttestationChain,
   isValidSerial,
   mdmJson,
 } from "@/lib/mdm-coordinator.server.ts";
@@ -38,6 +44,30 @@ export const Route = createFileRoute("/api/agent/mdm/attestation-chain")({
         const result = await fetchAttestationChain(serial);
         const status = result.status === "error" ? 502 : 200;
         return mdmJson(result, status);
+      },
+
+      POST: async ({ request }) => {
+        if (!authenticateChainIngest(request)) {
+          return mdmJson({ error: "invalid or missing chain-ingest bearer" }, 401);
+        }
+        let body: { serial?: unknown; chain?: unknown };
+        try {
+          body = (await request.json()) as typeof body;
+        } catch {
+          return mdmJson({ error: "body must be JSON" }, 400);
+        }
+        if (!isValidSerial(body.serial)) {
+          return mdmJson({ error: "serial required (8–24 alphanumeric chars)" }, 400);
+        }
+        if (
+          !Array.isArray(body.chain) ||
+          body.chain.length === 0 ||
+          !body.chain.every((c) => typeof c === "string" && c.length > 0)
+        ) {
+          return mdmJson({ error: "chain required (non-empty array of base64 DER certs)" }, 400);
+        }
+        ingestAttestationChain(body.serial, body.chain as string[], new Date().toISOString());
+        return mdmJson({ ok: true, serial: body.serial, certs: body.chain.length });
       },
     },
   },

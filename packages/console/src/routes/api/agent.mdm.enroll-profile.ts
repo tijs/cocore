@@ -25,6 +25,7 @@ import {
   isValidSerial,
   isValidUdid,
   mdmJson,
+  secureMdmConfig,
 } from "@/lib/mdm-coordinator.server.ts";
 
 export const Route = createFileRoute("/api/agent/mdm/enroll-profile")({
@@ -47,20 +48,31 @@ export const Route = createFileRoute("/api/agent/mdm/enroll-profile")({
           return mdmJson({ error: "udid required (40-hex or UUID form)" }, 400);
         }
 
-        const { profile, signed, enrollmentId } = buildEnrollmentProfile(body.serial, body.udid);
+        const built = buildEnrollmentProfile(body.serial, body.udid);
+        if (!built) {
+          // Fail-closed: the Secure Mode (SCEP/MDM) backend isn't wired.
+          // Report exactly which env keys are missing so an operator can
+          // fix it, and so the wizard shows "not available yet" instead
+          // of dead-ending the user in a broken profile install.
+          const cfg = secureMdmConfig();
+          return mdmJson(
+            {
+              error: "Secure Mode backend not configured",
+              missing: cfg.ok ? [] : cfg.missing,
+            },
+            503,
+          );
+        }
+        const { profile, signed, enrollmentId } = built;
 
-        return new Response(profile, {
-          status: 200,
-          headers: {
-            "content-type": "application/x-apple-aspen-config; charset=utf-8",
-            "content-disposition": `attachment; filename="cocore-enroll-${body.serial}.mobileconfig"`,
-            "cache-control": "no-store",
-            // Surface coordinator metadata in headers so the agent can
-            // thread the enrollmentId into push-attestation without
-            // parsing the binary profile, and tell signed from unsigned.
-            "x-cocore-enrollment-id": enrollmentId,
-            "x-cocore-profile-signed": String(signed),
-          },
+        // Return a JSON envelope: the provider wizard reads `profile`
+        // (base64) + `enrollmentId` from the body (and threads the
+        // enrollmentId into push-attestation). The base64 keeps the
+        // .mobileconfig bytes intact across JSON.
+        return mdmJson({
+          profile: Buffer.from(profile, "utf8").toString("base64"),
+          enrollmentId,
+          signed,
         });
       },
     },
