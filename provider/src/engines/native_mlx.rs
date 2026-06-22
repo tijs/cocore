@@ -20,7 +20,9 @@
 //! It is loaded under ENFORCED library validation, so the owner cannot swap in a
 //! different dylib, and its hash is pinned like the metallib's.
 
-use super::{DeltaChannel, Engine, GenerateRequest, GenerateResponse, ThinkTagSplitter};
+use super::{
+    model_prefills_think, DeltaChannel, Engine, GenerateRequest, GenerateResponse, ThinkTagSplitter,
+};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -213,7 +215,11 @@ impl Engine for NativeMlxEngine {
         }
 
         let mut ctx = Ctx {
-            splitter: ThinkTagSplitter::new(),
+            splitter: if model_prefills_think(&request.model) {
+                ThinkTagSplitter::new_in_reasoning()
+            } else {
+                ThinkTagSplitter::new()
+            },
             on_delta,
             err: None,
         };

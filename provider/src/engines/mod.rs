@@ -177,6 +177,27 @@ pub enum DeltaChannel {
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
 
+/// Heuristic: does this model's chat template prefill the opening `<think>`, so
+/// generation begins inside the reasoning block and the stream carries only the
+/// closing `</think>`? True for the Qwen3-*-Thinking-2507 family and similarly
+/// named dedicated thinking models. Drives whether the [`ThinkTagSplitter`]
+/// starts in reasoning mode ([`ThinkTagSplitter::new_in_reasoning`]). Unlabelled
+/// thinking models can be opted in via `COCORE_THINKING_PREFILL_MODELS` (a
+/// comma-separated list of substrings matched case-insensitively against the id).
+pub fn model_prefills_think(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    if m.contains("thinking") {
+        return true;
+    }
+    std::env::var("COCORE_THINKING_PREFILL_MODELS")
+        .ok()
+        .is_some_and(|list| {
+            list.split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .any(|s| !s.is_empty() && m.contains(&s))
+        })
+}
+
 /// Splits a plaintext content stream into [`Content`](DeltaChannel::Content)
 /// and [`Reasoning`](DeltaChannel::Reasoning) fragments by recognizing inline
 /// `<think>` / `</think>` markers. Local MLX models (Qwen, R1-distills) emit
@@ -201,6 +222,19 @@ impl ThinkTagSplitter {
         Self::default()
     }
 
+    /// For models whose chat template PREFILLS the opening `<think>` (the
+    /// Qwen3-*-Thinking-2507 family and similar): generation begins already
+    /// inside the reasoning block, so the stream carries the reasoning then a
+    /// lone closing `</think>` with no opener. Start inside so leading
+    /// reasoning is captured and the dangling close ends it. A stray `<think>`
+    /// the model echoes anyway is treated as noise and dropped.
+    pub fn new_in_reasoning() -> Self {
+        Self {
+            inside: true,
+            pending: String::new(),
+        }
+    }
+
     /// Feed one raw content delta. Emits zero or more channel-tagged
     /// fragments through `sink`.
     pub fn push(
@@ -210,28 +244,66 @@ impl ThinkTagSplitter {
     ) -> Result<()> {
         self.pending.push_str(text);
         loop {
-            let (marker, channel) = if self.inside {
-                (THINK_CLOSE, DeltaChannel::Reasoning)
-            } else {
-                (THINK_OPEN, DeltaChannel::Content)
-            };
-            if let Some(idx) = self.pending.find(marker) {
-                if idx > 0 {
-                    sink(channel, &self.pending[..idx])?;
+            if self.inside {
+                // While reasoning, close on `</think>`. A `<think>` seen first
+                // is a redundant/echoed opener (prefill templates emit it, some
+                // both-tag models nest one) — drop it and stay inside rather
+                // than leaking the literal tag into the reasoning text.
+                let close = self.pending.find(THINK_CLOSE);
+                let open = self.pending.find(THINK_OPEN);
+                match earliest_marker(close, open) {
+                    Some((idx, Marker::Close)) => {
+                        if idx > 0 {
+                            sink(DeltaChannel::Reasoning, &self.pending[..idx])?;
+                        }
+                        self.pending.drain(..idx + THINK_CLOSE.len());
+                        self.inside = false;
+                        continue;
+                    }
+                    Some((idx, Marker::Open)) => {
+                        if idx > 0 {
+                            sink(DeltaChannel::Reasoning, &self.pending[..idx])?;
+                        }
+                        self.pending.drain(..idx + THINK_OPEN.len());
+                        continue;
+                    }
+                    None => {
+                        // Hold back a suffix that could begin EITHER marker
+                        // (both start with `<`).
+                        let hold = longest_marker_prefix_suffix(&self.pending, THINK_CLOSE)
+                            .max(longest_marker_prefix_suffix(&self.pending, THINK_OPEN));
+                        self.emit_held(DeltaChannel::Reasoning, hold, sink)?;
+                        break;
+                    }
                 }
-                self.pending.drain(..idx + marker.len());
-                self.inside = !self.inside;
+            } else if let Some(idx) = self.pending.find(THINK_OPEN) {
+                if idx > 0 {
+                    sink(DeltaChannel::Content, &self.pending[..idx])?;
+                }
+                self.pending.drain(..idx + THINK_OPEN.len());
+                self.inside = true;
                 continue;
+            } else {
+                let hold = longest_marker_prefix_suffix(&self.pending, THINK_OPEN);
+                self.emit_held(DeltaChannel::Content, hold, sink)?;
+                break;
             }
-            // No complete marker. Emit everything that cannot be the start
-            // of one; hold back the longest suffix that is a marker prefix.
-            let hold = longest_marker_prefix_suffix(&self.pending, marker);
-            let emit_len = self.pending.len() - hold;
-            if emit_len > 0 {
-                sink(channel, &self.pending[..emit_len])?;
-                self.pending.drain(..emit_len);
-            }
-            break;
+        }
+        Ok(())
+    }
+
+    /// Emit everything in `pending` except the trailing `hold` bytes (kept back
+    /// because they may begin a marker completing in a later delta).
+    fn emit_held(
+        &mut self,
+        channel: DeltaChannel,
+        hold: usize,
+        sink: &mut dyn FnMut(DeltaChannel, &str) -> Result<()>,
+    ) -> Result<()> {
+        let emit_len = self.pending.len() - hold;
+        if emit_len > 0 {
+            sink(channel, &self.pending[..emit_len])?;
+            self.pending.drain(..emit_len);
         }
         Ok(())
     }
@@ -249,6 +321,23 @@ impl ThinkTagSplitter {
             self.pending.clear();
         }
         Ok(())
+    }
+}
+
+enum Marker {
+    Open,
+    Close,
+}
+
+/// Pick whichever marker position comes first in the buffer (close wins ties,
+/// so an empty `<think></think>` resolves to a clean close).
+fn earliest_marker(close: Option<usize>, open: Option<usize>) -> Option<(usize, Marker)> {
+    match (close, open) {
+        (Some(c), Some(o)) if c <= o => Some((c, Marker::Close)),
+        (Some(_), Some(o)) => Some((o, Marker::Open)),
+        (Some(c), None) => Some((c, Marker::Close)),
+        (None, Some(o)) => Some((o, Marker::Open)),
+        (None, None) => None,
     }
 }
 
@@ -439,6 +528,56 @@ mod tests {
             "still thinking"
         );
         assert_eq!(channel_text(&frags, DeltaChannel::Content), "");
+    }
+
+    /// Drive a splitter that starts inside the reasoning block (prefilled
+    /// `<think>` template), over a sequence of deltas.
+    fn split_in_reasoning(deltas: &[&str]) -> Vec<(DeltaChannel, String)> {
+        let mut splitter = ThinkTagSplitter::new_in_reasoning();
+        let mut out: Vec<(DeltaChannel, String)> = Vec::new();
+        let mut sink = |ch: DeltaChannel, s: &str| {
+            out.push((ch, s.to_string()));
+            Ok(())
+        };
+        for d in deltas {
+            splitter.push(d, &mut sink).unwrap();
+        }
+        splitter.finish(&mut sink).unwrap();
+        out
+    }
+
+    #[test]
+    fn prefilled_think_splits_dangling_close_as_reasoning() {
+        // Qwen3-*-Thinking-2507: the opening <think> is prefilled by the
+        // template, so the stream is reasoning followed by a lone </think>.
+        let frags = split_in_reasoning(&["weighing options", "</think>\n\nFinal answer."]);
+        assert_eq!(
+            channel_text(&frags, DeltaChannel::Reasoning),
+            "weighing options"
+        );
+        assert_eq!(
+            channel_text(&frags, DeltaChannel::Content),
+            "\n\nFinal answer."
+        );
+    }
+
+    #[test]
+    fn prefilled_mode_drops_a_redundant_echoed_open_tag() {
+        // If a thinking model ALSO emits an explicit <think> while we already
+        // assume we're inside, the stray opener is dropped, not leaked.
+        let frags = split_in_reasoning(&["<think>reasoning</think>answer"]);
+        assert_eq!(channel_text(&frags, DeltaChannel::Reasoning), "reasoning");
+        assert_eq!(channel_text(&frags, DeltaChannel::Content), "answer");
+    }
+
+    #[test]
+    fn prefill_detection_matches_thinking_models() {
+        assert!(model_prefills_think(
+            "lmstudio-community/Qwen3-4B-Thinking-2507-MLX-4bit"
+        ));
+        assert!(!model_prefills_think(
+            "mlx-community/Qwen2.5-3B-Instruct-4bit"
+        ));
     }
 
     /// Engine whose readiness is flippable, standing in for a subprocess

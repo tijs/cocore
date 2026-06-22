@@ -77,7 +77,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-use crate::engines::{DeltaChannel, Engine, GenerateRequest, GenerateResponse, ThinkTagSplitter};
+use crate::engines::{
+    model_prefills_think, DeltaChannel, Engine, GenerateRequest, GenerateResponse, ThinkTagSplitter,
+};
 
 /// Max stderr/stdout lines retained per stream for engine-crash
 /// diagnostics. The agent NEVER logs child output during normal
@@ -782,6 +784,7 @@ impl SubprocessEngine {
         &self,
         path: &str,
         body: &[u8],
+        start_in_reasoning: bool,
         on_delta: &mut dyn FnMut(DeltaChannel, &str) -> Result<()>,
     ) -> Result<(u64, u64)> {
         let mut stream = UnixStream::connect(&self.socket_path).with_context(|| {
@@ -815,7 +818,11 @@ impl SubprocessEngine {
         let mut header_end: Option<usize> = None;
         let mut body_cursor = 0usize;
         let mut tokens = (0u64, 0u64);
-        let mut splitter = ThinkTagSplitter::new();
+        let mut splitter = if start_in_reasoning {
+            ThinkTagSplitter::new_in_reasoning()
+        } else {
+            ThinkTagSplitter::new()
+        };
 
         loop {
             let n = match stream.read(&mut read_buf) {
@@ -979,8 +986,12 @@ impl Engine for SubprocessEngine {
     ) -> Result<GenerateResponse> {
         let body = Self::build_chat_body(request, true)?;
         let body_bytes = Zeroizing::new(serde_json::to_vec(&body)?);
-        let (tokens_in, tokens_out) =
-            self.http_post_stream_uds("/v1/chat/completions", &body_bytes, on_delta)?;
+        let (tokens_in, tokens_out) = self.http_post_stream_uds(
+            "/v1/chat/completions",
+            &body_bytes,
+            model_prefills_think(&request.model),
+            on_delta,
+        )?;
         Ok(GenerateResponse {
             text: String::new(),
             tokens_in,
