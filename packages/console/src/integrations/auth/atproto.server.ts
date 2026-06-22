@@ -192,14 +192,37 @@ export function atprotoOAuthCallbackEffect(
 
 type RestoredSession = Awaited<ReturnType<OAuthClient["restore"]>>;
 
+// Per-DID single-flight around OAuthClient.restore(). When an access token has
+// expired, restore() refreshes it — and the DPoP refresh token is SINGLE-USE
+// (rotated on every refresh). The agent writes a burst of records (provisioning
+// provider + provider + attestation) as separate concurrent requests; without
+// coalescing, each restore refreshes in parallel, races on the same refresh
+// token, and all but one fail with invalid_grant — which the client treats as a
+// dead session and deletes, so EVERY subsequent write 401s ("underlying ATProto
+// session no longer valid") until re-auth… whereupon the next burst kills it
+// again. `@atcute/oauth-node-client` has no built-in request lock, so we
+// serialize per DID here: the first caller refreshes once, the rest await it and
+// reuse the freshly-rotated session.
+const restoreInFlight = new Map<string, Promise<RestoredSession>>();
+
+function restoreSessionOnce(did: Did): Promise<RestoredSession> {
+  const existing = restoreInFlight.get(did);
+  if (existing) return existing;
+  const p = getAtprotoOAuth()
+    .restore(did)
+    .finally(() => {
+      restoreInFlight.delete(did);
+    });
+  restoreInFlight.set(did, p);
+  return p;
+}
+
 function oauthRestoreSessionEffect(did: Did): Effect.Effect<RestoredSession, unknown> {
   return Effect.async((resume) => {
-    void getAtprotoOAuth()
-      .restore(did)
-      .then(
-        (r) => resume(Effect.succeed(r)),
-        (e) => resume(Effect.fail(e)),
-      );
+    void restoreSessionOnce(did).then(
+      (r) => resume(Effect.succeed(r)),
+      (e) => resume(Effect.fail(e)),
+    );
   });
 }
 
