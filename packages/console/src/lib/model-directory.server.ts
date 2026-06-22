@@ -302,6 +302,36 @@ async function fetchAdvisorOnlineDids(): Promise<Map<string, AdvisorOnline> | nu
   }
 }
 
+// Substrings that mark a vision / multimodal (image-in) model. The inference
+// path is text-only (vllm-mlx serves text LLMs; the chat UI sends no images),
+// so these can't actually be served and are omitted from the directory. Single
+// tokens are matched at id-segment boundaries (ids split on /-._) so a bare
+// "vl" doesn't match unrelated words; multi-token markers match as substrings.
+const VISION_MODEL_MARKERS = [
+  "vl",
+  "vlm",
+  "vision",
+  "llava",
+  "internvl",
+  "pixtral",
+  "moondream",
+  "minicpm-v",
+  "idefics",
+  "smolvlm",
+  "paligemma",
+  "florence",
+];
+
+/** Whether `modelId` looks like a vision/multimodal model we can't serve. */
+export function isVisionModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return VISION_MODEL_MARKERS.some((marker) =>
+    marker.includes("-")
+      ? lower.includes(marker)
+      : new RegExp(`(^|[^a-z])${marker}([^a-z]|$)`).test(lower),
+  );
+}
+
 export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
   const generatedAt = new Date().toISOString();
 
@@ -383,6 +413,9 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
 
     for (const modelId of supportedModels) {
       if (typeof modelId !== "string" || modelId.length === 0) continue;
+      // Vision/multimodal models can't be served by the text-only path — drop
+      // them so they never surface in the picker or directory.
+      if (isVisionModel(modelId)) continue;
       let entry = byModel.get(modelId);
       if (!entry) {
         entry = {
