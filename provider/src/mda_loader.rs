@@ -430,11 +430,25 @@ pub fn acquire_auto(console_base: &str, api_key: &str, public_key_b64: &str) -> 
         urlencode(&serial)
     );
     // Try the already-captured chain first (reused across refreshes; rate-limit
-    // friendly — we never re-request once we have a bound chain).
-    if let Ok(chain) = load_from_url(&chain_url) {
+    // friendly — we never re-request once we have a bound chain). The endpoint
+    // is bearer-gated, so we MUST present the api_key (a keyless GET 401s).
+    if let Ok(chain) = load_from_url_with_key(&chain_url, api_key) {
         if !chain.is_empty() {
-            tracing::info!(certs = chain.len(), "MDA auto: loaded captured chain");
-            return chain;
+            // Only trust a chain that actually binds THIS signing key. After a
+            // key rotation (fresh install → new Secure Enclave key) the
+            // coordinator may still hold a chain bound to the OLD key; embedding
+            // it would never verify, and — worse — would mask the need to
+            // re-request. A non-binding chain is treated as "no chain".
+            if chain_binds_key(&chain, public_key_b64) {
+                tracing::info!(
+                    certs = chain.len(),
+                    "MDA auto: loaded captured chain (binds key)"
+                );
+                return chain;
+            }
+            tracing::warn!(
+                "MDA auto: captured chain does not bind the current signing key (rotated?); re-requesting"
+            );
         }
     }
     // No chain yet → request one (cooldown-gated), then return empty for now.
@@ -452,6 +466,20 @@ pub fn acquire_auto(console_base: &str, api_key: &str, public_key_b64: &str) -> 
         tracing::debug!("MDA auto: within request cooldown; not re-requesting this boot");
     }
     Vec::new()
+}
+
+/// True iff `chain` (DER, leaf-first) verifies and is bound to the
+/// base64-encoded P-256 signing key `public_key_b64` — by the leaf key itself
+/// or by the freshness nonce (`sha256(pubkey)`), per `MdaResult::binds_key`.
+/// Fail-closed: any decode/verify error → false (treat as not bound).
+fn chain_binds_key(chain: &[Vec<u8>], public_key_b64: &str) -> bool {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    let Ok(raw) = B64.decode(public_key_b64) else {
+        return false;
+    };
+    crate::mda::verify_chain(chain)
+        .map(|r| r.binds_key(&raw))
+        .unwrap_or(false)
 }
 
 /// Is this Mac currently MDM-enrolled? Reads `profiles status -type enrollment`
@@ -616,10 +644,27 @@ pub fn load_from_binary(binary: &Path) -> Result<Vec<Vec<u8>>> {
 /// `try_load` runs synchronously at boot and the agent's `reqwest` is
 /// async-only; this mirrors the attest-binary strategy's subprocess shape.
 pub fn load_from_url(url: &str) -> Result<Vec<Vec<u8>>> {
+    load_from_url_with_key(url, "")
+}
+
+/// Like `load_from_url`, but presents the agent's bearer key. The
+/// `/api/agent/mdm/attestation-chain` endpoint is `authenticateAgent`-gated, so
+/// a keyless GET 401s (curl `-f` → exit 56) — which is why the auto path could
+/// request an attestation but never read the captured chain back. `acquire_auto`
+/// always has the key, so it must use this.
+pub fn load_from_url_with_key(url: &str, api_key: &str) -> Result<Vec<Vec<u8>>> {
     use std::process::Command;
 
+    let mut args = vec!["-fsSL", "--max-time", "20"];
+    let auth;
+    if !api_key.is_empty() {
+        auth = format!("authorization: Bearer {api_key}");
+        args.push("-H");
+        args.push(&auth);
+    }
+    args.push(url);
     let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "20", url])
+        .args(&args)
         .output()
         .with_context(|| format!("invoking curl for {url}"))?;
     if !out.status.success() {
