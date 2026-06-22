@@ -184,22 +184,57 @@ function parseDelete(b: Record<string, unknown>): DeleteArgs | string {
 // passed through verbatim (5xx collapsed to 502) via `err`, matching the
 // previous `json(res, ...)` passthrough byte-for-byte.
 
+/** Diagnostic metadata captured while a write talks to the user's PDS, then
+ *  annotated onto the route span by {@link runCore}. Splitting the upstream
+ *  round-trip out from the span's total duration is what lets you tell a slow
+ *  PDS host (high `pds.upstream_ms`, concentrated on one `pds.did`) from our
+ *  own overhead or a DPoP refresh. */
+interface PdsMeta {
+  upstreamMs?: number;
+  upstreamStatus?: number;
+}
+
+/** Time one DPoP-authed call to the user's PDS, recording the upstream HTTP
+ *  status and round-trip ms on `meta`. Behaviour is identical to calling
+ *  `session.handle` directly — this only observes. */
+async function pdsCall(
+  session: RestoredSession,
+  path: string,
+  init: Parameters<RestoredSession["handle"]>[1],
+  meta: PdsMeta,
+): Promise<Awaited<ReturnType<RestoredSession["handle"]>>> {
+  const start = Date.now();
+  try {
+    const r = await session.handle(path, init);
+    meta.upstreamStatus = r.status;
+    return r;
+  } finally {
+    meta.upstreamMs = Date.now() - start;
+  }
+}
+
 async function doCreate(
   ctx: PdsWriteContext,
   did: string,
   session: RestoredSession,
   a: CreateArgs,
+  meta: PdsMeta,
 ): Promise<HttpServerResponse.HttpServerResponse> {
-  const r = await session.handle(`/xrpc/com.atproto.repo.createRecord`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      repo: did,
-      collection: a.collection,
-      record: a.record,
-      ...(a.rkey ? { rkey: a.rkey } : {}),
-    }),
-  });
+  const r = await pdsCall(
+    session,
+    `/xrpc/com.atproto.repo.createRecord`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repo: did,
+        collection: a.collection,
+        record: a.record,
+        ...(a.rkey ? { rkey: a.rkey } : {}),
+      }),
+    },
+    meta,
+  );
   if (!r.ok) {
     const text = await r.text().catch(() => "");
     return err(r.status >= 500 ? 502 : r.status, {
@@ -227,18 +262,24 @@ async function doPut(
   did: string,
   session: RestoredSession,
   a: PutArgs,
+  meta: PdsMeta,
 ): Promise<HttpServerResponse.HttpServerResponse> {
-  const r = await session.handle(`/xrpc/com.atproto.repo.putRecord`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      repo: did,
-      collection: a.collection,
-      rkey: a.rkey,
-      record: a.record,
-      ...(a.swapRecord ? { swapRecord: a.swapRecord } : {}),
-    }),
-  });
+  const r = await pdsCall(
+    session,
+    `/xrpc/com.atproto.repo.putRecord`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repo: did,
+        collection: a.collection,
+        rkey: a.rkey,
+        record: a.record,
+        ...(a.swapRecord ? { swapRecord: a.swapRecord } : {}),
+      }),
+    },
+    meta,
+  );
   if (!r.ok) {
     const text = await r.text().catch(() => "");
     return err(r.status >= 500 ? 502 : r.status, {
@@ -262,18 +303,24 @@ async function doDelete(
   did: string,
   session: RestoredSession,
   a: DeleteArgs,
+  meta: PdsMeta,
 ): Promise<HttpServerResponse.HttpServerResponse> {
   const uri = `at://${did}/${a.collection}/${a.rkey}`;
-  const r = await session.handle(`/xrpc/com.atproto.repo.deleteRecord`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      repo: did,
-      collection: a.collection,
-      rkey: a.rkey,
-      ...(a.swapRecord ? { swapRecord: a.swapRecord } : {}),
-    }),
-  });
+  const r = await pdsCall(
+    session,
+    `/xrpc/com.atproto.repo.deleteRecord`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repo: did,
+        collection: a.collection,
+        rkey: a.rkey,
+        ...(a.swapRecord ? { swapRecord: a.swapRecord } : {}),
+      }),
+    },
+    meta,
+  );
   if (!r.ok) {
     const text = await r.text().catch(() => "");
     // Already-gone collapses to success so the agent's dedup loop moves on.
@@ -297,6 +344,7 @@ type WriteCore<A> = (
   did: string,
   session: RestoredSession,
   a: A,
+  meta: PdsMeta,
 ) => Promise<HttpServerResponse.HttpServerResponse>;
 
 /** Invoke a write-core, converting an unexpected promise rejection into a
@@ -308,6 +356,7 @@ type WriteCore<A> = (
  *  upstream error, not a mystery 500. */
 function runCore(
   op: string,
+  meta: PdsMeta,
   run: () => Promise<HttpServerResponse.HttpServerResponse>,
 ): Effect.Effect<HttpServerResponse.HttpServerResponse> {
   return Effect.tryPromise({
@@ -317,7 +366,19 @@ function runCore(
         error: "PdsWriteFailed",
         message: `${op}: ${e instanceof Error ? e.message : String(e)}`,
       }),
-  }).pipe(Effect.merge);
+  }).pipe(
+    Effect.merge,
+    // Annotate the upstream PDS round-trip even when it errored — a 4xx/5xx
+    // upstream or a slow host is exactly what we want on the span.
+    Effect.tap(() =>
+      Effect.gen(function* () {
+        if (meta.upstreamMs !== undefined)
+          yield* Effect.annotateCurrentSpan("pds.upstream_ms", meta.upstreamMs);
+        if (meta.upstreamStatus !== undefined)
+          yield* Effect.annotateCurrentSpan("pds.upstream_status", meta.upstreamStatus);
+      }),
+    ),
+  );
 }
 
 /** Restore the session for `did`, or a non-2xx response: 401 when the
@@ -353,7 +414,7 @@ function sessionOr401(ctx: PdsWriteContext, did: string) {
 
 /** Bearer-key route: token -> DID -> session, then body -> args -> core.
  *  Order matches the previous hand-rolled handler exactly. */
-function bearerRoute<A>(
+function bearerRoute<A extends { collection: string }>(
   ctx: PdsWriteContext,
   op: string,
   parse: (b: Record<string, unknown>) => A | string,
@@ -378,13 +439,16 @@ function bearerRoute<A>(
     const a = parse(parsed.right as Record<string, unknown>);
     if (typeof a === "string") return err(400, { error: "InvalidRequest", message: a });
 
-    return yield* runCore(op, () => core(ctx, resolved.did, session.session, a));
+    yield* Effect.annotateCurrentSpan("pds.did", resolved.did);
+    yield* Effect.annotateCurrentSpan("pds.collection", a.collection);
+    const meta: PdsMeta = {};
+    return yield* runCore(op, meta, () => core(ctx, resolved.did, session.session, a, meta));
   }).pipe(Effect.withSpan(`appview.pds.${op}`));
 }
 
 /** Internal-secret route: shared-secret header + asserted `did` in body,
  *  then args -> session -> core. Order matches the previous handler. */
-function internalRoute<A>(
+function internalRoute<A extends { collection: string }>(
   ctx: PdsWriteContext,
   secret: string,
   op: string,
@@ -413,7 +477,10 @@ function internalRoute<A>(
     const session = yield* sessionOr401(ctx, did);
     if (!session.ok) return session.res;
 
-    return yield* runCore(op, () => core(ctx, did, session.session, a));
+    yield* Effect.annotateCurrentSpan("pds.did", did);
+    yield* Effect.annotateCurrentSpan("pds.collection", a.collection);
+    const meta: PdsMeta = {};
+    return yield* runCore(op, meta, () => core(ctx, did, session.session, a, meta));
   }).pipe(Effect.withSpan(`appview.internal.pds.${op}`));
 }
 
