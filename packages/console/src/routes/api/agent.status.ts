@@ -15,7 +15,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { runTraced } from "@/lib/o11y.server.ts";
 
 import { appviewListProvidersEffect } from "@/integrations/appview/appview.server.ts";
-import { restoreAtprotoSessionEffect } from "@/integrations/auth/atproto.server.ts";
+import { sessionNeedsReauth } from "@/integrations/auth/atproto.server.ts";
 import { resolveBearerKey } from "@/lib/api-keys.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
 import { sumReceiptInSince } from "@/lib/earnings.ts";
@@ -55,8 +55,17 @@ async function fetchConfidentialEligible(did: string): Promise<boolean> {
       confidentialEligible?: boolean;
       trustTier?: string;
     }>;
-    const mineRow = list.find((p) => p.did === did);
-    return mineRow?.confidentialEligible === true || mineRow?.trustTier === "attested-confidential";
+    // A DID can hold MULTIPLE advisor rows: one per connected machine, plus
+    // stale ghost registrations that haven't aged out yet. The old `.find`
+    // returned the FIRST matching row, which was frequently the stale
+    // best-effort ghost — so the menu showed "not confidential" even though
+    // the live worker was attested. Treat the DID as confidential-eligible
+    // when ANY of its rows is: the live attested row wins over a stale ghost.
+    return list.some(
+      (p) =>
+        p.did === did &&
+        (p.confidentialEligible === true || p.trustTier === "attested-confidential"),
+    );
   } catch {
     return false;
   }
@@ -73,25 +82,25 @@ export const Route = createFileRoute("/api/agent/status")({
 
         const did = resolved.did;
         const since = Date.now() - 24 * 60 * 60 * 1000;
+
+        // "Does the agent need a fresh sign-in?" — a NON-refreshing read of
+        // the stored OAuth session (see sessionNeedsReauth). The old probe
+        // called restore(), which refreshes/rotates the single-use refresh
+        // token on every status poll; because the AppView is the designated
+        // refresher, that parallel rotation was cannibalizing the session it
+        // was meant to monitor and causing the recurring write 401s. This
+        // read only reports re-auth when the session is genuinely gone.
+        const needsReauth = sessionNeedsReauth(did as Did);
+
         // All three degrade gracefully so a single backend hiccup yields
         // partial data the menu can still render, not a 500.
-        const [balance, events, providers, confidential, session] = await Promise.all([
+        const [balance, events, providers, confidential] = await Promise.all([
           getBalance(did).catch(() => null),
           listEvents(did, EVENT_LIMIT).catch(() => ({ events: [] })),
           runTraced("appview.listProviders", appviewListProvidersEffect).catch(() => ({
             providers: [],
           })),
           fetchConfidentialEligible(did),
-          // The authoritative "can this agent publish right now?" probe: the
-          // same DPoP session restore every putRecord depends on. A null means
-          // the OAuth session is dead (refresh token expired/revoked) and the
-          // agent is silently failing all publishes — so the menu can prompt a
-          // re-sign-in instead of leaving a stale record on screen. We do NOT
-          // surface a transient probe error as needsReauth (don't nag): only a
-          // definitive null counts.
-          runTraced("auth.sessionProbe", restoreAtprotoSessionEffect(did as Did))
-            .then((s) => s === null)
-            .catch(() => false),
         ]);
 
         const earned24h = sumReceiptInSince(events.events, since);
@@ -108,7 +117,7 @@ export const Route = createFileRoute("/api/agent/status")({
             trustLevel: body.trustLevel ?? null,
             confidential,
             agentVersion: body.binaryVersion ?? null,
-            needsReauth: session,
+            needsReauth,
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );

@@ -236,6 +236,26 @@ export function lastRestoreError(did: string): string | undefined {
   return lastRestoreErrorByDid.get(did);
 }
 
+/** Non-refreshing liveness check for a stored OAuth session.
+ *
+ * Reads the persisted blob straight from the session store and reports
+ * whether the user must re-authenticate — WITHOUT calling `restore()`.
+ * `restore()` refreshes an expired access token, which rotates the
+ * SINGLE-USE DPoP refresh token and writes the new one back; using it as a
+ * status probe therefore actively cannibalizes the very session it claims
+ * to observe (the AppView is the designated single refresher — see
+ * packages/appview/src/pds/write.ts — so the console must never rotate the
+ * token in parallel). A session is still restorable as long as a blob
+ * exists and carries a refresh token; only a missing blob (deleted after
+ * an `invalid_grant`) or a refresh-token-less blob means re-auth is
+ * actually required. This is honest (no false "all good" once the session
+ * is gone) and inert (no rotation), unlike the old restore-based probe. */
+export function sessionNeedsReauth(did: Did): boolean {
+  const stored = sessionStore.get(did);
+  if (!stored) return true;
+  return !stored.tokenSet?.refresh_token;
+}
+
 export const restoreAtprotoSessionEffect = (did: Did): Effect.Effect<RestoredSession | null> =>
   Effect.gen(function* () {
     const outcome = yield* Effect.either(oauthRestoreSessionEffect(did));
