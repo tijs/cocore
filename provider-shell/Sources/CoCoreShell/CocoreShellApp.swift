@@ -95,6 +95,12 @@ final class AppState: ObservableObject {
     @Published var balanceCredits: Int?
     @Published var agentVersion: String?
     @Published var serving: Bool = false
+    /// The agent's ATProto publish session is dead (refresh token expired or
+    /// revoked) — every record publish is 401ing, so trustLevel/receipts are
+    /// silently stuck. The UI surfaces a "Sign in again" prompt and the Secure
+    /// Mode wizard refuses to attest until it clears (attesting is pointless
+    /// when the result can't be published).
+    @Published var needsReauth: Bool = false
     @Published var lastError: String?
 
     private enum CacheKey {
@@ -124,6 +130,7 @@ final class AppState: ObservableObject {
         let trustLevel: String?
         let confidential: Bool?
         let agentVersion: String?
+        let needsReauth: Bool?
     }
 
     func refreshStatus() async {
@@ -153,6 +160,7 @@ final class AppState: ObservableObject {
             if let bal = e.balance { d.set(bal, forKey: CacheKey.balance) }
             if let raw = e.trustLevel, let t = TrustLevel(rawValue: raw) { self.trustLevel = t }
             self.confidential = e.confidential ?? false
+            self.needsReauth = e.needsReauth ?? false
             if let v = e.agentVersion {
                 self.agentVersion = v
                 d.set(v, forKey: CacheKey.agentVersion)

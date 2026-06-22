@@ -590,6 +590,7 @@ final class MenuBarController {
         onSignOut: { [weak self] in self?.signOut() },
         onEnableSecureMode: { [weak self] in self?.secureModeWizard.show() },
         onSetConfidential: { [weak self] on in self?.setConfidential(on) },
+        onReauth: { [weak self] in self?.signIn() },
         onSendBugReport: { [weak self] in self?.sendBugReport() },
         onCheckUpdates: { [weak self] in self?.checkUpdates() },
         onInstallUpdate: { [weak self] in self?.installUpdate() },
@@ -604,9 +605,8 @@ final class MenuBarController {
     /// no longer a top-level tray item.
     private lazy var secureModeWizard: SecureModeWizardController = SecureModeWizardController(
         state: state,
-        supervisor: supervisor,
         updater: updater,
-        modelManager: modelManager
+        onReauth: { [weak self] in self?.signIn() }
     )
 
     /// Public entry point so the AppDelegate can surface the main window when

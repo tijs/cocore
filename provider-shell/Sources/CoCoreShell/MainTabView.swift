@@ -33,6 +33,7 @@ final class MainWindowController {
     private let onSignOut: () -> Void
     private let onEnableSecureMode: () -> Void
     private let onSetConfidential: (Bool) -> Void
+    private let onReauth: () -> Void
     private let onSendBugReport: () -> Void
     private let onCheckUpdates: () -> Void
     private let onInstallUpdate: () -> Void
@@ -48,6 +49,7 @@ final class MainWindowController {
         onSignOut: @escaping () -> Void,
         onEnableSecureMode: @escaping () -> Void,
         onSetConfidential: @escaping (Bool) -> Void,
+        onReauth: @escaping () -> Void,
         onSendBugReport: @escaping () -> Void,
         onCheckUpdates: @escaping () -> Void,
         onInstallUpdate: @escaping () -> Void,
@@ -62,6 +64,7 @@ final class MainWindowController {
         self.onSignOut = onSignOut
         self.onEnableSecureMode = onEnableSecureMode
         self.onSetConfidential = onSetConfidential
+        self.onReauth = onReauth
         self.onSendBugReport = onSendBugReport
         self.onCheckUpdates = onCheckUpdates
         self.onInstallUpdate = onInstallUpdate
@@ -79,7 +82,8 @@ final class MainWindowController {
                         onOpenSetupGuide: onOpenSetupGuide,
                         onSignOut: onSignOut,
                         onEnableSecureMode: onEnableSecureMode,
-                        onSetConfidential: onSetConfidential)),
+                        onSetConfidential: onSetConfidential,
+                        onReauth: onReauth)),
                 tab("Models", "cpu", ModelsView(manager: modelManager)),
                 tab("Settings", "gearshape", PreferencesView(supervisor: supervisor)),
                 tab("About", "info.circle",
@@ -149,11 +153,15 @@ private struct StatusTab: View {
     let onSignOut: () -> Void
     let onEnableSecureMode: () -> Void
     let onSetConfidential: (Bool) -> Void
+    let onReauth: () -> Void
     @EnvironmentObject private var state: AppState
 
     var body: some View {
         Form {
-            StatusRows(onEnableSecureMode: onEnableSecureMode, onSetConfidential: onSetConfidential)
+            StatusRows(
+                onEnableSecureMode: onEnableSecureMode,
+                onSetConfidential: onSetConfidential,
+                onReauth: onReauth)
             Section {
                 Button("View my profile on console", action: onOpenProfile)
                     .disabled(state.session == nil)

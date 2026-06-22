@@ -9,11 +9,13 @@
 // income lands as `receipt-in` ledger events (see
 // packages/exchange/src/token-balance.ts).
 
+import type { Did } from "@atcute/lexicons";
 import { createFileRoute } from "@tanstack/react-router";
 
 import { runTraced } from "@/lib/o11y.server.ts";
 
 import { appviewListProvidersEffect } from "@/integrations/appview/appview.server.ts";
+import { restoreAtprotoSessionEffect } from "@/integrations/auth/atproto.server.ts";
 import { resolveBearerKey } from "@/lib/api-keys.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
 import { sumReceiptInSince } from "@/lib/earnings.ts";
@@ -73,13 +75,23 @@ export const Route = createFileRoute("/api/agent/status")({
         const since = Date.now() - 24 * 60 * 60 * 1000;
         // All three degrade gracefully so a single backend hiccup yields
         // partial data the menu can still render, not a 500.
-        const [balance, events, providers, confidential] = await Promise.all([
+        const [balance, events, providers, confidential, session] = await Promise.all([
           getBalance(did).catch(() => null),
           listEvents(did, EVENT_LIMIT).catch(() => ({ events: [] })),
           runTraced("appview.listProviders", appviewListProvidersEffect).catch(() => ({
             providers: [],
           })),
           fetchConfidentialEligible(did),
+          // The authoritative "can this agent publish right now?" probe: the
+          // same DPoP session restore every putRecord depends on. A null means
+          // the OAuth session is dead (refresh token expired/revoked) and the
+          // agent is silently failing all publishes — so the menu can prompt a
+          // re-sign-in instead of leaving a stale record on screen. We do NOT
+          // surface a transient probe error as needsReauth (don't nag): only a
+          // definitive null counts.
+          runTraced("auth.sessionProbe", restoreAtprotoSessionEffect(did as Did))
+            .then((s) => s === null)
+            .catch(() => false),
         ]);
 
         const earned24h = sumReceiptInSince(events.events, since);
@@ -96,6 +108,7 @@ export const Route = createFileRoute("/api/agent/status")({
             trustLevel: body.trustLevel ?? null,
             confidential,
             agentVersion: body.binaryVersion ?? null,
+            needsReauth: session,
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );

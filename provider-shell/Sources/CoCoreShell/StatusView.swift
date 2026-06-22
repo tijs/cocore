@@ -22,6 +22,11 @@ struct StatusRows: View {
     /// (true = enable). Left `nil` to hide the control (read-only contexts).
     var onSetConfidential: ((Bool) -> Void)? = nil
 
+    /// When provided, a "Sign in again" action shown while the agent's publish
+    /// session is dead (`state.needsReauth`). Routes to the sign-in flow. Left
+    /// `nil` in read-only contexts (the banner still warns, just no button).
+    var onReauth: (() -> Void)? = nil
+
     var body: some View {
         Section("Identity") {
             if let s = state.session {
@@ -32,6 +37,24 @@ struct StatusRows: View {
                 }
             } else {
                 Text("Not signed in.")
+            }
+        }
+        // A dead publish session is the one failure that silently freezes
+        // everything downstream — trustLevel, receipts, the machine listing —
+        // while the agent still looks like it's "Serving". Surface it loudly,
+        // above the rest, with a one-click path back to sign-in.
+        if state.needsReauth, state.session != nil {
+            Section {
+                Label(
+                    "Your co/core session expired. The agent can't publish "
+                        + "records — receipts and Secure Mode are paused until you sign in again.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+                if let onReauth {
+                    Button("Sign in again", action: onReauth)
+                }
             }
         }
         Section("Serving") {
@@ -70,7 +93,11 @@ struct StatusRows: View {
             // need this agent's bearer key (session.apiKey/apiBase), so there's
             // nothing to enable until pairing completes. Mirrors the Identity
             // section's signed-in / "Not signed in" split above.
-            if state.trustLevel != .hardwareAttested, state.session != nil,
+            // Don't offer to enable Secure Mode while the publish session is
+            // dead: the wizard would attest, then fail to publish the result
+            // (exactly the silent dead-end this guard exists to prevent). The
+            // re-auth banner above is the actionable step until it clears.
+            if state.trustLevel != .hardwareAttested, state.session != nil, !state.needsReauth,
                 let enable = onEnableSecureMode {
                 Button("Enable Secure Mode…", action: enable)
             }
