@@ -1231,13 +1231,27 @@ async fn cmd_serve(
     // native engine serves under a hardened-attested posture.
     let mut attestation_inputs =
         attestation::build_stub_inputs(&session.did, &enc.public_key_b64());
-    // MDA option-B (the live macOS hardware-attested path): if the Secure Mode
-    // wizard wired the request env (URL + serial + UDID), ask the coordinator to
-    // trigger a key-bound DeviceInformation attestation (DeviceAttestationNonce =
-    // sha256(pubkey)) before we read the chain. Best-effort + fail-soft;
-    // Apple-rate-limited to ~weekly, so repeats are harmless. No-op unless wired.
-    cocore_provider::mda_loader::request_attestation(&signer.public_key_b64());
-    let mda_cert_chain = cocore_provider::mda_loader::try_load();
+    // MDA option-B (the live macOS hardware-attested path). Two ways in:
+    //   * EXPLICIT: an operator pinned COCORE_MDA_* env (chain path/url, request
+    //     url + serial + udid) — honored verbatim.
+    //   * AUTO (production default): no explicit env — the agent derives its own
+    //     serial + Hardware UUID + the coordinator URLs from the session console
+    //     base, and only when this Mac is MDM-enrolled loads the captured chain,
+    //     requesting a fresh key-bound DeviceInformation attestation
+    //     (DeviceAttestationNonce = sha256(pubkey)) if none exists yet. The chain
+    //     binds to the signing key via the leaf freshness OID; `build` re-verifies
+    //     + only embeds it if it binds. All fail-soft; Apple-rate-limited so we
+    //     only request when we don't already hold a bound chain.
+    let pubkey_b64 = signer.public_key_b64();
+    cocore_provider::mda_loader::request_attestation(&pubkey_b64);
+    let mut mda_cert_chain = cocore_provider::mda_loader::try_load();
+    if mda_cert_chain.is_empty() && !cocore_provider::mda_loader::any_explicit_mda_env() {
+        mda_cert_chain = cocore_provider::mda_loader::acquire_auto(
+            &session.api_base,
+            &session.api_key,
+            &pubkey_b64,
+        );
+    }
     attestation_inputs.mda_cert_chain = mda_cert_chain;
     // App Attest evidence — bound to this signing key; `build` re-verifies + only
     // embeds it if it binds. NB: App Attest is iOS-only (non-functional on macOS,

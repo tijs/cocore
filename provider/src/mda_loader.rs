@@ -335,11 +335,22 @@ pub fn request_attestation(public_key_b64: &str) -> bool {
         return false;
     };
     let api_key = std::env::var(ENV_CONSOLE_API_KEY).unwrap_or_default();
-    let body = build_request_body(&serial, &udid, public_key_b64);
+    post_request_attestation(&url, &api_key, &serial, &udid, public_key_b64)
+}
 
+/// POST the request-attestation body to `url` (the coordinator). Shells out to
+/// curl (matches `load_from_url` — boot is synchronous and the agent's reqwest
+/// is async-only); 20s ceiling so it never blocks boot for long. `api_key` may
+/// be empty (the endpoint then relies on other auth / fails closed server-side).
+fn post_request_attestation(
+    url: &str,
+    api_key: &str,
+    serial: &str,
+    udid: &str,
+    public_key_b64: &str,
+) -> bool {
     use std::process::Command;
-    // Shell out to curl (matches load_from_url — boot is synchronous and the
-    // agent's reqwest is async-only). 20s ceiling; never blocks boot for long.
+    let body = build_request_body(serial, udid, public_key_b64);
     let mut args = vec![
         "-fsS".to_string(),
         "--max-time".to_string(),
@@ -355,7 +366,7 @@ pub fn request_attestation(public_key_b64: &str) -> bool {
     }
     args.push("-d".to_string());
     args.push(body);
-    args.push(url);
+    args.push(url.to_string());
 
     match Command::new("curl").args(&args).output() {
         Ok(out) if out.status.success() => {
@@ -374,6 +385,176 @@ pub fn request_attestation(public_key_b64: &str) -> bool {
             false
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Auto option-B (production): derive serial/UDID + URLs and acquire the chain
+// with zero hand-set env vars. Kicks in only when (a) no explicit COCORE_MDA_*
+// env is configured and (b) the machine is actually MDM-enrolled. Honors the
+// 7-day Apple rate limit by only requesting a fresh attestation when no bound
+// chain is captured yet, throttled by a local cooldown.
+// ---------------------------------------------------------------------------
+
+/// Min interval between auto request-attestation calls. We only request when no
+/// chain is captured yet; this just avoids hammering the coordinator (and the
+/// device) while a capture is in flight or the device isn't fully enrolled.
+const AUTO_REQUEST_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// True iff the operator pinned any explicit MDA acquisition env var. When set,
+/// the explicit `try_load` / env `request_attestation` path owns the flow and
+/// the auto path stays out of the way.
+pub fn any_explicit_mda_env() -> bool {
+    std::env::var(ENV_CHAIN_PATH).is_ok()
+        || std::env::var(ENV_CHAIN_URL).is_ok()
+        || std::env::var(ENV_ATTEST_BINARY).is_ok()
+        || std::env::var(ENV_REQUEST_URL).is_ok()
+}
+
+/// Auto-acquire the MDA chain for a serving agent: derive the serial, Hardware
+/// UUID, and coordinator URLs from `console_base`, and (only when this machine
+/// is MDM-enrolled) load the captured chain, requesting a fresh, key-bound
+/// attestation if none exists yet. Returns the chain (possibly empty this boot;
+/// a freshly-requested one lands asynchronously and is picked up on the next
+/// attestation refresh). Always fail-soft.
+pub fn acquire_auto(console_base: &str, api_key: &str, public_key_b64: &str) -> Vec<Vec<u8>> {
+    if !mdm_enrolled() {
+        return Vec::new();
+    }
+    let Some(serial) = device_serial() else {
+        tracing::warn!("MDA auto: enrolled but could not read device serial; skipping");
+        return Vec::new();
+    };
+    let base = console_base.trim_end_matches('/');
+    let chain_url = format!(
+        "{base}/api/agent/mdm/attestation-chain?serial={}",
+        urlencode(&serial)
+    );
+    // Try the already-captured chain first (reused across refreshes; rate-limit
+    // friendly — we never re-request once we have a bound chain).
+    if let Ok(chain) = load_from_url(&chain_url) {
+        if !chain.is_empty() {
+            tracing::info!(certs = chain.len(), "MDA auto: loaded captured chain");
+            return chain;
+        }
+    }
+    // No chain yet → request one (cooldown-gated), then return empty for now.
+    let Some(udid) = device_hardware_uuid() else {
+        tracing::warn!("MDA auto: could not read Hardware UUID; cannot request attestation");
+        return Vec::new();
+    };
+    if auto_request_cooldown_elapsed() {
+        let request_url = format!("{base}/api/agent/mdm/request-attestation");
+        if post_request_attestation(&request_url, api_key, &serial, &udid, public_key_b64) {
+            mark_auto_requested();
+            tracing::info!("MDA auto: requested attestation; chain will land on a later refresh");
+        }
+    } else {
+        tracing::debug!("MDA auto: within request cooldown; not re-requesting this boot");
+    }
+    Vec::new()
+}
+
+/// Is this Mac currently MDM-enrolled? Reads `profiles status -type enrollment`
+/// ("MDM enrollment: Yes"). Any failure / non-macOS → false (skip option-B).
+pub fn mdm_enrolled() -> bool {
+    run_capture("profiles", &["status", "-type", "enrollment"])
+        .map(|out| {
+            out.lines().any(|l| {
+                let l = l.trim();
+                l.starts_with("MDM enrollment:") && l.contains("Yes")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Device serial (env override `COCORE_MDA_DEVICE_SERIAL`, else IOPlatformSerialNumber).
+pub fn device_serial() -> Option<String> {
+    if let Ok(s) = std::env::var(ENV_DEVICE_SERIAL) {
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    ioreg_value("IOPlatformSerialNumber")
+}
+
+/// The MDM enrollment id macOS reports for a Mac = the Hardware UUID
+/// (env override `COCORE_MDA_DEVICE_UDID`, else IOPlatformUUID).
+pub fn device_hardware_uuid() -> Option<String> {
+    if let Ok(s) = std::env::var(ENV_DEVICE_UDID) {
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    ioreg_value("IOPlatformUUID")
+}
+
+/// Pull a string property off the IOPlatformExpertDevice node via `ioreg`.
+fn ioreg_value(key: &str) -> Option<String> {
+    let out = run_capture("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"])?;
+    for line in out.lines() {
+        if line.contains(&format!("\"{key}\"")) {
+            // line looks like:  "IOPlatformUUID" = "376AF848-..."
+            if let Some(v) = line.split('=').nth(1) {
+                let v = v.trim().trim_matches('"').trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Run a command and capture stdout as a String; None on failure / non-zero.
+fn run_capture(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(cmd).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn auto_request_marker_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".cocore").join(".mda-last-request"))
+}
+
+/// True if it's been longer than the cooldown since the last auto request (or
+/// there's no record yet). Best-effort: any IO error → allow the request.
+fn auto_request_cooldown_elapsed() -> bool {
+    let Some(path) = auto_request_marker_path() else {
+        return true;
+    };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return true;
+    };
+    match meta.modified().ok().and_then(|m| m.elapsed().ok()) {
+        Some(elapsed) => elapsed >= AUTO_REQUEST_COOLDOWN,
+        None => true,
+    }
+}
+
+fn mark_auto_requested() {
+    if let Some(path) = auto_request_marker_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, b"");
+    }
+}
+
+/// Minimal query-component percent-encoding (serials/UUIDs are alphanumeric +
+/// `-`, but encode defensively so a stray char can't break the URL).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Read a PEM file and return one DER blob per CERTIFICATE block,
@@ -628,6 +809,18 @@ mod tests {
     fn load_from_file_errors_on_missing_path() {
         let err = load_from_file(Path::new("/nonexistent/path/xyz.pem")).unwrap_err();
         assert!(format!("{err}").contains("reading"));
+    }
+
+    #[test]
+    fn urlencode_passes_serials_and_encodes_specials() {
+        // Serials / UUIDs (alnum + dash) pass through unchanged.
+        assert_eq!(urlencode("H2WHW38LQ6NV"), "H2WHW38LQ6NV");
+        assert_eq!(
+            urlencode("376AF848-8EC9-5336-AB51-0801857F726D"),
+            "376AF848-8EC9-5336-AB51-0801857F726D"
+        );
+        // Anything else is percent-encoded so it can't break the query string.
+        assert_eq!(urlencode("a b&c=d?e"), "a%20b%26c%3Dd%3Fe");
     }
 
     #[test]

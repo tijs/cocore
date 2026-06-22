@@ -331,3 +331,41 @@ device returns the attestation → webhook stores by serial → agent polls
 `freshness == sha256(pubkey)`. Debug seam: set `COCORE_MDM_WEBHOOK_DEBUG=1` on
 the Client and read the raw webhook payload via
 `GET attestation-chain?serial=zzwebhookdebuglast`.
+
+---
+
+## Option-B productionization (agent auto-wiring) — 2026-06-22
+
+The agent now **auto-derives** the option-B inputs on `serve`; no hand-set env
+vars and no tray release are needed for the attestation loop:
+
+- `mda_loader::acquire_auto` runs when no explicit `COCORE_MDA_*` env is set.
+  It only proceeds if the Mac is **MDM-enrolled** (`profiles status -type
+enrollment`), reads its own **serial** + **Hardware UUID** via `ioreg`
+  (`IOPlatformSerialNumber` / `IOPlatformUUID`), and derives the coordinator
+  URLs from the session console base (`session.api_base`) + session API key.
+- It loads the captured chain from
+  `…/api/agent/mdm/attestation-chain?serial=<serial>` and embeds it (binds via
+  freshness in `attestation::build`). Only if **no** bound chain exists yet does
+  it POST `…/api/agent/mdm/request-attestation` — throttled by a 6h local
+  cooldown (`~/.cocore/.mda-last-request`) so we never burn Apple's ~1/device/7-day
+  attestation quota once we hold a chain.
+- Operator overrides still win: `COCORE_MDA_CERT_CHAIN_PATH` / `_CHAIN_URL` /
+  `_ATTEST_BINARY` / `_REQUEST_URL` (+`_DEVICE_SERIAL`/`_DEVICE_UDID`) short-circuit
+  the auto path.
+
+So the **Secure Mode wizard's only required job is to enroll the device**
+(install the profile); the serving agent picks up / requests the attestation
+itself on its normal 23h refresh.
+
+### Remaining ops to finish productionization
+
+1. **Persist NanoMDM on Postgres (stop the ephemeral churn).** Add a Railway
+   Postgres to the project, apply NanoMDM's pgsql schema, and switch the
+   `cocore-nanomdm` Custom Start Command storage flags to
+   `-storage pgsql -dsn "$DATABASE_URL"` (keep `-ca /app/ca.pem -api … -listen
+[::]:9000 -webhook-url '…?key=…'`). Re-upload the push cert once (durable
+   thereafter). Until this lands, every NanoMDM redeploy wipes enrollments +
+   the push cert.
+2. **Turn OFF the debug seam.** Remove `COCORE_MDM_WEBHOOK_DEBUG` from the
+   `Client` service env (it stashes raw webhook bodies; debug-only).
