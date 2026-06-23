@@ -42,20 +42,25 @@ readonly SHELL_DIR="$REPO_ROOT/provider-shell"
 readonly SRC_RES="$SHELL_DIR/Sources/CoCoreShell/Resources"
 CONFIG="${CONFIG:-release}"
 OPEN="${OPEN:-0}"
-# Opt-in secure/native build (WS-A). When 1, the bundled cocore CLI is built
-# with the in-process MLX engine so it can serve the confidential tier.
-COCORE_BUILD_NATIVE="${COCORE_BUILD_NATIVE:-0}"
-# Fleet confidential build. When 1, the outer cocore.app stays the DEFAULT
-# (best-effort, subprocess engine) build — so best-effort machines are
-# byte-identical to a normal release and never depend on the (expiring)
-# provisioning profile — and we ADD a nested, measured push-receiver bundle
-# `Contents/CoCoreProvider.app` (the `--features apns` worker, built by
-# scripts/build-confidential-worker.sh). The tray's AgentSupervisor spawns the
-# nested worker only on machines the owner opted into attested-confidential
-# (desiredTier), via `cocore agent tier`. One notarytool submit of the outer
-# app covers the nested bundle. Requires a Developer ID identity + the
-# provisioning profile (COCORE_PROVISION_PROFILE).
-COCORE_BUILD_APNS="${COCORE_BUILD_APNS:-0}"
+# Secure/native build (WS-A): builds the bundled cocore CLI with the in-process
+# MLX engine so it can serve the confidential tier. Fleet confidential build:
+# the outer cocore.app stays the DEFAULT (best-effort, subprocess engine) build
+# — so best-effort machines are byte-identical to a normal release and never
+# depend on the (expiring) provisioning profile — and we ADD a nested, measured
+# push-receiver bundle `Contents/CoCoreProvider.app` (the `--features apns`
+# worker, built by scripts/build-confidential-worker.sh). The tray's
+# AgentSupervisor spawns the nested worker only on machines the owner opted into
+# attested-confidential (desiredTier), via `cocore agent tier`. One notarytool
+# submit of the outer app covers the nested bundle. Requires the Metal toolchain
+# (full Xcode), a Developer ID identity, and the provisioning profile
+# (COCORE_PROVISION_PROFILE).
+#
+# DEFAULT: ON for distributable prod release builds, so the fleet always ships
+# confidential-capable without anyone remembering a flag. OFF for debug/dev and
+# per-PR builds, which are lightweight + ad-hoc signed (Developer ID/Metal/
+# provisioning profile may be absent, and the APNS worker can't be ad-hoc
+# signed). The actual defaults are computed below, once DEV/PR are known.
+# Override either way with COCORE_BUILD_NATIVE / COCORE_BUILD_APNS = 0|1.
 # DEV=1 builds a side-by-side dev identity: a distinct bundle id, app name,
 # and display name so the local build never collides with a prod cocore.app
 # already installed in /Applications (same bundle id = they fight over the one
@@ -73,6 +78,26 @@ DEV="${DEV:-$([[ "$CONFIG" == "debug" ]] && echo 1 || echo 0)}"
 # actually take effect. The .app file stays cocore.app (one PR build at a time,
 # installed alongside-or-over prod by its own bundle id).
 PR="${COCORE_PR_BUILD:-0}"
+# The nested confidential worker (COCORE_BUILD_APNS) is the default for
+# distributable prod release builds, so the fleet always ships
+# confidential-capable: build-confidential-worker.sh produces a self-contained
+# `--features apns` worker that carries its OWN native MLX engine + metallib, so
+# APNS=1 alone is the whole confidential capability. The OUTER app intentionally
+# stays best-effort (COCORE_BUILD_NATIVE=0): best-effort machines run the outer
+# cocore (subprocess engine) and remain byte-identical to a normal release with
+# no dependency on the expiring provisioning profile, while confidential
+# machines run the nested worker (AgentSupervisor picks by desiredTier).
+# Lightweight (no APNS) for debug/dev and per-PR builds — they're ad-hoc signed
+# and the APNS worker can't be ad-hoc signed. An explicit env value wins.
+if [[ "$CONFIG" == "debug" || "$DEV" == "1" || "$PR" == "1" ]]; then
+  APNS_DEFAULT=0
+else
+  APNS_DEFAULT=1
+fi
+# Outer-app native engine is a SEPARATE axis (best-effort machines on MLX vs the
+# Python subprocess); leave it opt-in so the default app stays byte-identical.
+COCORE_BUILD_NATIVE="${COCORE_BUILD_NATIVE:-0}"
+COCORE_BUILD_APNS="${COCORE_BUILD_APNS:-$APNS_DEFAULT}"
 readonly EXEC_NAME="CoCoreShell"
 readonly OUT_DIR="$SHELL_DIR/build"
 if [[ "$DEV" == "1" ]]; then
