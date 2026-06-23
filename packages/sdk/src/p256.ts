@@ -41,12 +41,20 @@ export async function verifyP256(
   const sigRaw = derToRawSignature(sigDer);
   const cryptoKey = await crypto.subtle.importKey(
     "raw",
-    prefixUncompressed(pubRaw),
+    // Copy into a plain ArrayBuffer-backed view: TS 5.7+ types the generic
+    // `Uint8Array<ArrayBufferLike>` as not assignable to WebCrypto's
+    // `BufferSource` (which wants `ArrayBuffer`). Runtime-equivalent.
+    new Uint8Array(prefixUncompressed(pubRaw)),
     { name: "ECDSA", namedCurve: "P-256" },
     false,
     ["verify"],
   );
-  return crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, cryptoKey, sigRaw, message);
+  return crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" },
+    cryptoKey,
+    new Uint8Array(sigRaw),
+    new Uint8Array(message),
+  );
 }
 
 /** Verify a receipt body's `enclaveSignature` against an attestation's
@@ -63,6 +71,30 @@ export async function verifyReceiptSignature(
   const message = new TextEncoder().encode(canonicalize(signed));
   try {
     return await verifyP256(attestationPublicKeyB64, sig, message);
+  } catch (e) {
+    if (e instanceof SignatureVerifyError) return false;
+    throw e;
+  }
+}
+
+/** Verify an attestation record's `selfSignature` against its own
+ *  `publicKey`. This is what authenticates every posture field — `cdHash`,
+ *  `getTaskAllow`, `hardenedRuntime`, `encryptionPubKey`, … — as having been
+ *  signed by the enclave key, so a verifier MUST run this before trusting any
+ *  of them. (The MDA binding only proves `publicKey` is the device's key; the
+ *  session-key signature only covers the ephemeral key. Neither covers
+ *  posture.) Strips `selfSignature` (and any `$type` lexicon framing),
+ *  canonicalises the rest, and runs WebCrypto. */
+export async function verifyAttestationSignature(
+  attestation: { selfSignature?: string } & Record<string, unknown>,
+  publicKeyB64: string,
+): Promise<boolean> {
+  const sig = attestation.selfSignature;
+  if (!sig) return false;
+  const { selfSignature: _omit, $type: _type, ...signed } = attestation as Record<string, unknown>;
+  const message = new TextEncoder().encode(canonicalize(signed));
+  try {
+    return await verifyP256(publicKeyB64, sig, message);
   } catch (e) {
     if (e instanceof SignatureVerifyError) return false;
     throw e;

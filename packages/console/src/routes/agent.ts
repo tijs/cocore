@@ -1,6 +1,6 @@
 // Serves the cocore agent installer at `/agent` so users can run:
 //
-//   curl -fsSL https://console.cocore.dev/agent | sh
+//   curl -fsSL https://cocore.dev/agent | sh
 //
 // The script (sibling file `agent-install.sh`) downloads the latest
 // macOS arm64 release from https://github.com/graze-social/cocore/releases,

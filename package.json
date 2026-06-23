@@ -2,7 +2,7 @@
   "name": "cocore",
   "version": "0.1.0",
   "private": true,
-  "description": "cocore monorepo: ATProto-native receipts of work for decentralized compute.",
+  "description": "co/core monorepo: ATProto-native receipts of work for decentralized compute.",
   "license": "MIT",
   "scripts": {
     "build": "aube run -r --if-present build",

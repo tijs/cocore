@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cocore agent installer — the curl-pipe-sh entrypoint.
 #
-# Hosted at https://console.cocore.dev/agent. v0.6.0 collapsed the
+# Hosted at https://cocore.dev/agent. v0.6.0 collapsed the
 # previous stub vs. inference variants into a single install path
 # (see the doc-comment on `release.yml` for the dyld-crash that
 # motivated it). Every install now:
@@ -22,10 +22,10 @@
 #      "your machine is registered and serving."
 #
 # Usage:
-#   curl -fsSL https://console.cocore.dev/agent | sh
+#   curl -fsSL https://cocore.dev/agent | sh
 #
 #   # skip the picker by pre-setting the env var:
-#   curl -fsSL https://console.cocore.dev/agent | \
+#   curl -fsSL https://cocore.dev/agent | \
 #     COCORE_INFERENCE_MODELS=mlx-community/Qwen2.5-3B-Instruct-4bit sh
 #
 # ## Why the script prompts before downloading
@@ -47,7 +47,7 @@
 #   COCORE_PREFIX            install prefix    (default: $HOME/.local)
 #   COCORE_RELEASE_TAG       pin a release tag (default: latest)
 #   COCORE_INSTALL_BASE      override console-side base URL
-#                            (default: https://console.cocore.dev/agent)
+#                            (default: https://cocore.dev/agent)
 #   COCORE_INFERENCE_MODELS  comma-separated HF model ids
 #                            (default: picked interactively from /dev/tty,
 #                            or the largest catalog entry that fits if
@@ -67,7 +67,7 @@
 set -euo pipefail
 
 COCORE_PREFIX="${COCORE_PREFIX:-$HOME/.local}"
-COCORE_INSTALL_BASE="${COCORE_INSTALL_BASE:-https://console.cocore.dev/agent}"
+COCORE_INSTALL_BASE="${COCORE_INSTALL_BASE:-https://cocore.dev/agent}"
 COCORE_RELEASE_TAG="${COCORE_RELEASE_TAG:-}"
 COCORE_SKIP_PICKER="${COCORE_SKIP_PICKER:-0}"
 # Capture the user's pair intent BEFORE we override
@@ -351,7 +351,7 @@ fi
 phase "pair this machine"
 note "Open the URL below in any browser signed into the cocore console."
 note "Once you approve there, this script will block until your machine"
-note "appears on console.cocore.dev/machines, then print 'done'."
+note "appears on cocore.dev/machines, then print 'done'."
 note ""
 
 # Run pair. The binary prints the URL + polls. We don't capture stdout
@@ -386,7 +386,7 @@ if [[ -f "$HOME/.cocore/session.json" ]]; then
 fi
 if [[ -z "$session_did" ]]; then
   warn "could not read DID from $HOME/.cocore/session.json; skipping registration wait."
-  note "Open console.cocore.dev/machines in a few seconds to check status."
+  note "Open cocore.dev/machines in a few seconds to check status."
   exit 0
 fi
 note "your DID: $session_did"
@@ -420,8 +420,8 @@ if (( registered == 1 )); then
   note "Model: $chosen_model"
   note "DID:   $session_did"
   note ""
-  note "  console.cocore.dev/machines  — your machines"
-  note "  console.cocore.dev/models    — the model directory"
+  note "  cocore.dev/machines  — your machines"
+  note "  cocore.dev/models    — the model directory"
   note ""
   note "Day-to-day: use the cocore icon in your menu bar (updates,"
   note "model toggles, re-pair, restart). No more terminal needed."
@@ -436,5 +436,5 @@ else
   warn "longer on first boot if the model is still downloading from HF."
   note "Watch the log to see what's happening:"
   note "  tail -f $LOG_DIR/stderr.log"
-  note "Then refresh console.cocore.dev/machines."
+  note "Then refresh cocore.dev/machines."
 fi

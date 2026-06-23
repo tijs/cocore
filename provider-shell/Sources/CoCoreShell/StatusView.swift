@@ -11,6 +11,22 @@ import SwiftUI
 struct StatusRows: View {
     @EnvironmentObject private var state: AppState
 
+    /// When provided, the Security section shows an "Enable Secure Mode…"
+    /// action (the MDM/attestation wizard). Left `nil` where there's no place
+    /// to host the wizard (e.g. the read-only standalone Status window), which
+    /// just hides the button.
+    var onEnableSecureMode: (() -> Void)? = nil
+
+    /// When provided, the Security section shows an Enable/Turn-off Confidential
+    /// toggle (writes the owner's `desiredTier`). The Bool is the desired state
+    /// (true = enable). Left `nil` to hide the control (read-only contexts).
+    var onSetConfidential: ((Bool) -> Void)? = nil
+
+    /// When provided, a "Sign in again" action shown while the agent's publish
+    /// session is dead (`state.needsReauth`). Routes to the sign-in flow. Left
+    /// `nil` in read-only contexts (the banner still warns, just no button).
+    var onReauth: (() -> Void)? = nil
+
     var body: some View {
         Section("Identity") {
             if let s = state.session {
@@ -21,6 +37,24 @@ struct StatusRows: View {
                 }
             } else {
                 Text("Not signed in.")
+            }
+        }
+        // A dead publish session is the one failure that silently freezes
+        // everything downstream — trustLevel, receipts, the machine listing —
+        // while the agent still looks like it's "Serving". Surface it loudly,
+        // above the rest, with a one-click path back to sign-in.
+        if state.needsReauth, state.session != nil {
+            Section {
+                Label(
+                    "Your co/core session expired. The agent can't publish "
+                        + "records — receipts and Secure Mode are paused until you sign in again.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+                if let onReauth {
+                    Button("Sign in again", action: onReauth)
+                }
             }
         }
         Section("Serving") {
@@ -35,9 +69,60 @@ struct StatusRows: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            LabeledContent("Trust level", value: state.trustLevel.rawValue)
+        }
+        // Two ORTHOGONAL postures, deliberately separated so neither is mistaken
+        // for the other:
+        //   • Secure Mode (attestation) — proves this is genuine Apple hardware.
+        //   • Confidential — seals inference so the operator can't read prompts.
+        Section("Security") {
+            LabeledContent("Secure Mode") {
+                Text(state.trustLevel == .hardwareAttested
+                    ? "On — hardware-attested"
+                    : "Off — self-attested (software)")
+                    .foregroundStyle(state.trustLevel == .hardwareAttested ? .green : .secondary)
+            }
+            Text(state.trustLevel == .hardwareAttested
+                ? "This Mac is enrolled and proven to be genuine Apple hardware (SIP verified)."
+                : "Proves this is genuine, untampered Apple hardware (SIP verified). Optional.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if let exp = state.attestationExpiresAt {
                 LabeledContent("Attestation expires", value: exp.formatted(.dateTime))
+            }
+            // Gated on a paired session: the wizard's MDM coordinator calls
+            // need this agent's bearer key (session.apiKey/apiBase), so there's
+            // nothing to enable until pairing completes. Mirrors the Identity
+            // section's signed-in / "Not signed in" split above.
+            // Don't offer to enable Secure Mode while the publish session is
+            // dead: the wizard would attest, then fail to publish the result
+            // (exactly the silent dead-end this guard exists to prevent). The
+            // re-auth banner above is the actionable step until it clears.
+            if state.trustLevel != .hardwareAttested, state.session != nil, !state.needsReauth,
+                let enable = onEnableSecureMode {
+                Button("Enable Secure Mode…", action: enable)
+            }
+
+            LabeledContent("Confidential tier") {
+                Text(state.confidential ? "🔒 Confidential" : "Best-effort")
+                    .foregroundStyle(state.confidential ? .green : .secondary)
+            }
+            // Whose data, and from whom: confidential seals the REQUESTOR's
+            // prompts against YOU (this Mac's operator) — not the other way
+            // round. Written from the operator's seat so "operator" isn't
+            // mistaken for some third party.
+            Text(state.confidential
+                ? "Requests run sealed inside the measured, signed agent, so not even you — this Mac's operator — can read what requestors send or receive. That unreadable-by-the-operator guarantee is what requestors get."
+                : "Requests run in a local helper process that you, this Mac's operator, could read — fine for non-sensitive work. Enable confidential to seal them so requestors get a no-snooping guarantee. The confidential engine serves Qwen2 / Qwen3 / Llama / Gemma / Phi-class models.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let setConfidential = onSetConfidential {
+                Button(state.confidential ? "Turn off confidential" : "Enable confidential…") {
+                    setConfidential(!state.confidential)
+                }
+            }
+            if let url = URL(string: "\(Endpoints.consoleURL)/docs/security") {
+                Link("Learn more about Secure Mode & Confidential", destination: url)
+                    .font(.caption)
             }
         }
         Section("Credits") {
@@ -67,7 +152,7 @@ struct StatusRows: View {
         if let p = MenuBarController.provisionStatus() {
             if p.phase == "provisioning" {
                 return p.bytesDownloaded > 0
-                    ? "Provisioning… (\(MenuBarController.provisionMB(p.bytesDownloaded)) downloaded)"
+                    ? "Provisioning… (\(MenuBarController.humanBytes(p.bytesDownloaded)) downloaded)"
                     : "Provisioning…"
             }
             if p.phase == "failed" { return "Provisioning failed" }
@@ -101,8 +186,7 @@ struct StatusView: View {
 
     private func openProfile() {
         guard let handle = state.session?.handle else { return }
-        let console = UserDefaults.standard.string(forKey: "consoleBaseUrl")
-            ?? "https://console.cocore.dev"
+        let console = Endpoints.consoleURL
         guard let url = URL(string: "\(console)/u/\(handle)") else { return }
         NSWorkspace.shared.open(url)
     }

@@ -6,9 +6,13 @@ import * as stylex from "@stylexjs/stylex";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
-import rehypeSanitize from "rehype-sanitize";
+import rehypeKatex from "rehype-katex";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import type { ReactElement } from "react";
+
+import "katex/dist/katex.min.css";
 
 import { highlightCodeQueryOptions } from "@/components/account/account.functions.ts";
 import { normalizeHighlightLang } from "@/lib/highlight-code.shared.ts";
@@ -26,6 +30,25 @@ import {
   fontWeight,
   lineHeight,
 } from "@/design-system/theme/typography.stylex";
+
+// rehype-sanitize strips KaTeX's marker classes by default. remark-math emits
+// inline/display math as `<code class="language-math math-inline|math-display">`;
+// rehype-katex needs those classes to find the math. Keep the default schema
+// (incl. its `language-*` allowance, so code highlighting still works) and add
+// the two math markers to code's className allowlist. rehype-katex then runs
+// AFTER sanitize, so KaTeX's generated markup isn't re-stripped — safe because
+// KaTeX runs with trust disabled (no raw HTML / \href injection).
+const mathSanitizeSchema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    code: (defaultSchema.attributes?.code ?? []).map((attr) =>
+      Array.isArray(attr) && attr[0] === "className"
+        ? [...attr, "math-inline", "math-display"]
+        : attr,
+    ),
+  },
+};
 
 const styles = stylex.create({
   root: {
@@ -368,8 +391,8 @@ export function ChatMarkdown({ text, streaming = false }: ChatMarkdownProps): Re
     <div {...stylex.props(styles.root)}>
       <ReactMarkdown
         components={components}
-        rehypePlugins={[rehypeSanitize]}
-        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[[rehypeSanitize, mathSanitizeSchema], rehypeKatex]}
+        remarkPlugins={[remarkGfm, remarkMath]}
       >
         {content}
       </ReactMarkdown>

@@ -21,14 +21,15 @@
 
 use crate::canonical::to_canonical_bytes;
 use crate::crypto::ProviderKeypair;
-use crate::engines::{Engine, EngineRegistry};
+use crate::engines::{DeltaChannel, Engine, EngineRegistry};
 use crate::error::{ProviderError, Result};
 use crate::hypervisor;
 use crate::pds::PdsClient;
 use crate::pricing;
 use crate::protocol::{
-    AdvisorMessage, AttestationChallenge, AttestationResponse, HealthStanding, Heartbeat,
-    InferenceChunk, InferenceComplete, InferenceKeepalive, InferenceRequest, Pong, Register,
+    AdvisorMessage, AttestationChallenge, AttestationResponse, ChunkChannel,
+    CodeAttestationResponse, HealthStanding, Heartbeat, InferenceChunk, InferenceComplete,
+    InferenceKeepalive, InferenceRequest, Pong, Register, SessionKey,
 };
 use crate::receipt::{self, Money, ReceiptInputs, StrongRef};
 use crate::secure_enclave::SigningIdentity;
@@ -109,11 +110,24 @@ impl AdvisorClient {
         // reload — compared to THIS set (not what loaded) so a model that
         // won't fit RAM doesn't look like a perpetual change.
         desired_at_start: &[String],
+        // The `desiredTier` this serve loaded against (`None` == best-effort).
+        // If the owner flips it on the console (opt in to / out of
+        // attested-confidential) we detect the change here and restart, so the
+        // supervisor re-selects the right worker binary on the next spawn (the
+        // confidential push-receiver bundle vs. the default best-effort CLI).
+        desired_tier_at_start: Option<&str>,
         // Per-model schedules + the full configured set they apply to. The
         // serve loop watches for a window boundary (a model's active state
         // flipping) and restarts to reload the new active set.
         model_schedules: &crate::schedule::ModelSchedules,
         configured_models: &[String],
+        // APNs code-identity push receiver (confidential tier; `apns` build).
+        // The process main thread runs the AppKit push host (see
+        // `push_host::run_blocking`) and forwards each received `E_K(nonce)`
+        // challenge here. `None` on non-apns builds and on headless sessions
+        // that never registered for push — the corresponding `select!` arm is
+        // then inert and the loop behaves exactly as before.
+        mut push_rx: Option<&mut mpsc::UnboundedReceiver<String>>,
     ) -> Result<()> {
         tracing::info!(url = %self.url, "connecting to advisor");
         let (ws, _resp) =
@@ -135,6 +149,11 @@ impl AdvisorClient {
         if register.machine_id.is_none() {
             register.machine_id = provider_rkey.map(str::to_string);
         }
+
+        // Our measured cdHash, captured before `register` is moved into the
+        // frame — bound into every code-attestation response (0.9.23) so the
+        // code-identity proof is tied to this specific binary.
+        let my_cd_hash: Option<String> = register.cd_hash.clone();
 
         // Register
         let payload = serde_json::to_string(&AdvisorMessage::Register(register))
@@ -310,12 +329,26 @@ impl AdvisorClient {
                 }
                 // A control re-read finished. Honour two owner changes: a
                 // stop (disconnect) and a model-set edit (restart to reload).
-                Some((next_active, desired)) = active_reads.next(), if !active_reads.is_empty() => {
+                Some((next_active, desired, desired_tier)) = active_reads.next(), if !active_reads.is_empty() => {
                     if !next_active {
                         // Owner stopped us — disconnect and let the outer loop
                         // hold us out of the registry until they start us again.
                         tracing::info!("owner stopped this machine from the console; disconnecting");
                         return Ok(());
+                    }
+                    if tier_changed(desired_tier.as_deref(), desired_tier_at_start) {
+                        // Owner changed this machine's trust tier on the console
+                        // (opted in to / out of attested-confidential). The
+                        // confidential path needs a different process shape — the
+                        // measured push-receiver bundle vs. the default CLI — which
+                        // only the supervisor can select at spawn. Exit non-zero so
+                        // launchd / the app supervisor respawns; the fresh boot reads
+                        // the new tier and the supervisor picks the right binary.
+                        tracing::info!(
+                            from = ?desired_tier_at_start, to = ?desired_tier,
+                            "owner changed this machine's trust tier from the console; restarting to re-select the worker"
+                        );
+                        std::process::exit(3);
                     }
                     if models_changed(&desired, desired_at_start) {
                         // Owner edited the model set on the website. Engines
@@ -411,6 +444,31 @@ impl AdvisorClient {
                     write.send(Message::Text(payload.into()))
                         .await
                         .map_err(|e| ProviderError::Advisor(e.to_string()))?;
+                }
+                // APNs code-identity challenge (confidential tier). The push
+                // host on the main thread forwarded an `E_K(nonce)` payload:
+                // open it with `K`, SE-sign the recovered nonce, and emit a
+                // `CodeAttestationResponse` over the existing outbound channel
+                // so the advisor can mark this measured binary `codeAttested`.
+                // Inert when `push_rx` is None (non-apns / headless).
+                Some(payload) = next_push(&mut push_rx) => {
+                    // Bind our measured cdHash (the value we registered) into the
+                    // signed code-attestation, so the proof is tied to this binary.
+                    match handle_code_challenge_payload(encryption, signer, &payload, my_cd_hash.as_deref()) {
+                        Ok(Some(resp)) => {
+                            match serde_json::to_string(&AdvisorMessage::CodeAttestationResponse(resp)) {
+                                Ok(s) => {
+                                    // Route through outbound_tx so the single
+                                    // `write` half stays uncontended.
+                                    let _ = outbound_tx.send(s);
+                                    tracing::info!("answered APNs code-identity challenge");
+                                }
+                                Err(e) => tracing::warn!(error = %e, "serialize code-attestation response failed"),
+                            }
+                        }
+                        Ok(None) => tracing::warn!("code-identity push payload was not a parseable challenge"),
+                        Err(e) => tracing::warn!(error = %e, "failed to answer code-identity challenge"),
+                    }
                 }
                 // An in-flight job finished — flush its replies. Guarded so
                 // the branch is disabled (rather than spinning on a `None`)
@@ -550,8 +608,21 @@ impl AdvisorClient {
 /// PDS. A free fn (rather than two inline `async` blocks) so both
 /// `active_reads.push` sites produce the SAME future type — `FuturesUnordered`
 /// holds one anonymous type.
-async fn read_provider_control(pds: &PdsClient, rkey: &str) -> (bool, Vec<String>) {
+async fn read_provider_control(pds: &PdsClient, rkey: &str) -> (bool, Vec<String>, Option<String>) {
     pds.get_provider_control(rkey).await
+}
+
+/// Whether two `desiredTier` values differ, normalising `None` to the
+/// best-effort default so an absent field and an explicit `"best-effort"` are
+/// the same thing (no spurious restart). A real change — e.g. the owner opting
+/// into `attested-confidential` from the console, or back out — returns true,
+/// which restarts the agent so the supervisor re-selects the right binary.
+fn tier_changed(a: Option<&str>, b: Option<&str>) -> bool {
+    let norm = |t: Option<&str>| match t {
+        Some("attested-confidential") => "attested-confidential",
+        _ => "best-effort",
+    };
+    norm(a) != norm(b)
 }
 
 /// Whether two model sets differ, ignoring order and duplicates — so a
@@ -704,7 +775,14 @@ async fn handle_inbound(text: &str, ctx: &ServeContext<'_>) -> Result<Vec<Adviso
         | AdvisorMessage::HealthNotice(_)
         | AdvisorMessage::ControlChanged(_)
         | AdvisorMessage::RecoverRequest(_)
-        | AdvisorMessage::RecoverResult(_) => {
+        | AdvisorMessage::RecoverResult(_)
+        // SessionKey is a frame the provider EMITS for the confidential tier,
+        // never one it receives.
+        | AdvisorMessage::SessionKey(_)
+        // CodeAttestationResponse is likewise provider→advisor only; the APNs
+        // challenge arrives out-of-band over the push channel (see push_host),
+        // not on this socket.
+        | AdvisorMessage::CodeAttestationResponse(_) => {
             tracing::debug!("advisor sent a message we don't act on");
             Ok(Vec::new())
         }
@@ -850,6 +928,7 @@ async fn handle_inference_request_inner(
                 AdvisorMessage::InferenceChunk(InferenceChunk {
                     session_id: session_id.clone(),
                     seq: 0,
+                    channel: ChunkChannel::Content,
                     ciphertext: err_ct,
                 }),
             );
@@ -881,19 +960,24 @@ async fn handle_inference_request_inner(
     // thread and bridge plaintext deltas back to this async task,
     // which seals each delta and forwards it to the advisor
     // immediately (live path) or collects frames for tests.
-    let (plain_tx, mut plain_rx) = mpsc::unbounded_channel::<String>();
+    let (plain_tx, mut plain_rx) = mpsc::unbounded_channel::<(DeltaChannel, String)>();
     let engine_for_blocking = engine.clone();
     let engine_handle = tokio::task::spawn_blocking(move || {
         let guard = ZeroizeOnDrop(request);
-        engine_for_blocking.generate_stream(&guard.0, &mut |delta| {
+        engine_for_blocking.generate_stream(&guard.0, &mut |channel, delta| {
             plain_tx
-                .send(delta.to_string())
+                .send((channel, delta.to_string()))
                 .map_err(|_| anyhow::anyhow!("stream bridge closed"))?;
             Ok(())
         })
     });
 
+    // The answer and the reasoning ("thinking") trace are sealed into the same
+    // ordered ciphertext stream (so outputCipherCommitment still covers every
+    // delivered byte) but accumulated separately so each gets its own plaintext
+    // commitment, and each chunk is tagged with its channel for the requester.
     let mut reply = Zeroizing::new(String::new());
+    let mut reasoning = Zeroizing::new(String::new());
     let mut all_ciphertext = Vec::new();
     let mut seq = 0u32;
 
@@ -909,8 +993,11 @@ async fn handle_inference_request_inner(
     loop {
         tokio::select! {
             maybe = plain_rx.recv() => {
-                let Some(delta) = maybe else { break };
-                reply.push_str(&delta);
+                let Some((channel, delta)) = maybe else { break };
+                match channel {
+                    DeltaChannel::Content => reply.push_str(&delta),
+                    DeltaChannel::Reasoning => reasoning.push_str(&delta),
+                }
                 let ct = match ctx
                     .encryption
                     .seal_to(&req.requester_pub_key, delta.as_bytes())
@@ -926,12 +1013,17 @@ async fn handle_inference_request_inner(
                     }
                 };
                 all_ciphertext.extend_from_slice(&ct);
+                let chunk_channel = match channel {
+                    DeltaChannel::Content => ChunkChannel::Content,
+                    DeltaChannel::Reasoning => ChunkChannel::Reasoning,
+                };
                 push_frame(
                     live_tx.as_ref(),
                     &mut collected,
                     AdvisorMessage::InferenceChunk(InferenceChunk {
                         session_id: session_id.clone(),
                         seq,
+                        channel: chunk_channel,
                         ciphertext: ct,
                     }),
                 );
@@ -982,6 +1074,7 @@ async fn handle_inference_request_inner(
                         AdvisorMessage::InferenceChunk(InferenceChunk {
                             session_id: session_id.clone(),
                             seq: 0,
+                            channel: ChunkChannel::Content,
                             ciphertext: ct,
                         }),
                     );
@@ -994,6 +1087,10 @@ async fn handle_inference_request_inner(
     let completed_at = Utc::now();
     let input_commitment = sha256_hex(&plaintext);
     let output_commitment = sha256_hex(reply.as_bytes());
+    // The reasoning trace gets its own commitment, present only when the model
+    // actually produced reasoning — keeps the answer's commitment independent
+    // of thinking output.
+    let reasoning_commitment = (!reasoning.is_empty()).then(|| sha256_hex(reasoning.as_bytes()));
     // Commit to the concatenation of every sealed chunk we handed
     // back, in order, so the requester can prove the ciphertext they
     // received matches the receipt.
@@ -1027,6 +1124,7 @@ async fn handle_inference_request_inner(
             input_commitment,
             output_commitment,
             Some(output_cipher_commitment),
+            reasoning_commitment,
             Some(params),
             started_at,
             completed_at,
@@ -1131,6 +1229,7 @@ async fn publish_stub_receipt(
     input_commitment: String,
     output_commitment: String,
     output_cipher_commitment: Option<String>,
+    reasoning_commitment: Option<String>,
     params: Option<receipt::GenerationParams>,
     started_at: chrono::DateTime<Utc>,
     completed_at: chrono::DateTime<Utc>,
@@ -1148,6 +1247,7 @@ async fn publish_stub_receipt(
         input_commitment,
         output_commitment,
         output_cipher_commitment,
+        reasoning_commitment,
         params,
         output_cipher_url: None,
         tokens_in,
@@ -1261,6 +1361,154 @@ pub fn build_challenge_response(
     })
 }
 
+/// Mint a per-request ephemeral X25519 key and SE-sign it for the confidential
+/// tier (WS-EPHEMERAL). The signature covers the canonical bytes of
+/// `{attestationCid, ephemeralPubKey, nonce}` — byte-identical to the SDK's
+/// `sessionKeyMessage` — so a confidential requester can verify (against
+/// `attestation.publicKey`) that the key it seals to is controlled by the
+/// attested enclave and was produced fresh for THIS request. Returns the
+/// ephemeral keypair (which the serve loop uses to `open_from`/`seal_to`) and
+/// the wire frame to relay to the requester.
+pub fn build_session_key(
+    signer: &dyn SigningIdentity,
+    session_id: &str,
+    attestation_cid: &str,
+    nonce: &str,
+) -> Result<(ProviderKeypair, SessionKey)> {
+    let ephemeral = ProviderKeypair::generate();
+    let ephemeral_pub = ephemeral.public_key_b64();
+    let payload = json!({
+        "attestationCid": attestation_cid,
+        "ephemeralPubKey": ephemeral_pub,
+        "nonce": nonce,
+    });
+    let canonical = to_canonical_bytes(&payload)
+        .map_err(|e| ProviderError::Advisor(format!("canonical: {e}")))?;
+    let sig = signer
+        .sign(&canonical)
+        .map_err(|e| ProviderError::Advisor(format!("sign: {e}")))?;
+    Ok((
+        ephemeral,
+        SessionKey {
+            session_id: session_id.into(),
+            ephemeral_pub_key: ephemeral_pub,
+            nonce: nonce.into(),
+            attestation_cid: attestation_cid.into(),
+            signature: sig,
+        },
+    ))
+}
+
+/// Recover an APNs code-identity challenge and produce the signed response.
+///
+/// The advisor seals a fresh nonce to the provider's X25519 key `K` with an
+/// ephemeral key (`nacl.box` / `crypto_box`) and ships `{ sealed, eph_pub }`
+/// in the push payload. Only the genuine binary can (a) receive that push at
+/// all — AMFI gates the topic to our code signature — and (b) open the
+/// envelope with `K`, which lives in this process's protected memory. We then
+/// SE-sign the recovered nonce so the advisor can tie the push receipt to the
+/// attested signing key. A failure here (wrong key, corrupt envelope, non-UTF-8
+/// nonce) is silent at the security layer: no response means no code-attested
+/// standing, which is the fail-closed default.
+pub fn recover_code_challenge(
+    encryption: &ProviderKeypair,
+    signer: &dyn SigningIdentity,
+    advisor_eph_pub_b64: &str,
+    sealed_b64: &str,
+    cd_hash: Option<&str>,
+) -> Result<CodeAttestationResponse> {
+    use base64::Engine as _;
+    let sealed = base64::engine::general_purpose::STANDARD
+        .decode(sealed_b64)
+        .map_err(|e| ProviderError::Advisor(format!("code challenge b64: {e}")))?;
+    let nonce_bytes = encryption
+        .open_from(advisor_eph_pub_b64, &sealed)
+        .map_err(|e| ProviderError::Advisor(format!("code challenge open: {e}")))?;
+    let nonce = String::from_utf8(nonce_bytes)
+        .map_err(|e| ProviderError::Advisor(format!("code challenge nonce utf8: {e}")))?;
+    build_code_attestation_response(signer, &nonce, cd_hash)
+}
+
+/// Extract the code-identity challenge from an APNs push payload (the raw JSON
+/// the push host hands us). The advisor packs the challenge under a top-level
+/// `cc` object: `{ "cc": { "epk": <b64 advisor ephemeral X25519 pub>, "n":
+/// <b64 nonce sealed to K> }, "aps": { "content-available": 1 } }`. Returns
+/// `(eph_pub_b64, sealed_b64)`, or `None` if this push isn't a code challenge.
+pub fn parse_code_challenge_payload(json_str: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let cc = v.get("cc")?;
+    let epk = cc.get("epk")?.as_str()?.to_string();
+    let n = cc.get("n")?.as_str()?.to_string();
+    Some((epk, n))
+}
+
+/// Convenience: parse an APNs payload and, if it carries a code challenge,
+/// recover the nonce and produce the signed response. `Ok(None)` means the
+/// push wasn't a code challenge (ignore it); `Err` means it was but couldn't
+/// be opened (fail-closed — no response goes out).
+/// Await the next APNs push payload from an optional receiver. When the
+/// receiver is absent (non-apns build, or a headless session that never got a
+/// push host), this future never resolves, so the `select!` arm that uses it
+/// stays permanently inert — the serve loop behaves exactly as it did before
+/// code identity existed.
+async fn next_push(rx: &mut Option<&mut mpsc::UnboundedReceiver<String>>) -> Option<String> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+pub fn handle_code_challenge_payload(
+    encryption: &ProviderKeypair,
+    signer: &dyn SigningIdentity,
+    json_str: &str,
+    cd_hash: Option<&str>,
+) -> Result<Option<CodeAttestationResponse>> {
+    match parse_code_challenge_payload(json_str) {
+        Some((epk, sealed)) => {
+            recover_code_challenge(encryption, signer, &epk, &sealed, cd_hash).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+/// Build the signed [`CodeAttestationResponse`] for an APNs code-identity
+/// challenge. `recovered_nonce` is the plaintext the agent obtained by
+/// decrypting the pushed challenge with its X25519 key `K`; we SE-sign the
+/// canonical bytes of `{ nonce }` (sorted-key, integer-only, no whitespace —
+/// the same rule `build_challenge_response` uses) so the advisor can verify
+/// the signature against the registered `attestationPubKey`. The fact that the
+/// agent could recover `recovered_nonce` at all is the load-bearing proof: the
+/// push was AMFI-gated to our code signature and sealed to `K`.
+pub fn build_code_attestation_response(
+    signer: &dyn SigningIdentity,
+    recovered_nonce: &str,
+    cd_hash: Option<&str>,
+) -> Result<CodeAttestationResponse> {
+    // 0.9.23: BIND the measured cdHash into the signed payload so the proof of
+    // code identity is tied to a specific binary, not just "answered the push".
+    // We sign over our OWN measured cdHash (the same value we put in Register);
+    // the advisor reconstructs with the cdHash we registered, so a mismatch
+    // between the registered and signed cdHash fails verification. Canonical
+    // sort-key order puts `cdHash` before `nonce`; the advisor's
+    // `canonicalize({ cdHash, nonce })` matches byte-for-byte. Falls back to
+    // `{ nonce }` only when no cdHash is available (a confidential machine
+    // always has one).
+    let payload = match cd_hash {
+        Some(cd) => json!({ "cdHash": cd, "nonce": recovered_nonce }),
+        None => json!({ "nonce": recovered_nonce }),
+    };
+    let canonical = to_canonical_bytes(&payload)
+        .map_err(|e| ProviderError::Advisor(format!("canonical: {e}")))?;
+    let sig = signer
+        .sign(&canonical)
+        .map_err(|e| ProviderError::Advisor(format!("sign: {e}")))?;
+    Ok(CodeAttestationResponse {
+        nonce: recovered_nonce.into(),
+        signature: sig,
+    })
+}
+
 /// Best-effort current SIP status. On non-macOS this is always
 /// `true` because there's no equivalent kill-switch; on macOS we
 /// optimistically return `true` because if SIP weren't enabled the
@@ -1289,9 +1537,32 @@ mod tests {
         assert!(models_changed(&[], &a(&["x"]))); // newly pinned
     }
 
+    #[test]
+    fn tier_changed_normalises_default_and_catches_opt_in_out() {
+        // Absent and explicit best-effort are the same → no restart.
+        assert!(!tier_changed(None, None));
+        assert!(!tier_changed(None, Some("best-effort")));
+        assert!(!tier_changed(Some("best-effort"), None));
+        assert!(!tier_changed(Some("best-effort"), Some("best-effort")));
+        // An unknown/garbage tier normalises to best-effort, not a restart loop.
+        assert!(!tier_changed(Some("wat"), None));
+        // Staying confidential → no restart.
+        assert!(!tier_changed(
+            Some("attested-confidential"),
+            Some("attested-confidential")
+        ));
+        // Opting in and opting back out → a real change (restart to re-select).
+        assert!(tier_changed(Some("attested-confidential"), None));
+        assert!(tier_changed(None, Some("attested-confidential")));
+        assert!(tier_changed(
+            Some("attested-confidential"),
+            Some("best-effort")
+        ));
+    }
+
     use crate::engines::stub::StubEngine;
     use crate::oauth::Session;
-    use crate::secure_enclave::load_or_create_identity;
+    use crate::secure_enclave::{identity_lock, load_or_create_identity};
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
     use p256::EncodedPoint;
@@ -1373,6 +1644,177 @@ mod tests {
         let sig = Signature::from_der(&resp.signature).unwrap();
         vk.verify(&canonical, &sig)
             .expect("challenge response must verify");
+    }
+
+    #[test]
+    fn code_attestation_response_binds_cdhash() {
+        // 0.9.23: the SE signature is over {cdHash, nonce}, BOUND to the measured
+        // binary — it must verify over those canonical bytes AND must NOT verify
+        // over {nonce} alone (proving the cdHash is actually in the signed payload).
+        let _g = identity_lock();
+        let signer = load_or_create_identity().unwrap();
+        let cd = "57bd6dfa8daf45c187249a4c70a2b6c396ab9fc0";
+        let resp = build_code_attestation_response(&*signer, "deadbeefcafe", Some(cd)).unwrap();
+        assert_eq!(resp.nonce, "deadbeefcafe");
+
+        let pub_raw = B64.decode(signer.public_key_b64()).unwrap();
+        let mut uncompressed = [0u8; 65];
+        uncompressed[0] = 0x04;
+        uncompressed[1..].copy_from_slice(&pub_raw);
+        let point = EncodedPoint::from_bytes(uncompressed).unwrap();
+        let vk = VerifyingKey::from_encoded_point(&point).unwrap();
+        let sig = Signature::from_der(&resp.signature).unwrap();
+
+        // Verifies over {cdHash, nonce} (advisor reconstructs this with the
+        // registered cdHash).
+        let bound = to_canonical_bytes(&json!({ "cdHash": cd, "nonce": resp.nonce })).unwrap();
+        vk.verify(&bound, &sig)
+            .expect("code attestation must verify over {cdHash, nonce}");
+        // Does NOT verify over {nonce} alone — the binding is real.
+        let unbound = to_canonical_bytes(&json!({ "nonce": resp.nonce })).unwrap();
+        assert!(
+            vk.verify(&unbound, &sig).is_err(),
+            "a cdHash-bound proof must not verify as nonce-only"
+        );
+        // Nor over a DIFFERENT cdHash (a fork that registers a blessed cdHash but
+        // signs its own would fail the advisor's reconstruction).
+        let other =
+            to_canonical_bytes(&json!({ "cdHash": "deadbeef", "nonce": resp.nonce })).unwrap();
+        assert!(
+            vk.verify(&other, &sig).is_err(),
+            "proof must not verify against a different cdHash"
+        );
+    }
+
+    #[test]
+    fn code_challenge_round_trip_recovers_nonce_and_signs() {
+        // Simulate the advisor exactly: seal a fresh nonce to the provider's
+        // X25519 key `K` with an ephemeral key (the E_K(nonce) the push
+        // carries), then prove the agent recovers it and signs a response that
+        // verifies against its attestation key.
+        let _g = identity_lock();
+        let signer = load_or_create_identity().unwrap();
+        let k = fresh_keypair(); // the provider's registered encryption key
+        let advisor_eph = fresh_keypair();
+        let nonce = "a1b2c3d4e5f6a7b8"; // hex nonce, like makeChallenge()
+
+        let sealed = advisor_eph
+            .seal_to(&k.public_key_b64(), nonce.as_bytes())
+            .unwrap();
+        let sealed_b64 = B64.encode(&sealed);
+
+        let cd = "abc123def456";
+        let resp = recover_code_challenge(
+            &k,
+            &*signer,
+            &advisor_eph.public_key_b64(),
+            &sealed_b64,
+            Some(cd),
+        )
+        .unwrap();
+        assert_eq!(resp.nonce, nonce);
+
+        // Signature verifies against the attestation public key over {cdHash, nonce}.
+        let canonical = to_canonical_bytes(&json!({ "cdHash": cd, "nonce": resp.nonce })).unwrap();
+        let pub_raw = B64.decode(signer.public_key_b64()).unwrap();
+        let mut uncompressed = [0u8; 65];
+        uncompressed[0] = 0x04;
+        uncompressed[1..].copy_from_slice(&pub_raw);
+        let point = EncodedPoint::from_bytes(uncompressed).unwrap();
+        let vk = VerifyingKey::from_encoded_point(&point).unwrap();
+        let sig = Signature::from_der(&resp.signature).unwrap();
+        vk.verify(&canonical, &sig).expect("response must verify");
+    }
+
+    #[test]
+    fn parse_and_handle_code_challenge_payload_end_to_end() {
+        // The full agent path: a realistic APNs payload (aps + cc) → parse →
+        // recover → signed response that verifies.
+        let _g = identity_lock();
+        let signer = load_or_create_identity().unwrap();
+        let k = fresh_keypair();
+        let advisor_eph = fresh_keypair();
+        let nonce = "00112233445566778899aabbccddeeff";
+        let sealed = advisor_eph
+            .seal_to(&k.public_key_b64(), nonce.as_bytes())
+            .unwrap();
+        let payload = json!({
+            "aps": { "content-available": 1 },
+            "cc": { "epk": advisor_eph.public_key_b64(), "n": B64.encode(&sealed) },
+        })
+        .to_string();
+
+        assert!(parse_code_challenge_payload(&payload).is_some());
+        let resp = handle_code_challenge_payload(&k, &*signer, &payload, Some("cd0011"))
+            .unwrap()
+            .expect("payload carries a code challenge");
+        assert_eq!(resp.nonce, nonce);
+
+        // A non-challenge push (plain aps) is ignored, not an error.
+        let plain = json!({ "aps": { "content-available": 1 } }).to_string();
+        assert!(parse_code_challenge_payload(&plain).is_none());
+        assert!(
+            handle_code_challenge_payload(&k, &*signer, &plain, Some("cd0011"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn code_challenge_wrong_recipient_key_fails() {
+        // A fork that doesn't hold the registered `K` cannot open the envelope,
+        // so it can never produce a response — fail-closed.
+        let _g = identity_lock();
+        let signer = load_or_create_identity().unwrap();
+        let k = fresh_keypair();
+        let not_k = fresh_keypair(); // the fork's own, different key
+        let advisor_eph = fresh_keypair();
+        let sealed = advisor_eph
+            .seal_to(&k.public_key_b64(), b"deadbeef")
+            .unwrap();
+        let sealed_b64 = B64.encode(&sealed);
+        let err = recover_code_challenge(
+            &not_k,
+            &*signer,
+            &advisor_eph.public_key_b64(),
+            &sealed_b64,
+            Some("cd00"),
+        );
+        assert!(err.is_err(), "opening with the wrong K must fail");
+    }
+
+    #[test]
+    fn session_key_signature_verifies_and_binds_inputs() {
+        // WS-EPHEMERAL: the SE signature over {attestationCid, ephemeralPubKey,
+        // nonce} must verify against the signer's public key over the SAME
+        // canonical bytes the SDK's `sessionKeyMessage` reconstructs.
+        let signer = load_or_create_identity().unwrap();
+        let (eph, sk) =
+            build_session_key(&*signer, "sess-1", "bafycid-xyz", "noncedeadbeef").unwrap();
+
+        assert_eq!(sk.session_id, "sess-1");
+        assert_eq!(sk.attestation_cid, "bafycid-xyz");
+        assert_eq!(sk.nonce, "noncedeadbeef");
+        assert_eq!(sk.ephemeral_pub_key, eph.public_key_b64());
+        // ephemeral pub is a 32-byte X25519 key.
+        assert_eq!(B64.decode(&sk.ephemeral_pub_key).unwrap().len(), 32);
+
+        let canonical = to_canonical_bytes(&json!({
+            "attestationCid": sk.attestation_cid,
+            "ephemeralPubKey": sk.ephemeral_pub_key,
+            "nonce": sk.nonce,
+        }))
+        .unwrap();
+
+        let pub_raw = B64.decode(signer.public_key_b64()).unwrap();
+        let mut uncompressed = [0u8; 65];
+        uncompressed[0] = 0x04;
+        uncompressed[1..].copy_from_slice(&pub_raw);
+        let point = EncodedPoint::from_bytes(uncompressed).unwrap();
+        let vk = VerifyingKey::from_encoded_point(&point).unwrap();
+        let sig = Signature::from_der(&sk.signature).unwrap();
+        vk.verify(&canonical, &sig)
+            .expect("session key signature must verify");
     }
 
     #[test]
@@ -1470,6 +1912,8 @@ mod tests {
             max_tokens_out: 16,
             ciphertext: ct,
             session_id: "session-1".into(),
+            nonce: None,
+            attestation_cid: None,
         };
         let replies = handle_inference_request(req, &cx).await;
         let chunks: Vec<&InferenceChunk> = replies
@@ -1521,6 +1965,8 @@ mod tests {
             // Garbage bytes — won't decrypt.
             ciphertext: vec![0u8; 64],
             session_id: "bad".into(),
+            nonce: None,
+            attestation_cid: None,
         };
         let replies = handle_inference_request(req, &cx).await;
         assert!(replies.is_empty());
@@ -1555,6 +2001,8 @@ mod tests {
             max_tokens_out: 4,
             ciphertext: ct,
             session_id: "publish-fails".into(),
+            nonce: None,
+            attestation_cid: None,
         };
         let replies = handle_inference_request(req, &cx).await;
         match replies.last() {

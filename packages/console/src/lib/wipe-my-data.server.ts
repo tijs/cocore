@@ -15,7 +15,7 @@
 //
 // What this does NOT do:
 //   * Touch the user's OAuth session (so they stay signed in to
-//     console.cocore.dev).
+//     cocore.dev).
 //   * Touch any provider's (other-DID) PDS records — only the user's
 //     own.
 //   * Talk to advisor — provider records on advisor are live wire

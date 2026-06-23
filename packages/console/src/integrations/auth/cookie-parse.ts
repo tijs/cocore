@@ -11,17 +11,35 @@ function normalizeCookieHeaderInput(value: unknown): string | undefined {
   return undefined;
 }
 
-/** Raw value for `AUTH_SESSION_TOKEN_COOKIE` from `Cookie:` header (no decoding). */
-export function readAuthSessionToken(cookieHeader: unknown): string | undefined {
+/**
+ * All raw values for `AUTH_SESSION_TOKEN_COOKIE` in the `Cookie:` header, in
+ * header order (no decoding).
+ *
+ * A browser sends multiple cookies with the same name when the same name was
+ * set under different scopes — which is exactly what happened across the
+ * host-only → `Domain=cocore.dev` cutover (commit bcf24d5): users who logged
+ * in before the change keep a stale host-only `cocore-auth.session_token`, and
+ * a later login adds a second `.cocore.dev`-scoped one. RFC 6265 sorts the
+ * older host-only cookie first, so reading only the first value resolves the
+ * stale token and looks like "logged out despite logging in." Callers should
+ * try every candidate and use the first that resolves to a live session.
+ */
+export function readAllAuthSessionTokens(cookieHeader: unknown): string[] {
   const raw = normalizeCookieHeaderInput(cookieHeader);
-  if (raw === undefined) return undefined;
+  if (raw === undefined) return [];
+  const tokens: string[] = [];
   for (const pair of raw.split("; ")) {
     const eqIdx = pair.indexOf("=");
     if (eqIdx === -1) continue;
     const name = pair.slice(0, eqIdx);
     if (name === AUTH_SESSION_TOKEN_COOKIE) {
-      return pair.slice(eqIdx + 1);
+      tokens.push(pair.slice(eqIdx + 1));
     }
   }
-  return undefined;
+  return tokens;
+}
+
+/** First raw value for `AUTH_SESSION_TOKEN_COOKIE` from `Cookie:` header (no decoding). */
+export function readAuthSessionToken(cookieHeader: unknown): string | undefined {
+  return readAllAuthSessionTokens(cookieHeader)[0];
 }

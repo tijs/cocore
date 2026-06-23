@@ -114,10 +114,33 @@ export class Exchange {
       return { kind: "resolve-failed", missing: receiptIndexed.body.attestation.uri };
     const attestation = attestationRow.body as AttestationRecord;
 
+    // H1 (0.9.23): the strong-ref'd attestation MUST be owned by the provider
+    // being paid. The receipt's repo IS the provider; without this binding a
+    // provider could point its receipt at another machine's (or a self-minted,
+    // foreign-DID) attestation to launder a tier/posture it never earned. The
+    // attestation's own selfSignature is verified inside verifyForChargeStrict;
+    // here we tie that authentic attestation to this provider's identity.
+    if (attestationRow.repo !== receiptIndexed.repo) {
+      return {
+        kind: "rejected",
+        report: {
+          ok: false,
+          findings: [
+            {
+              severity: "error",
+              code: "attestation-owner-mismatch",
+              message: `attestation ${receiptIndexed.body.attestation.uri} is owned by ${attestationRow.repo}, not the receipt provider ${receiptIndexed.repo}`,
+            },
+          ],
+        },
+      };
+    }
+
     // Strict pre-settlement verification: ES256 over the canonical
-    // receipt bytes against attestation.publicKey. A tampered or
-    // unsigned receipt is rejected before the ledger moves any
-    // tokens or a settlement record gets written.
+    // receipt bytes against attestation.publicKey, PLUS the attestation's own
+    // selfSignature (H1). A tampered or unsigned receipt — or an unauthentic
+    // attestation — is rejected before the ledger moves any tokens or a
+    // settlement record gets written.
     const report = await verifyForChargeStrict(
       {
         exchangeDid: this.cfg.exchangeDid,

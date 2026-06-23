@@ -7,5 +7,5 @@
 // step a follow-up only when the user opted out of pair via
 // COCORE_SKIP_PAIR=1.
 
-export const CLI_LINES_INSTALL = `curl -fsSL console.cocore.dev/agent | sh`;
-export const CLI_ONE_LINER_INSTALL = "curl -fsSL console.cocore.dev/agent | sh";
+export const CLI_LINES_INSTALL = `curl -fsSL cocore.dev/agent | sh`;
+export const CLI_ONE_LINER_INSTALL = "curl -fsSL cocore.dev/agent | sh";

@@ -3,6 +3,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { Effect } from "effect";
 import { z } from "zod";
 
+import { runTraced } from "@/lib/o11y.server.ts";
 import type { Machine } from "@/components/machines/machines-data.ts";
 import type {
   FleetReceiptStats,
@@ -35,6 +36,7 @@ import {
   getMyProviderRecord,
   setProviderRecordActive,
   setProviderRecordDesiredModels,
+  setProviderRecordDesiredTier,
   setProviderRecordMachineLabel,
 } from "@/lib/provider-record-pds.server.ts";
 import { authMiddleware } from "@/middleware/auth.ts";
@@ -49,6 +51,10 @@ const setProviderActiveSchema = providerRkeySchema.extend({
 
 const setProviderDesiredModelsSchema = providerRkeySchema.extend({
   models: z.array(z.string()),
+});
+
+const setProviderDesiredTierSchema = providerRkeySchema.extend({
+  tier: z.enum(["attested-confidential", "best-effort"]),
 });
 
 const setProviderMachineLabelSchema = providerRkeySchema.extend({
@@ -92,7 +98,8 @@ function emptyStats(): FleetReceiptStats {
 const listMyMachinesServerFn = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(({ context }) =>
-    Effect.runPromise(
+    runTraced(
+      "machines.listMine",
       Effect.gen(function* () {
         const fetchedAt = new Date().toISOString();
         const base = () => ({
@@ -212,7 +219,8 @@ const getMyMachineDetailServerFn = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .inputValidator(providerRkeySchema)
   .handler(({ context, data }) =>
-    Effect.runPromise(
+    runTraced(
+      "machines.getDetail",
       Effect.gen(function* () {
         const fetchedAt = new Date().toISOString();
         const did = context.did;
@@ -402,6 +410,18 @@ const setMyProviderDesiredModelsServerFn = createServerFn({ method: "POST" })
     return { ok: true as const };
   });
 
+const setMyProviderDesiredTierServerFn = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .inputValidator(setProviderDesiredTierSchema)
+  .handler(async ({ context, data }) => {
+    // Opt this machine into (or out of) confidential — owner INTENT only. The
+    // agent reconciles toward it and publishes the higher achieved tier only
+    // once earned; opting out reverts the machine to exactly its prior behavior.
+    await setProviderRecordDesiredTier(context.oauthSession, data.rkey, data.tier);
+    await nudgeAdvisorControl(context.did);
+    return { ok: true as const };
+  });
+
 const setMyProviderMachineLabelServerFn = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .inputValidator(setProviderMachineLabelSchema)
@@ -450,6 +470,13 @@ export const setMyProviderActiveMutationOptions = mutationOptions({
 export const setMyProviderDesiredModelsMutationOptions = mutationOptions({
   mutationFn: (variables: SetMyProviderDesiredModelsInput) =>
     setMyProviderDesiredModelsServerFn({ data: variables }),
+});
+
+export type SetMyProviderDesiredTierInput = z.infer<typeof setProviderDesiredTierSchema>;
+
+export const setMyProviderDesiredTierMutationOptions = mutationOptions({
+  mutationFn: (variables: SetMyProviderDesiredTierInput) =>
+    setMyProviderDesiredTierServerFn({ data: variables }),
 });
 
 export const setMyProviderMachineLabelMutationOptions = mutationOptions({

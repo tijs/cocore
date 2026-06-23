@@ -1,0 +1,47 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.inference.submit",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Submit an inference request for the authenticated requester. Builds a (paymentAuthorization, job) pair scoped to the configured exchange, publishes both to the requester's PDS, and returns the job/authorization URIs so the caller can poll for a receipt via `dev.cocore.inference.status`.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["model", "prompt", "maxTokensOut", "priceCeiling"],
+          "properties": {
+            "model": { "type": "string", "minLength": 1, "description": "Opaque model identifier honored by the provider." },
+            "prompt": { "type": "string", "minLength": 1 },
+            "maxTokensOut": { "type": "integer", "minimum": 1 },
+            "priceCeiling": {
+              "type": "object",
+              "required": ["amount", "currency"],
+              "description": "Maximum the requester will pay. Integer minor units plus an ISO 4217 / XBT-style currency code.",
+              "properties": {
+                "amount": { "type": "integer", "minimum": 0 },
+                "currency": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["jobUri", "authUri", "inputCommitment"],
+          "properties": {
+            "jobUri": { "type": "string", "format": "at-uri" },
+            "authUri": { "type": "string", "format": "at-uri" },
+            "inputCommitment": { "type": "string", "description": "SHA-256 (lowercase hex) over the input bytes." }
+          }
+        }
+      },
+      "errors": [
+        { "name": "AuthRequired", "description": "The caller is not authenticated." },
+        { "name": "InvalidRequest", "description": "The body failed validation." }
+      ]
+    }
+  }
+}

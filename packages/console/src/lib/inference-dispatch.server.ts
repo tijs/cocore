@@ -23,7 +23,12 @@ import { submitJob } from "@cocore/sdk/publish";
 import { Effect } from "effect";
 import nacl from "tweetnacl";
 
+import {
+  AppviewForwardTransport,
+  isAppviewForwardConfigured,
+} from "@/lib/appview-pds-forward.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { PdsPublishTransport } from "@/lib/pds-publish.server.ts";
 import { appviewGetProfileEffect } from "@/integrations/appview/appview.server.ts";
 
@@ -173,7 +178,7 @@ export type DispatchEvent =
       providerDid: string;
       sessionId: string;
     }
-  | { kind: "chunk"; seq: number; text: string }
+  | { kind: "chunk"; seq: number; channel: "content" | "reasoning"; text: string }
   | {
       kind: "complete";
       tokensIn: number;
@@ -209,7 +214,10 @@ async function resolveProviderCredit(
   // Authoritative: the label of the machine we routed to.
   let machineLabel = machine.machineLabel?.trim() || null;
   try {
-    const result = await Effect.runPromise(Effect.either(appviewGetProfileEffect(did)));
+    const result = await runTraced(
+      "appview.getProfile",
+      Effect.either(appviewGetProfileEffect(did)),
+    );
     if (result._tag === "Right" && result.right) {
       handle = result.right.handle;
       displayName = result.right.displayName;
@@ -485,10 +493,17 @@ export async function* runDispatch(input: DispatchInputs): AsyncGenerator<Dispat
   //    mirror to the AppView indexer so dashboards see it.
   let submitted;
   try {
-    const transport = new PdsPublishTransport({
-      session: input.oauthSession,
-      bridgeUrl: config.bridgeUrl,
-    });
+    // Forward writes to the AppView when configured (so the AppView owns
+    // the session + its single-writer refresh); otherwise publish via the
+    // console's own OAuth session (legacy). Gated identically to the
+    // /api/pds path so both flip together — flipping only one would leave
+    // two processes refreshing the same session.
+    const transport = isAppviewForwardConfigured()
+      ? new AppviewForwardTransport()
+      : new PdsPublishTransport({
+          session: input.oauthSession,
+          bridgeUrl: config.bridgeUrl,
+        });
     submitted = await submitJob({
       transport,
       requesterDid: input.did,
@@ -671,7 +686,11 @@ export async function* runDispatch(input: DispatchInputs): AsyncGenerator<Dispat
     for await (const ev of readSse(advisorBody)) {
       if (ev.event === "open") continue;
       if (ev.event === "chunk") {
-        let parsed: { seq: number; ciphertext: number[] | string };
+        let parsed: {
+          seq: number;
+          channel?: "content" | "reasoning";
+          ciphertext: number[] | string;
+        };
         try {
           parsed = JSON.parse(ev.data);
         } catch {
@@ -690,7 +709,12 @@ export async function* runDispatch(input: DispatchInputs): AsyncGenerator<Dispat
           };
           continue;
         }
-        yield { kind: "chunk", seq: parsed.seq, text: new TextDecoder().decode(opened) };
+        yield {
+          kind: "chunk",
+          seq: parsed.seq,
+          channel: parsed.channel ?? "content",
+          text: new TextDecoder().decode(opened),
+        };
         continue;
       }
       if (ev.event === "complete") {

@@ -34,21 +34,34 @@ on:
       tag:
         description: "Tag to release (must already exist; e.g. v0.6.0)"
         required: true
+      native:
+        description: "Secure/native build (--features native_mlx; confidential tier). Needs the Metal toolchain."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   build-mac-arm64:
-    runs-on: macos-14
+    # macos-26 (Tahoe), not macos-14: SwiftUI keys its appearance to the SDK
+    # the app is LINKED against, so a pre-26-SDK binary ships the legacy
+    # grouped-Form chrome even on macOS 26. macos-26 also carries the full
+    # Xcode / Metal toolchain the native_mlx path needs.
+    runs-on: macos-26
     steps:
-      - name: Resolve tag
+      - name: Resolve tag + build mode
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            # Secure/native is opt-in via the dispatch checkbox. A plain
+            # tag push always takes the default (non-native) path so normal
+            # releases keep shipping even without the Metal toolchain.
+            echo "native=${{ inputs.native }}" >> "$GITHUB_OUTPUT"
           else
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "native=false" >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/checkout@v4
         with:
@@ -70,9 +83,21 @@ jobs:
         # No --features inference (the flag is gone in v0.6.0).
         # No PYO3_PYTHON env, no brew python install — none of that
         # is needed now that we don't link libpython.
+        #
+        # Secure/native release (steps.tag.outputs.native == true): add
+        # --features native_mlx so the binary carries the in-process MLX
+        # engine (confidential tier). build.rs runs `swift build` of the
+        # CoCoreMLX engine, which needs the Metal toolchain — present on the
+        # macos-26 image (full Xcode). The default path omits the feature.
         run: |
           cd provider
-          cargo build --release --locked --target aarch64-apple-darwin
+          FEATURES=()
+          if [ "${{ steps.tag.outputs.native }}" = "true" ]; then
+            echo "::notice::SECURE/native release: building with --features native_mlx"
+            xcodebuild -version || { echo "::error::Metal toolchain (full Xcode) required for native_mlx"; exit 1; }
+            FEATURES=(--features native_mlx)
+          fi
+          cargo build --release --locked --target aarch64-apple-darwin "${FEATURES[@]}"
       - name: Verify the binary has no Python linkage
         # Belt-and-suspenders: if a future commit accidentally adds
         # PyO3 back, otool -L will show a libpython load command and
@@ -99,6 +124,68 @@ jobs:
           cp scripts/bootstrap-python-venv.sh                      "$STAGE/scripts/"
           cp scripts/install-from-tarball.sh                       "$STAGE/install.sh"
           chmod 755 "$STAGE/install.sh" "$STAGE/scripts/bootstrap-python-venv.sh"
+          # Secure/native build: colocate the in-process MLX engine next to the
+          # binary so its @executable_path rpath resolves and MLX can find the
+          # metallib (mirrors scripts/build-mac-app.sh).
+          if [ "${{ steps.tag.outputs.native }}" = "true" ]; then
+            MLX_DIR="provider/mlx-engine/.build/release"
+            DYLIB="$MLX_DIR/libCoCoreMLX.dylib"
+            [ -f "$DYLIB" ] || { echo "::error::native build but $DYLIB missing"; exit 1; }
+            cp "$DYLIB" "$STAGE/bin/libCoCoreMLX.dylib"
+            # The metallib (GPU kernels) is NOT emitted by `swift build` —
+            # mlx-swift excludes the kernels (PrepareMetalShaders); only
+            # `xcodebuild` compiles them into Cmlx's default.metallib. Build the
+            # engine via xcodebuild purely to obtain it, then colocate it as
+            # mlx.metallib (MLX's first-choice load path) — precompiled + signed,
+            # no runtime JIT. Mirrors scripts/build-mac-app.sh.
+            ( cd provider/mlx-engine && xcodebuild -scheme CoCoreMLX \
+                -destination 'platform=macOS,arch=arm64' -configuration Release \
+                -derivedDataPath .xcbuild-metallib build >/dev/null ) \
+              || { echo "::error::metallib compile (xcodebuild) failed"; exit 1; }
+            METALLIB="$(find provider/mlx-engine/.xcbuild-metallib -path '*Cmlx*' -name 'default.metallib' -print -quit)"
+            [ -n "$METALLIB" ] || { echo "::error::native build but xcodebuild produced no default.metallib"; exit 1; }
+            cp "$METALLIB" "$STAGE/bin/mlx.metallib"
+            echo "staged native engine: libCoCoreMLX.dylib + mlx.metallib"
+          fi
+      - name: Extract + publish cdHash (secure/native release only)
+        # The confidential tier trusts a build by its code-signing cdHash. We
+        # extract it from the STAGED binary (with the engine artifacts beside
+        # it, so metallibHash/engineLibHash resolve) and publish it as the
+        # cdhash.json release asset, then surface it in the run summary so an
+        # operator can copy it into COCORE_KNOWN_GOOD_CDHASHES.
+        #
+        # NOTE: this CI does not hold Developer ID / notarization secrets, so we
+        # ad-hoc sign here purely to PRODUCE a cdHash. An ad-hoc cdHash is NOT a
+        # distributable confidential build (no teamId, no library validation):
+        # a real secure release must be Developer-ID signed + notarized
+        # (scripts/build-mac-app.sh + scripts/notarize-mac-app.sh) and its
+        # cdHash extracted from THAT signed binary. The summary flags this.
+        if: steps.tag.outputs.native == 'true'
+        run: |
+          STAGE="dist/cocore-mac-arm64"
+          BIN="$STAGE/bin/cocore"
+          # Ad-hoc sign so a CodeDirectory (and thus a cdHash) exists. --options
+          # runtime,library so the posture flags are present in the extract.
+          codesign --force --options runtime,library --sign - "$BIN"
+          bash scripts/extract-cdhash.sh "$BIN" "$STAGE/bin" | tee dist/cdhash.json
+          CDHASH="$(sed -n 's/.*"cdHash"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' dist/cdhash.json | head -1)"
+          {
+            echo "## Secure/native release — cdHash"
+            echo ""
+            echo "Register this in the advisor BEFORE/with the release or the confidential tier downgrades to best-effort:"
+            echo ""
+            echo '```'
+            echo "COCORE_KNOWN_GOOD_CDHASHES += $CDHASH"
+            echo '```'
+            echo ""
+            echo "Run: \`./scripts/register-known-good.sh dist/cdhash.json\` (see docs/secure-release.md)."
+            echo ""
+            echo "> ⚠️ This CI cdHash is **ad-hoc signed**. A distributable confidential build must be Developer-ID signed + notarized; extract its cdHash from that signed binary."
+            echo ""
+            echo '```json'
+            cat dist/cdhash.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Tar
         run: |
           ARTIFACT="cocore-mac-arm64"
@@ -114,6 +201,10 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
+          # cdhash.json is produced only on the secure/native path. The action
+          # tolerates the glob matching nothing on a default release (it does
+          # not fail on unmatched files by default).
           files: |
             dist/cocore-mac-arm64.tar.gz
             dist/cocore-mac-arm64.tar.gz.sha256
+            dist/cdhash.json

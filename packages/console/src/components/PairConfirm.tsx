@@ -1,7 +1,6 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { Button } from "@/design-system/button";
@@ -9,7 +8,6 @@ import { Flex } from "@/design-system/flex";
 import { TextField } from "@/design-system/text-field";
 import { fontFamily } from "@/design-system/theme/typography.stylex";
 import { Body } from "@/design-system/typography";
-import { getProviderSessionForPairingQueryOptions } from "@/integrations/auth/session.functions.ts";
 
 const styles = stylex.create({
   codeInput: {
@@ -27,7 +25,6 @@ interface Props {
 type Status = "idle" | "approving" | "approved" | "denying" | "denied" | "error";
 
 export function PairConfirm({ initialCode }: Props) {
-  const queryClient = useQueryClient();
   const [code, setCode] = useState(initialCode);
   const [status, setStatus] = useState<Status>("idle");
   const [errMsg, setErrMsg] = useState<string | null>(null);
@@ -36,14 +33,12 @@ export function PairConfirm({ initialCode }: Props) {
     setStatus("approving");
     setErrMsg(null);
     try {
-      const session = await queryClient.fetchQuery(getProviderSessionForPairingQueryOptions);
-      if (!session) {
-        throw new Error("not signed in (or OAuth session not in store)");
-      }
+      // The session (scoped API key) is minted server-side on approve; the
+      // browser only asserts the user_code + decision.
       const res = await fetch("/api/xrpc/dev.cocore.devicePair.confirm", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ userCode: code, decision: "approve", session }),
+        body: JSON.stringify({ userCode: code, decision: "approve" }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));

@@ -1,0 +1,22 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.compute.latency",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Network latency rollup derived purely from indexed receipts' signed `startedAt`/`completedAt` pairs — the last ≤100 per group (overall, per-provider, per-model). No side metrics store: the receipts are the source of truth, so the numbers cannot drift from them.",
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "description": "Latency overview, grouped overall and by provider and model. Each group reports a sample size and summary statistics (e.g. p50/p95) over the receipts' start→complete durations.",
+          "properties": {
+            "overall": { "type": "unknown" },
+            "byProvider": { "type": "unknown" },
+            "byModel": { "type": "unknown" }
+          }
+        }
+      }
+    }
+  }
+}

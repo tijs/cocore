@@ -1,0 +1,35 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.compute.verifySettlement",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Verify an indexed settlement against its receipt and the requester's payment authorization: confirms the settlement chain is internally consistent and signed by the settling repo. Returns the verification verdict plus any findings.",
+      "parameters": {
+        "type": "params",
+        "required": ["uri"],
+        "properties": {
+          "uri": { "type": "string", "format": "at-uri", "description": "The settlement record URI to verify." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ok", "findings"],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "findings": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "dev.cocore.defs#verifyFinding" }
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest", "description": "The `uri` parameter is missing." },
+        { "name": "NotFound", "description": "The settlement, or its referenced receipt/authorization, is not indexed." }
+      ]
+    }
+  }
+}

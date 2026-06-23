@@ -133,9 +133,36 @@ fn list() -> Result<()> {
         println!(
             "No models configured (COCORE_INFERENCE_MODELS empty or unset). The agent will load only the stub engine."
         );
-    } else {
-        for m in current {
-            println!("{m}");
+        return Ok(());
+    }
+    for m in &current {
+        println!("{m}");
+    }
+    // Resource-budget summary — the CLI mirror of the tray meter, derived
+    // from the same pricing::budget_report so the green/yellow/red verdict
+    // is identical everywhere.
+    let ram_gb = system_profile::collect().ram_gb;
+    if ram_gb > 0 {
+        let report = pricing::budget_report(&current, ram_gb);
+        println!(
+            "\nPinned ~{}GB · reserved for you ~{}GB · this Mac {}GB",
+            report.used_gb, report.reserve_gb, report.total_gb
+        );
+        match report.status {
+            pricing::BudgetStatus::Comfortable => {
+                println!("OK: comfortable — plenty of headroom for your own apps.");
+            }
+            pricing::BudgetStatus::Tight => {
+                println!(
+                    "WARN: tight — these fit, but leave little for you; this Mac may get sluggish while you work. Drop one or stagger their hours."
+                );
+            }
+            pricing::BudgetStatus::Oversubscribed => {
+                println!(
+                    "WARN: oversubscribed — the agent will drop the largest to fit at startup: {}",
+                    report.dropped.join(", ")
+                );
+            }
         }
     }
     Ok(())
@@ -371,7 +398,7 @@ fn check_model_addable(model: &str, venv_present: bool) -> Result<()> {
          can't load `{model}` and will publish supportedModels=[\"stub\"].\n\
          \n\
          Provision the venv with:\n  \
-         curl -fsSL console.cocore.dev/agent | sh\n\
+         curl -fsSL cocore.dev/agent | sh\n\
          \n\
          (Re-running the installer is idempotent — it won't redo work\n\
          that's already done.)"
@@ -649,7 +676,7 @@ fn report_outcomes(outcomes: &[(String, LoadOutcome)], log_path: &Path) {
              \x20     Check {} for the python traceback.\n\n\
              \x20     Common causes:\n\
              \x20       * Python venv at ~/.cocore/python is broken — reinstall via\n\
-             \x20         `curl -fsSL console.cocore.dev/agent/inference | sh`\n\
+             \x20         `curl -fsSL cocore.dev/agent/inference | sh`\n\
              \x20       * Model id is wrong or not on HuggingFace\n\
              \x20       * Out-of-memory during load (check Activity Monitor)\n\n\
              \x20     The plist was still updated; if you fix the underlying issue,\n\
@@ -882,7 +909,7 @@ mod tests {
             "error must point at the missing venv path: {msg}"
         );
         assert!(
-            msg.contains("console.cocore.dev/agent"),
+            msg.contains("cocore.dev/agent"),
             "error must give the recovery one-liner: {msg}"
         );
     }

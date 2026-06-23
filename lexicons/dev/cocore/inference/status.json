@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.inference.status",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Poll for the outcome of a submitted job. Returns `pending` until a matching receipt is indexed, `received` once the receipt lands, and `settled` once a settlement also lands. Receipt and settlement are returned as indexed records when present.",
+      "parameters": {
+        "type": "params",
+        "required": ["jobUri"],
+        "properties": {
+          "jobUri": { "type": "string", "format": "at-uri", "description": "The job record URI returned by `dev.cocore.inference.submit`." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "string", "enum": ["pending", "received", "settled"] },
+            "receipt": { "type": "ref", "ref": "dev.cocore.defs#indexedRecord" },
+            "settlement": { "type": "ref", "ref": "dev.cocore.defs#indexedRecord" }
+          }
+        }
+      },
+      "errors": [
+        { "name": "AuthRequired", "description": "The caller is not authenticated." },
+        { "name": "InvalidRequest", "description": "The `jobUri` parameter is missing." }
+      ]
+    }
+  }
+}

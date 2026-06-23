@@ -17,6 +17,7 @@ import {
   CardTitle,
 } from "@/design-system/card";
 import { CopyToClipboardButton } from "@/design-system/copy-to-clipboard-button";
+import { TrustTierBadge } from "@/components/TrustTierBadge.tsx";
 import {
   Dialog,
   DialogBody,
@@ -1115,7 +1116,7 @@ function PairMachineDialogContent({
     <>
       <DialogHeader>Add a machine</DialogHeader>
       <DialogDescription>
-        Download the cocore app, drag it to Applications, and open it — it walks you through
+        Download the co/core app, drag it to Applications, and open it — it walks you through
         sign-in, picking a model, and serving. No terminal needed.
       </DialogDescription>
       <DialogBody>
@@ -2141,6 +2142,7 @@ export function MachinesDashboard() {
                                 <Text size="xs" style={ui.textDim}>
                                   {m.id}
                                 </Text>
+                                {m.verifiedTier ? <TrustTierBadge tier={m.verifiedTier} /> : null}
                               </Flex>
                             </TableCell>
                           );

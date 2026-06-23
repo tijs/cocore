@@ -1,8 +1,8 @@
 [package]
 name = "cocore-provider"
-version = "0.9.17"
+version = "0.9.27"
 edition = "2021"
-description = "cocore provider agent: runs hardened compute and publishes signed receipts to AT Protocol."
+description = "co/core provider agent: runs hardened compute and publishes signed receipts to AT Protocol."
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -29,6 +29,24 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Rolling, non-blocking file log under ~/.cocore/logs so a crash leaves a
 # durable, content-safe trail instead of an NSLog line that ages out.
 tracing-appender = "0.2"
+
+# OTLP export bridge for the existing `tracing` spans/events. Wired into
+# the subscriber registry in `diagnostics.rs` ONLY when
+# `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so the default build behaves
+# exactly as before (stderr + rolling file). OTLP/HTTP-protobuf over the
+# blocking reqwest client so export needs no async reactor of its own and
+# reuses the rustls posture above (no native-tls, no tonic/grpc). Honeycomb
+# is OTLP-native: point the endpoint at api.honeycomb.io and pass the team
+# key via OTEL_EXPORTER_OTLP_HEADERS — no Honeycomb-specific code here.
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "http-proto",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+    "trace",
+] }
+tracing-opentelemetry = "0.33"
 
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
@@ -66,6 +84,10 @@ x509-parser = { version = "0.16", features = ["verify"] }
 asn1-rs = "0.6"
 oid-registry = "0.7"
 
+# CBOR — decode the Apple App Attest attestation object (a CBOR map of
+# fmt / attStmt(x5c, receipt) / authData). Used by `appattest.rs`.
+ciborium = "0.2"
+
 # POSIX / libc — used for PT_DENY_ATTACH and rlimit calls on macOS
 libc = "0.2"
 
@@ -83,6 +105,18 @@ default = []
 # Links the macOS-only Secure Enclave Swift framework. Without this,
 # the agent uses a software P-256 fallback (still self-attested).
 secure_enclave = []
+# WS-ENGINE: native in-process MLX inference engine. Off by default so the
+# Linux/CI build (and any host without the Metal toolchain) stays green. The
+# scaffold compiles without mlx-rs; wiring the actual MLX calls requires a
+# full-Xcode build host (the Metal shader compiler) — see
+# provider/spikes/SPIKE_RESULTS.md (S1/S2). When enabled, the engine reports
+# in_process=true and pins the precompiled signed mlx.metallib hash.
+native_mlx = []
+# APNs code-identity push host (confidential tier). Implies native_mlx because
+# the measured binary that receives the push is the same one that runs
+# in-process inference and holds K. macOS-only at the code level (the module is
+# additionally cfg(target_os = "macos")). Off by default so Linux/CI stays green.
+apns = ["native_mlx"]
 
 [dev-dependencies]
 tempfile = "3"

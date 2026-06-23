@@ -31,6 +31,7 @@ import {
   verticalSpace,
 } from "@/design-system/theme/semantic-spacing.stylex";
 import { Body, Heading1, Heading4, InlineCode } from "@/design-system/typography";
+import { enforceCanonicalConsoleHost } from "@/lib/legacy-host-redirect.ts";
 import { unauthMiddleware } from "@/middleware/auth.ts";
 import { Text } from "@/design-system/typography/text";
 import { type SavedHandle, saveHandle } from "@/utils/saved-handles.ts";
@@ -148,6 +149,9 @@ interface SavedHandleEntry extends SavedHandle {
 
 export const Route = createFileRoute("/login")({
   validateSearch: searchSchema,
+  beforeLoad: async () => {
+    await enforceCanonicalConsoleHost();
+  },
   server: {
     middleware: [unauthMiddleware],
   },
@@ -306,7 +310,7 @@ function AuthPage() {
                       alt={saved.handle}
                       fallback={saved.handle[0]?.toUpperCase() ?? "?"}
                     />
-                    <Text size="base" style={styles.savedHandleText} leading="none">
+                    <Text size="base" style={styles.savedHandleText} leading="base">
                       {saved.handle}
                     </Text>
                     <ChevronRight {...stylex.props(styles.savedHandleIcon)} />

@@ -1,0 +1,42 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.compute.modelActivity",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Aggregate receipt activity per model and per time window. Walks the most-recent indexed receipts (capped at 5000), groups by `body.model`, and tallies requests + tokens across the hour/day/week/month windows, with per-provider breakdowns.",
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["generatedAt", "models"],
+          "properties": {
+            "generatedAt": { "type": "string", "format": "datetime" },
+            "models": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["modelId", "totals", "byProvider"],
+                "properties": {
+                  "modelId": { "type": "string" },
+                  "totals": { "type": "ref", "ref": "dev.cocore.defs#activityWindows" },
+                  "byProvider": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["did", "stats"],
+                      "properties": {
+                        "did": { "type": "string", "format": "did" },
+                        "stats": { "type": "ref", "ref": "dev.cocore.defs#activityWindows" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

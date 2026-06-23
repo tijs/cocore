@@ -17,7 +17,11 @@
 import { canonicalize } from "@cocore/sdk/canonical";
 import { verifyP256 } from "@cocore/sdk/p256";
 
-import type { AttestationChallenge, AttestationResponse } from "./protocol.ts";
+import type {
+  AttestationChallenge,
+  AttestationResponse,
+  CodeAttestationResponse,
+} from "./protocol.ts";
 import { bytesToBase64 } from "./protocol.ts";
 
 /** Build a fresh challenge with a random nonce + current UTC. */
@@ -32,6 +36,52 @@ export function makeChallenge(now = new Date()): AttestationChallenge {
     nonce,
     timestamp: rfc3339Seconds(now),
   };
+}
+
+/** A fresh random hex nonce for an APNs code-identity challenge. The advisor
+ *  seals this to the provider's X25519 key and pushes it; the provider proves
+ *  code identity by recovering and signing it. */
+export function makeCodeNonce(): string {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return Array.from(b)
+    .map((x) => x.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Reconstruct the canonical bytes the provider SE-signed for a code-identity
+ *  challenge — byte-identical to the provider's `build_code_attestation_response`.
+ *  When `cdHash` is provided (0.9.23+), it is BOUND into the signed payload as
+ *  `canonicalize({ cdHash, nonce })`, so the proof of code identity is tied to a
+ *  specific measured binary rather than just "answered the push". The advisor
+ *  reconstructs with the provider's REGISTERED cdHash, so a provider that
+ *  registers cdHash X but signs over a different one fails to verify. Falls back
+ *  to `canonicalize({ nonce })` when no cdHash is available (legacy/degenerate). */
+export function codeSignedPayloadFor(nonce: string, cdHash?: string): Uint8Array {
+  const payload = cdHash ? { cdHash, nonce } : { nonce };
+  return new TextEncoder().encode(canonicalize(payload));
+}
+
+/** Verify a CodeAttestationResponse signature against the provider's P-256
+ *  attestation public key. The recovered nonce must equal `expectedNonce`
+ *  (caller checks freshness) and the SE signature must verify over the canonical
+ *  payload — `{ cdHash, nonce }` when `cdHash` is given (0.9.23+), binding the
+ *  proof to the registered measurement. Resolves false on any shape/verify
+ *  error. */
+export async function verifyCodeAttestation(
+  resp: CodeAttestationResponse,
+  expectedNonce: string,
+  attestationPubKeyB64: string,
+  cdHash?: string,
+): Promise<boolean> {
+  if (resp.nonce !== expectedNonce) return false;
+  const sigDerB64 = bytesToBase64(resp.signature);
+  const message = codeSignedPayloadFor(resp.nonce, cdHash);
+  try {
+    return await verifyP256(attestationPubKeyB64, sigDerB64, message);
+  } catch {
+    return false;
+  }
 }
 
 /** Reconstruct the canonical bytes the provider signed. */

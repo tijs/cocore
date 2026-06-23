@@ -46,6 +46,11 @@ pub struct ModelRate {
     /// receipts. Keep it under ~60 chars so it lines up in the
     /// terminal menu and doesn't wrap in the web Select item.
     pub description: &'static str,
+    /// True for the current "latest & greatest" rotation — the set the
+    /// Secure Mode upgrade urges providers to pin. The older entries stay
+    /// in the catalog (so a machine that already pinned one keeps its RAM
+    /// floor + price) but are NOT recommended. UX-only; never on the wire.
+    pub recommended: bool,
 }
 
 /// Catalog of every model cocore knows about. `supportedModels` on
@@ -64,34 +69,125 @@ pub const RATES: &[ModelRate] = &[
         currency: "CC",
         min_ram_gb: 0,
         description: "echo-only smoke-test target; not a real model",
+        recommended: false,
     },
-    // Tiniest credible MLX model; 4-bit Qwen2.5-0.5B fits in any
-    // Apple Silicon Mac (~0.4GB resident).
+    // ---- Current rotation (recommended) -------------------------------
+    // The "latest & greatest" set the Secure Mode upgrade urges providers
+    // to pin. min_ram_gb is the conservative MINIMUM machine RAM (4-bit
+    // weights resident + OS + KV headroom). MoE entries (Axx suffix /
+    // NxE experts) keep ALL experts resident, so memory tracks total
+    // params, not active params.
+    ModelRate {
+        model_id: "mlx-community/Qwen3.5-0.8B-MLX-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 4,
+        description: "Qwen3.5 0.8B — fast, low quality; fits any Apple Silicon",
+        recommended: true,
+    },
+    ModelRate {
+        model_id: "mlx-community/Qwen3.5-2B-MLX-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 6,
+        description: "Qwen3.5 2B — small but coherent; good on 8GB",
+        recommended: true,
+    },
+    ModelRate {
+        model_id: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 8,
+        description: "Qwen3.5 4B — balanced default for 8GB+ Macs",
+        recommended: true,
+    },
+    ModelRate {
+        model_id: "mlx-community/gemma-4-e4b-it-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 8,
+        description: "Gemma 4 E4B — efficient multimodal-class; 8GB+",
+        recommended: true,
+    },
+    ModelRate {
+        model_id: "mlx-community/Qwen3.5-9B-MLX-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 16,
+        description: "Qwen3.5 9B — strong general-purpose; 16GB+ recommended",
+        recommended: true,
+    },
+    ModelRate {
+        model_id: "mlx-community/Qwen3.6-27B-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 24,
+        description: "Qwen3.6 27B — frontier-class dense; 24GB+",
+        recommended: true,
+    },
+    ModelRate {
+        model_id: "mlx-community/Qwen3.6-35B-A3B-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 32,
+        description: "Qwen3.6 35B-A3B MoE — fast for its size; 32GB+",
+        recommended: true,
+    },
+    ModelRate {
+        model_id: "mlx-community/Llama-4-Scout-17B-16E-Instruct-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 64,
+        description: "Llama 4 Scout 17B×16E MoE — heavyweight; 64GB+",
+        recommended: true,
+    },
+    ModelRate {
+        model_id: "mlx-community/Qwen3.5-122B-A10B-4bit",
+        input_per_mtok: 1_000_000,
+        output_per_mtok: 1_000_000,
+        currency: "CC",
+        min_ram_gb: 96,
+        description: "Qwen3.5 122B-A10B MoE — flagship; 96GB+ Mac Studio/Ultra",
+        recommended: true,
+    },
+    // ---- Legacy catalog (still servable; not recommended) -------------
+    // Kept so a machine that already pinned one of these keeps its RAM
+    // floor + price entry. The Secure Mode dialog nudges providers off
+    // these and onto the rotation above.
     ModelRate {
         model_id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         input_per_mtok: 1_000_000,
         output_per_mtok: 1_000_000,
         currency: "CC",
         min_ram_gb: 4,
-        description: "Qwen 0.5B — fast, low quality; fits any Apple Silicon",
+        description: "Qwen 0.5B (legacy) — fast, low quality",
+        recommended: false,
     },
-    // 3B 4-bit. Tight but viable on 8GB; comfortable on 16GB+.
     ModelRate {
         model_id: "mlx-community/Qwen2.5-3B-Instruct-4bit",
         input_per_mtok: 1_000_000,
         output_per_mtok: 1_000_000,
         currency: "CC",
         min_ram_gb: 8,
-        description: "Qwen 3B — small but coherent; tight on 8GB",
+        description: "Qwen 3B (legacy) — small but coherent",
+        recommended: false,
     },
-    // 7B 4-bit. Wants 16GB+ headroom.
     ModelRate {
         model_id: "mlx-community/Qwen2.5-7B-Instruct-4bit",
         input_per_mtok: 1_000_000,
         output_per_mtok: 1_000_000,
         currency: "CC",
         min_ram_gb: 16,
-        description: "Qwen 7B — strong general-purpose; 16GB+ recommended",
+        description: "Qwen 7B (legacy) — strong general-purpose",
+        recommended: false,
     },
     ModelRate {
         model_id: "mlx-community/gemma-3-4b-it-qat-4bit",
@@ -99,7 +195,8 @@ pub const RATES: &[ModelRate] = &[
         output_per_mtok: 1_000_000,
         currency: "CC",
         min_ram_gb: 8,
-        description: "Gemma 3 4B QAT — balanced default for 8GB+ Macs",
+        description: "Gemma 3 4B QAT (legacy) — balanced for 8GB+",
+        recommended: false,
     },
     ModelRate {
         model_id: "mlx-community/Qwen2.5-32B-Instruct-4bit",
@@ -107,7 +204,8 @@ pub const RATES: &[ModelRate] = &[
         output_per_mtok: 1_000_000,
         currency: "CC",
         min_ram_gb: 32,
-        description: "Qwen 32B — frontier-class; 32GB+ Mac Studio class",
+        description: "Qwen 32B (legacy) — frontier-class",
+        recommended: false,
     },
     ModelRate {
         model_id: "mlx-community/Llama-3.3-70B-Instruct-4bit",
@@ -115,7 +213,8 @@ pub const RATES: &[ModelRate] = &[
         output_per_mtok: 1_000_000,
         currency: "CC",
         min_ram_gb: 64,
-        description: "Llama 3.3 70B — heavyweight; 64GB+ Mac Studio class",
+        description: "Llama 3.3 70B (legacy) — heavyweight",
+        recommended: false,
     },
 ];
 
@@ -191,6 +290,87 @@ pub fn fit_within_budget(models: &[String], ram_gb: u32) -> (Vec<String>, Vec<St
         }
     }
     (kept, dropped)
+}
+
+/// The "latest & greatest" rotation, in catalog order. The Secure Mode
+/// upgrade dialog shows these and urges the provider to pin them.
+pub fn recommended_models() -> Vec<&'static ModelRate> {
+    RATES.iter().filter(|m| m.recommended).collect()
+}
+
+/// Recommended models this machine can individually run (floor ≤ RAM).
+pub fn recommended_for_machine(ram_gb: u32) -> Vec<&'static ModelRate> {
+    RATES
+        .iter()
+        .filter(|m| m.recommended && m.min_ram_gb <= ram_gb)
+        .collect()
+}
+
+/// RAM (GB) to hold back for the OS + the user's own apps (browser, IDE)
+/// so a personal Mac stays usable while it serves. The per-model
+/// `min_ram_gb` floors already bake in a basic single-model OS reserve;
+/// this is the ADDITIONAL working-set headroom that gets eaten when a
+/// provider stacks several models. ~20% of RAM, clamped to [2, 12] so a
+/// tiny Mac isn't locked out and a 192GB Studio doesn't reserve absurdly.
+pub fn user_reserve_gb(total_ram_gb: u32) -> u32 {
+    let pct = total_ram_gb.div_ceil(5); // ceil(total/5) = 20%
+    pct.clamp(2, 12)
+}
+
+/// Traffic-light verdict for a pinned set on a machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetStatus {
+    /// Fits with comfortable headroom for the user. (green)
+    Comfortable,
+    /// Fits the machine, but leaves less than the user reserve free —
+    /// the Mac may get sluggish under the owner's own work. (yellow)
+    Tight,
+    /// Summed floors exceed total RAM; the agent will drop the largest
+    /// models to fit. (red)
+    Oversubscribed,
+}
+
+/// A computed budget verdict for a pinned model set, suitable for driving
+/// a meter + traffic-light in the UI and a startup log line in the agent.
+#[derive(Debug, Clone)]
+pub struct BudgetReport {
+    /// Sum of known catalog floors for the set (off-catalog/stub = 0).
+    pub used_gb: u32,
+    /// Headroom held back for the OS + user (see `user_reserve_gb`).
+    pub reserve_gb: u32,
+    /// Machine total RAM.
+    pub total_gb: u32,
+    pub status: BudgetStatus,
+    /// Models the agent's hard guard would drop (largest-first) because
+    /// the set exceeds total RAM. Empty unless `status == Oversubscribed`.
+    pub dropped: Vec<String>,
+}
+
+/// Classify a pinned set against a machine's RAM. This is the single
+/// source of truth the tray meter, the CLI warning, and the agent's
+/// startup log all derive from, so the green/yellow/red verdict is
+/// identical everywhere. `used` sums the concurrent set's catalog floors;
+/// callers that respect per-model schedules should pass the worst
+/// overlapping hour's set. Off-catalog models contribute 0 (unknown
+/// footprint) and never trip the guard on their own.
+pub fn budget_report(models: &[String], total_ram_gb: u32) -> BudgetReport {
+    let used_gb: u32 = models.iter().map(|m| min_ram_gb(m).unwrap_or(0)).sum();
+    let reserve_gb = user_reserve_gb(total_ram_gb);
+    let (status, dropped) = if used_gb > total_ram_gb {
+        let (_, dropped) = fit_within_budget(models, total_ram_gb);
+        (BudgetStatus::Oversubscribed, dropped)
+    } else if used_gb + reserve_gb > total_ram_gb {
+        (BudgetStatus::Tight, Vec::new())
+    } else {
+        (BudgetStatus::Comfortable, Vec::new())
+    };
+    BudgetReport {
+        used_gb,
+        reserve_gb,
+        total_gb: total_ram_gb,
+        status,
+        dropped,
+    }
 }
 
 /// Look up the rate for a model id; falls back to the stub rate so
@@ -380,6 +560,7 @@ mod tests {
             currency: "CC",
             min_ram_gb: 0,
             description: "synthetic test rate",
+            recommended: false,
         };
         // 1M input × 1000 / 1M = 1000 cents = $10
         assert_eq!(price_minor(r, 1_000_000, 0), 1_000);
@@ -450,6 +631,47 @@ mod tests {
         let (kept, dropped) = fit_within_budget(&models, 16);
         assert_eq!(kept, models);
         assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn recommended_set_is_the_rotation() {
+        let rec: Vec<&str> = recommended_models().iter().map(|m| m.model_id).collect();
+        assert!(rec.contains(&"mlx-community/Qwen3.5-4B-MLX-4bit"));
+        assert!(rec.contains(&"mlx-community/Qwen3.5-122B-A10B-4bit"));
+        // legacy + stub are NOT recommended
+        assert!(!rec.contains(&"mlx-community/Qwen2.5-7B-Instruct-4bit"));
+        assert!(!rec.contains(&"stub"));
+    }
+
+    #[test]
+    fn user_reserve_is_clamped() {
+        assert_eq!(user_reserve_gb(8), 2); // 20% = 1.6 → ceil 2, clamp floor 2
+        assert_eq!(user_reserve_gb(16), 4); // ceil(16/5)=4
+        assert_eq!(user_reserve_gb(64), 12); // 20% = 12.8 → clamp ceiling 12
+        assert_eq!(user_reserve_gb(192), 12);
+    }
+
+    #[test]
+    fn budget_report_traffic_light() {
+        // 16GB Mac, reserve 4 → usable 12.
+        // Single 9B (floor 16) → used 16 == total → fits but 0 free < reserve → Tight.
+        let nine = sv(&["mlx-community/Qwen3.5-9B-MLX-4bit"]);
+        let r = budget_report(&nine, 16);
+        assert_eq!(r.status, BudgetStatus::Tight);
+        assert!(r.dropped.is_empty());
+
+        // 4B (floor 8) on 16GB → used 8, free 8 ≥ reserve 4 → Comfortable.
+        let four = sv(&["mlx-community/Qwen3.5-4B-MLX-4bit"]);
+        assert_eq!(budget_report(&four, 16).status, BudgetStatus::Comfortable);
+
+        // 9B (16) + 4B (8) = 24 > 16 → Oversubscribed; drops the 9B.
+        let both = sv(&[
+            "mlx-community/Qwen3.5-9B-MLX-4bit",
+            "mlx-community/Qwen3.5-4B-MLX-4bit",
+        ]);
+        let r = budget_report(&both, 16);
+        assert_eq!(r.status, BudgetStatus::Oversubscribed);
+        assert_eq!(r.dropped, sv(&["mlx-community/Qwen3.5-9B-MLX-4bit"]));
     }
 
     #[test]

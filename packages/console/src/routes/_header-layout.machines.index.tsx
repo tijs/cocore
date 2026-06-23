@@ -29,7 +29,7 @@ export const Route = createFileRoute("/_header-layout/machines/")({
   },
   component: MachinesPage,
   head: () => ({
-    meta: [{ title: "Machines · cocore console" }],
+    meta: [{ title: "Machines · co/core console" }],
   }),
 });
 

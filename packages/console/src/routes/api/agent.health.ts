@@ -120,7 +120,7 @@ function diagnose(input: {
   if (!input.advisorOnline && !input.pdsHasProvider) {
     return {
       diagnosis: "never-paired",
-      hint: "No agent has run under this DID. Install with `curl -fsSL console.cocore.dev/agent | sh`, then `cocore agent pair`.",
+      hint: "No agent has run under this DID. Install with `curl -fsSL cocore.dev/agent | sh`, then `cocore agent pair`.",
     };
   }
   if (advisorFresh && input.pdsHasProvider) {
@@ -175,7 +175,7 @@ async function loadPdsState(did: string): Promise<{
   const appviewBase = cocoreConfig().appviewUrl?.replace(/\/$/, "");
   if (!appviewBase) return { providerRecord: null, attestationRecord: null };
   const providers = await fetchJson<{ providers: AppViewIndexedRow[] }>(
-    `${appviewBase}/xrpc/dev.cocore.appview.listProviders`,
+    `${appviewBase}/xrpc/dev.cocore.compute.listProviders`,
   );
   let providerRecord: HealthResponse["pds"]["providerRecord"] = null;
   if (providers?.providers) {

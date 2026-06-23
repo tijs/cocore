@@ -32,8 +32,8 @@ export interface ProviderSession {
   /** `cocore-...` API key minted on pair-approve, scoped to `did`. */
   apiKey: string;
   /** Console base URL the agent should POST records to. e.g.
-   *  `https://console.cocore.dev`. The agent appends
-   *  `/api/xrpc/dev.cocore.proxy.createRecord`. */
+   *  `https://cocore.dev`. The agent appends
+   *  `/api/pds/createRecord`. */
   apiBase: string;
 }
 

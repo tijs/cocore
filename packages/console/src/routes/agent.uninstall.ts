@@ -1,6 +1,6 @@
 // Serves the cocore agent uninstaller at `/agent/uninstall`. Use:
 //
-//   curl -fsSL https://console.cocore.dev/agent/uninstall | sh
+//   curl -fsSL https://cocore.dev/agent/uninstall | sh
 //
 // Removes the LaunchAgent, the binary, the ~/.cocore state dir
 // (including the Python venv), and any mlx-community model caches

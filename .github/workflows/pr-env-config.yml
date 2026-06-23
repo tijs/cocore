@@ -1,0 +1,56 @@
+# Auto-wire each PR's Railway preview environment to itself.
+#
+# Railway clones every PR env (`cocore-pr-<N>`) from `production`, which uses
+# custom domains — so a fresh clone points its public URLs + service DID at
+# PROD and lacks the new-code gating vars. We can't fix that with Railway
+# reference variables (they'd break prod's custom domains), so this runs
+# scripts/configure-pr-env.sh to rewrite the clone's vars to its OWN
+# deterministic domains + fill the shared secrets, then redeploys. The script
+# is idempotent (a no-op once configured), so running on every push is cheap.
+#
+# Requires a Railway account/team token as the `RAILWAY_API_TOKEN` repo secret.
+# Without it (or on fork PRs), the job no-ops — the app build
+# still targets the PR URLs (provider-pr-build.yml), the services just keep
+# their cloned-from-prod values until configured.
+
+name: pr-env-config
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to (re)configure its cocore-pr-<N> env"
+        required: true
+
+concurrency:
+  # Serialize per PR; never cancel a config mid-flight.
+  group: pr-env-config-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  configure:
+    # Fork PRs can't read the token; skip them. Manual dispatch always runs.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      # An account/team token (not a project token, which can't span all PR
+      # envs). The Railway CLI reads account tokens from RAILWAY_API_TOKEN.
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure this PR's Railway env
+        run: |
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
+            echo "::notice::RAILWAY_API_TOKEN not set — skipping PR-env config (the app build still targets this PR's URLs)."
+            exit 0
+          fi
+          npm i -g @railway/cli >/dev/null 2>&1
+          # No `railway link` needed — configure-pr-env.sh passes --project on
+          # every call, so a token alone (no linked project) is enough in CI.
+          PR_NUMBER="${{ github.event.pull_request.number || inputs.pr_number }}" bash scripts/configure-pr-env.sh

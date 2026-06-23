@@ -148,7 +148,7 @@ export function readBearer(request: Request): string | null {
 
 interface OpenAiChunkChoice {
   index: 0;
-  delta: { role?: "assistant"; content?: string };
+  delta: { role?: "assistant"; content?: string; reasoning_content?: string };
   finish_reason: null | "stop";
 }
 
@@ -286,7 +286,11 @@ export function streamingResponse(
       try {
         for await (const ev of events) {
           if (ev.kind === "chunk") {
-            send(chunkPayload(id, model, { content: ev.text }, null));
+            // Reasoning ("thinking") rides delta.reasoning_content, the
+            // vLLM/DeepSeek convention; the answer rides delta.content.
+            const delta =
+              ev.channel === "reasoning" ? { reasoning_content: ev.text } : { content: ev.text };
+            send(chunkPayload(id, model, delta, null));
           } else if (ev.kind === "complete") {
             // The final `stop` chunk carries the x_cocore credit so a
             // streaming client gets the same "who ran it" metadata the
@@ -296,18 +300,28 @@ export function streamingResponse(
             return;
           } else if (ev.kind === "error") {
             const mapped = dispatchErrorToHttpResponse(ev.code);
-            // OpenAI SDKs handle SSE errors with a specially-shaped event.
-            controller.enqueue(
-              encoder.encode(
-                `event: error\ndata: ${JSON.stringify({
-                  error: {
-                    message: ev.reason,
-                    type: mapped.type,
-                    code: mapped.code,
-                    param: null,
-                  },
-                })}\n\n`,
-              ),
+            // Emit the error on the DEFAULT SSE event (a `data:` frame),
+            // not a named `event: error`. This is the de-facto OpenAI
+            // mid-stream error shape (an `{ error: {...} }` object on the
+            // default event, HTTP stays 200) honored by the OpenAI SDKs
+            // and OpenAI-compatible servers (vLLM/SGLang/etc.). Minimal
+            // SSE clients (e.g. Apollo) only read default-event `data:`
+            // frames, so a named `event: error` is silently dropped —
+            // the stream then appears to end with no chunk, which the
+            // client reports as "the response is not a stream."
+            //
+            // No `[DONE]` follows: OpenAI interrupts the stream with the
+            // error frame and closes, rather than emitting the normal
+            // terminator. The `finally` closes the controller (EOF).
+            send(
+              JSON.stringify({
+                error: {
+                  message: ev.reason,
+                  type: mapped.type,
+                  code: mapped.code,
+                  param: null,
+                },
+              }),
             );
             return;
           }
@@ -335,6 +349,7 @@ export async function bufferedResponse(
   events: AsyncIterable<DispatchEvent>,
 ): Promise<Response> {
   let content = "";
+  let reasoning = "";
   let tokensIn = 0;
   let tokensOut = 0;
   let providerCredit: ProviderCredit | undefined;
@@ -342,8 +357,10 @@ export async function bufferedResponse(
   let errored: { reason: string; code: DispatchErrorCode } | null = null;
 
   for await (const ev of events) {
-    if (ev.kind === "chunk") content += ev.text;
-    else if (ev.kind === "complete") {
+    if (ev.kind === "chunk") {
+      if (ev.channel === "reasoning") reasoning += ev.text;
+      else content += ev.text;
+    } else if (ev.kind === "complete") {
       tokensIn = ev.tokensIn;
       tokensOut = ev.tokensOut;
       providerCredit = ev.providerCredit;
@@ -368,7 +385,11 @@ export async function bufferedResponse(
       choices: [
         {
           index: 0,
-          message: { role: "assistant", content },
+          message: {
+            role: "assistant",
+            content,
+            ...(reasoning ? { reasoning_content: reasoning } : {}),
+          },
           finish_reason: "stop",
         },
       ],

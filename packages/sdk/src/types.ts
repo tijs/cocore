@@ -16,6 +16,11 @@ export interface StrongRef {
 }
 
 export type TrustLevel = "self-attested" | "hardware-attested";
+/** Confidentiality tier — whether the prompt was provably handled only inside
+ *  a measured, signed binary the owner cannot read. Distinct from TrustLevel.
+ *  A verifier MUST recompute this from evidence (see {@link verifyProviderForSeal})
+ *  and never trust a self-asserted value. */
+export type Tier = "attested-confidential" | "best-effort";
 export type SettlementStatus = "settled" | "refunded" | "disputed";
 
 export interface ProviderRecord {
@@ -29,6 +34,15 @@ export interface ProviderRecord {
   encryptionPubKey: string;
   attestationPubKey: string;
   trustLevel: TrustLevel;
+  /** Highest confidentiality tier this machine advertises. Advisory; a
+   *  confidential requester still verifies per-job. Absent = best-effort.
+   *  Agent-published ACHIEVED tier (evidence-derived, never self-declared). */
+  tier?: Tier;
+  /** The tier the OWNER opted this machine into (console/tray "Upgrade
+   *  security"). Owner-written INTENT; the agent reconciles toward it and only
+   *  publishes a higher `tier`/`trustLevel` once earned. Absent/best-effort =
+   *  not opted in (serves exactly as before). Mirrors `desiredModels`. */
+  desiredTier?: Tier;
   acceptedExchanges?: string[];
   contactEndpoint?: string;
   active?: boolean;
@@ -57,15 +71,48 @@ export interface AttestationRecord {
   serialNumberHash: string;
   osVersion: string;
   binaryHash: string;
+  /** Code-signing cdhash (lowercase hex) of the running binary — the
+   *  OS-enforced measured identity. Supersedes binaryHash for trust. */
+  cdHash?: string;
+  /** Apple Developer Team Identifier from the running binary's signature. */
+  teamId?: string;
+  /** Hardened runtime (CS_RUNTIME) enforced. Required for confidential. */
+  hardenedRuntime?: boolean;
+  /** Library validation enforced. Required for confidential. */
+  libraryValidation?: boolean;
+  /** get-task-allow entitlement value. MUST be false for confidential;
+   *  absent treated as true (unsafe default). */
+  getTaskAllow?: boolean;
+  /** SHA-256 hex of the precompiled Metal shader library the in-process
+   *  engine loads. Absent when no native engine is loaded. */
+  metallibHash?: string;
+  /** SHA-256 hex of the dynamic engine library (e.g. libCoCoreMLX.dylib) — a
+   *  measurable the cdHash doesn't cover. Absent for subprocess/static backends. */
+  engineLibHash?: string;
+  /** True iff inference runs inside this measured binary (native engine),
+   *  not an owner-controlled subprocess. The load-bearing confidential bit. */
+  inProcessBackend?: boolean;
+  /** PT_DENY_ATTACH applied at startup. Required for confidential. */
+  antiDebug?: boolean;
+  /** RLIMIT_CORE=0 applied at startup. Required for confidential. */
+  coreDumpsDisabled?: boolean;
+  /** DYLD_* env scrubbed at startup. Required for confidential. */
+  envScrubbed?: boolean;
   sipEnabled: boolean;
   secureBootEnabled: boolean;
   secureEnclaveAvailable: boolean;
   authenticatedRootEnabled: boolean;
   rdmaDisabled?: boolean;
   mdaCertChain?: string[];
+  /** Apple App Attest evidence (CBOR `object` + `keyId`, both base64). The
+   *  MDM-free path to hardware-attested: bound to `publicKey` via
+   *  clientDataHash = sha256(publicKey). Absent on self-attested machines. */
+  appAttest?: { object: string; keyId: string };
   selfSignature: string;
   attestedAt: string;
   expiresAt: string;
+  /** Provider's self-asserted tier. ADVISORY ONLY — recompute from evidence. */
+  tier?: Tier;
 }
 
 export interface JobRecord {
@@ -102,6 +149,15 @@ export interface ReceiptRecord {
   outputCommitment: string;
   /** Optional SHA-256 hex over the exact encrypted bytes delivered. */
   outputCipherCommitment?: string;
+  /** Optional SHA-256 hex over the plaintext reasoning ('thinking') output,
+   *  separate from outputCommitment. Present only when the model emitted
+   *  reasoning on a distinct channel. */
+  reasoningCommitment?: string;
+  /** Optional SHA-256 hex over (ephemeralPubKey || sessionNonce) — proof the
+   *  input was sealed to a fresh, enclave-bound ephemeral key for this job. */
+  sessionKeyCommitment?: string;
+  /** Optional lowercase-hex requester nonce the session key was bound to. */
+  sessionNonce?: string;
   /** Optional sampling params the provider committed to. */
   params?: GenerationParams;
   outputCipherURL?: string;
@@ -111,6 +167,9 @@ export interface ReceiptRecord {
   price: Money;
   attestation: StrongRef;
   enclaveSignature: string;
+  /** Confidentiality tier this job ran under. Recompute from attestation +
+   *  sessionKeyCommitment; absent = best-effort. */
+  tier?: Tier;
 }
 
 export interface PaymentAuthorizationRecord {

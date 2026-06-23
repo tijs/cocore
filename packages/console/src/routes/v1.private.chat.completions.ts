@@ -2,7 +2,7 @@
 //
 // Friends-only sibling of `/v1/chat/completions`. Same OpenAI wire
 // format — point a client at
-// `base_url="https://console.cocore.dev/v1/private"` and it Just Works
+// `base_url="https://cocore.dev/v1/private"` and it Just Works
 // — but the request is constrained to providers the authenticated DID
 // has explicitly friended (dev.cocore.account.friend records on the
 // DID's PDS). Crypto is identical end-to-end; the difference is which

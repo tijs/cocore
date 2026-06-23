@@ -109,6 +109,39 @@ export const INFERENCE_API_CATALOG: Array<InferenceApiCatalogEntry> = [
     ],
     example: { body: CHAT_BODY, canRun: false },
   },
+  {
+    id: "inference-api-verified-chat-completions",
+    navLabel: "verified/chat/completions",
+    method: "POST",
+    path: "/verified/chat/completions",
+    description:
+      'Same request shape as chat/completions, but routing is limited to providers whose attestation is cryptographically verified (recomputed from the signed Apple-rooted attestation, not the self-asserted label). Set min_trust to "hardware-attested" (default) or "confidential" to pick the floor. Fails closed with no_verified_providers when none qualify.',
+    auth: "required",
+    params: [
+      { name: "model", type: "string", required: true },
+      { name: "messages", type: "array", required: true },
+      { name: "min_trust", type: "string" },
+      { name: "stream", type: "boolean" },
+      { name: "max_tokens", type: "integer" },
+    ],
+    controls: [
+      { kind: "text", param: "model", label: "model", placeholder: "stub" },
+      {
+        kind: "text",
+        param: "message",
+        label: "user message",
+        placeholder: "Hello",
+      },
+      {
+        kind: "text",
+        param: "min_trust",
+        label: "min_trust",
+        placeholder: "hardware-attested",
+      },
+      { kind: "text", param: "max_tokens", label: "max_tokens", placeholder: "256" },
+    ],
+    example: { body: CHAT_BODY, canRun: false },
+  },
 ];
 
 export const INFERENCE_API_ERROR_SECTIONS = [

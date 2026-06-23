@@ -20,6 +20,7 @@ import { Route as XrpcDevDotcocoreDotaccountDotrevokeApiKeyRouteImport } from '.
 import { Route as XrpcDevDotcocoreDotaccountDotlistApiKeysRouteImport } from './routes/xrpc.dev[.]cocore[.]account[.]listApiKeys'
 import { Route as XrpcDevDotcocoreDotaccountDotdeleteApiKeyRouteImport } from './routes/xrpc.dev[.]cocore[.]account[.]deleteApiKey'
 import { Route as XrpcDevDotcocoreDotaccountDotcreateApiKeyRouteImport } from './routes/xrpc.dev[.]cocore[.]account[.]createApiKey'
+import { Route as V1RecommendedModelsRouteImport } from './routes/v1.recommended-models'
 import { Route as V1ModelsRouteImport } from './routes/v1.models'
 import { Route as LexiconsNsidRouteImport } from './routes/lexicons.$nsid'
 import { Route as ExchangeDidDotjsonRouteImport } from './routes/exchange.did[.]json'
@@ -50,8 +51,6 @@ import { Route as V1ChatCompletionsRouteImport } from './routes/v1.chat.completi
 import { Route as ApiXrpcDevDotcocoreDotproxyDotputRecordRouteImport } from './routes/api/xrpc/dev[.]cocore[.]proxy[.]putRecord'
 import { Route as ApiXrpcDevDotcocoreDotproxyDotdeleteRecordRouteImport } from './routes/api/xrpc/dev[.]cocore[.]proxy[.]deleteRecord'
 import { Route as ApiXrpcDevDotcocoreDotproxyDotcreateRecordRouteImport } from './routes/api/xrpc/dev[.]cocore[.]proxy[.]createRecord'
-import { Route as ApiXrpcDevDotcocoreDotinferenceDotsubmitRouteImport } from './routes/api/xrpc/dev[.]cocore[.]inference[.]submit'
-import { Route as ApiXrpcDevDotcocoreDotinferenceDotstatusRouteImport } from './routes/api/xrpc/dev[.]cocore[.]inference[.]status'
 import { Route as ApiXrpcDevDotcocoreDotinferenceDotdispatchRouteImport } from './routes/api/xrpc/dev[.]cocore[.]inference[.]dispatch'
 import { Route as ApiXrpcDevDotcocoreDotdevicePairDotstartRouteImport } from './routes/api/xrpc/dev[.]cocore[.]devicePair[.]start'
 import { Route as ApiXrpcDevDotcocoreDotdevicePairDotpollRouteImport } from './routes/api/xrpc/dev[.]cocore[.]devicePair[.]poll'
@@ -61,8 +60,12 @@ import { Route as ApiXrpcDevDotcocoreDotaccountDotlistApiKeysRouteImport } from 
 import { Route as ApiXrpcDevDotcocoreDotaccountDotdeleteApiKeyRouteImport } from './routes/api/xrpc/dev[.]cocore[.]account[.]deleteApiKey'
 import { Route as ApiXrpcDevDotcocoreDotaccountDotcreateApiKeyRouteImport } from './routes/api/xrpc/dev[.]cocore[.]account[.]createApiKey'
 import { Route as ApiV1ModelsRouteImport } from './routes/api/v1/models'
+import { Route as ApiPdsPutRecordRouteImport } from './routes/api/pds/putRecord'
+import { Route as ApiPdsDeleteRecordRouteImport } from './routes/api/pds/deleteRecord'
+import { Route as ApiPdsCreateRecordRouteImport } from './routes/api/pds/createRecord'
 import { Route as ApiInternalWipeEverythingRouteImport } from './routes/api/internal/wipe-everything'
 import { Route as ApiInternalWipeRouteImport } from './routes/api/internal/wipe'
+import { Route as ApiInternalMigrateSessionsToAppviewRouteImport } from './routes/api/internal/migrate-sessions-to-appview'
 import { Route as ApiAgentWhoamiRouteImport } from './routes/api/agent.whoami'
 import { Route as ApiAgentStatusRouteImport } from './routes/api/agent.status'
 import { Route as ApiAgentHealthRouteImport } from './routes/api/agent.health'
@@ -72,11 +75,13 @@ import { Route as HeaderLayoutMachinesRkeyRouteImport } from './routes/_header-l
 import { Route as HeaderLayoutDevicesNewRouteImport } from './routes/_header-layout.devices.new'
 import { Route as HeaderLayoutBlogSlugRouteImport } from './routes/_header-layout.blog.$slug'
 import { Route as HeaderLayoutAdminDisputesRouteImport } from './routes/_header-layout.admin.disputes'
+import { Route as DocsHeaderLayoutDocsSecurityRouteImport } from './routes/_docs-header-layout.docs.security'
 import { Route as DocsHeaderLayoutDocsLexiconsRouteImport } from './routes/_docs-header-layout.docs.lexicons'
 import { Route as DocsHeaderLayoutDocsInferenceRouteImport } from './routes/_docs-header-layout.docs.inference'
 import { Route as DocsHeaderLayoutDocsCommunityToolsRouteImport } from './routes/_docs-header-layout.docs.community-tools'
 import { Route as DocsHeaderLayoutDocsApiRouteImport } from './routes/_docs-header-layout.docs.api'
 import { Route as DocsHeaderLayoutDocsInferenceIndexRouteImport } from './routes/_docs-header-layout.docs.inference.index'
+import { Route as V1VerifiedChatCompletionsRouteImport } from './routes/v1.verified.chat.completions'
 import { Route as V1PrivateChatCompletionsRouteImport } from './routes/v1.private.chat.completions'
 import { Route as ApiV1ChatCompletionsRouteImport } from './routes/api.v1.chat.completions'
 import { Route as ApiInternalDisputesResolveRouteImport } from './routes/api/internal/disputes.resolve'
@@ -85,8 +90,14 @@ import { Route as ApiAuthAtprotoMetadataDotjsonRouteImport } from './routes/api.
 import { Route as ApiAuthAtprotoJwksDotjsonRouteImport } from './routes/api.auth.atproto.jwks[.]json'
 import { Route as ApiAuthAtprotoCallbackRouteImport } from './routes/api.auth.atproto.callback'
 import { Route as ApiAuthAtprotoAuthorizeRouteImport } from './routes/api.auth.atproto.authorize'
+import { Route as ApiAgentMdmRequestAttestationRouteImport } from './routes/api/agent.mdm.request-attestation'
+import { Route as ApiAgentMdmPushAttestationRouteImport } from './routes/api/agent.mdm.push-attestation'
+import { Route as ApiAgentMdmNanomdmWebhookRouteImport } from './routes/api/agent.mdm.nanomdm-webhook'
+import { Route as ApiAgentMdmEnrollProfileRouteImport } from './routes/api/agent.mdm.enroll-profile'
+import { Route as ApiAgentMdmAttestationChainRouteImport } from './routes/api/agent.mdm.attestation-chain'
 import { Route as DocsHeaderLayoutDocsInferenceAuthenticationRouteImport } from './routes/_docs-header-layout.docs.inference.authentication'
 import { Route as DocsHeaderLayoutDocsInferenceSlugRouteImport } from './routes/_docs-header-layout.docs.inference.$slug'
+import { Route as ApiV1VerifiedChatCompletionsRouteImport } from './routes/api.v1.verified.chat.completions'
 import { Route as ApiV1PrivateChatCompletionsRouteImport } from './routes/api.v1.private.chat.completions'
 
 const OgDotpngRoute = OgDotpngRouteImport.update({
@@ -146,6 +157,11 @@ const XrpcDevDotcocoreDotaccountDotcreateApiKeyRoute =
     path: '/xrpc/dev.cocore.account.createApiKey',
     getParentRoute: () => rootRouteImport,
   } as any)
+const V1RecommendedModelsRoute = V1RecommendedModelsRouteImport.update({
+  id: '/v1/recommended-models',
+  path: '/v1/recommended-models',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const V1ModelsRoute = V1ModelsRouteImport.update({
   id: '/v1/models',
   path: '/v1/models',
@@ -301,18 +317,6 @@ const ApiXrpcDevDotcocoreDotproxyDotcreateRecordRoute =
     path: '/api/xrpc/dev.cocore.proxy.createRecord',
     getParentRoute: () => rootRouteImport,
   } as any)
-const ApiXrpcDevDotcocoreDotinferenceDotsubmitRoute =
-  ApiXrpcDevDotcocoreDotinferenceDotsubmitRouteImport.update({
-    id: '/api/xrpc/dev.cocore.inference.submit',
-    path: '/api/xrpc/dev.cocore.inference.submit',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiXrpcDevDotcocoreDotinferenceDotstatusRoute =
-  ApiXrpcDevDotcocoreDotinferenceDotstatusRouteImport.update({
-    id: '/api/xrpc/dev.cocore.inference.status',
-    path: '/api/xrpc/dev.cocore.inference.status',
-    getParentRoute: () => rootRouteImport,
-  } as any)
 const ApiXrpcDevDotcocoreDotinferenceDotdispatchRoute =
   ApiXrpcDevDotcocoreDotinferenceDotdispatchRouteImport.update({
     id: '/api/xrpc/dev.cocore.inference.dispatch',
@@ -366,6 +370,21 @@ const ApiV1ModelsRoute = ApiV1ModelsRouteImport.update({
   path: '/api/v1/models',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPdsPutRecordRoute = ApiPdsPutRecordRouteImport.update({
+  id: '/api/pds/putRecord',
+  path: '/api/pds/putRecord',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPdsDeleteRecordRoute = ApiPdsDeleteRecordRouteImport.update({
+  id: '/api/pds/deleteRecord',
+  path: '/api/pds/deleteRecord',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPdsCreateRecordRoute = ApiPdsCreateRecordRouteImport.update({
+  id: '/api/pds/createRecord',
+  path: '/api/pds/createRecord',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiInternalWipeEverythingRoute =
   ApiInternalWipeEverythingRouteImport.update({
     id: '/api/internal/wipe-everything',
@@ -377,6 +396,12 @@ const ApiInternalWipeRoute = ApiInternalWipeRouteImport.update({
   path: '/api/internal/wipe',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiInternalMigrateSessionsToAppviewRoute =
+  ApiInternalMigrateSessionsToAppviewRouteImport.update({
+    id: '/api/internal/migrate-sessions-to-appview',
+    path: '/api/internal/migrate-sessions-to-appview',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiAgentWhoamiRoute = ApiAgentWhoamiRouteImport.update({
   id: '/api/agent/whoami',
   path: '/api/agent/whoami',
@@ -424,6 +449,12 @@ const HeaderLayoutAdminDisputesRoute =
     path: '/admin/disputes',
     getParentRoute: () => HeaderLayoutRoute,
   } as any)
+const DocsHeaderLayoutDocsSecurityRoute =
+  DocsHeaderLayoutDocsSecurityRouteImport.update({
+    id: '/docs/security',
+    path: '/docs/security',
+    getParentRoute: () => DocsHeaderLayoutRoute,
+  } as any)
 const DocsHeaderLayoutDocsLexiconsRoute =
   DocsHeaderLayoutDocsLexiconsRouteImport.update({
     id: '/docs/lexicons',
@@ -452,6 +483,12 @@ const DocsHeaderLayoutDocsInferenceIndexRoute =
     id: '/',
     path: '/',
     getParentRoute: () => DocsHeaderLayoutDocsInferenceRoute,
+  } as any)
+const V1VerifiedChatCompletionsRoute =
+  V1VerifiedChatCompletionsRouteImport.update({
+    id: '/v1/verified/chat/completions',
+    path: '/v1/verified/chat/completions',
+    getParentRoute: () => rootRouteImport,
   } as any)
 const V1PrivateChatCompletionsRoute =
   V1PrivateChatCompletionsRouteImport.update({
@@ -497,6 +534,36 @@ const ApiAuthAtprotoAuthorizeRoute = ApiAuthAtprotoAuthorizeRouteImport.update({
   path: '/api/auth/atproto/authorize',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiAgentMdmRequestAttestationRoute =
+  ApiAgentMdmRequestAttestationRouteImport.update({
+    id: '/api/agent/mdm/request-attestation',
+    path: '/api/agent/mdm/request-attestation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiAgentMdmPushAttestationRoute =
+  ApiAgentMdmPushAttestationRouteImport.update({
+    id: '/api/agent/mdm/push-attestation',
+    path: '/api/agent/mdm/push-attestation',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiAgentMdmNanomdmWebhookRoute =
+  ApiAgentMdmNanomdmWebhookRouteImport.update({
+    id: '/api/agent/mdm/nanomdm-webhook',
+    path: '/api/agent/mdm/nanomdm-webhook',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiAgentMdmEnrollProfileRoute =
+  ApiAgentMdmEnrollProfileRouteImport.update({
+    id: '/api/agent/mdm/enroll-profile',
+    path: '/api/agent/mdm/enroll-profile',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiAgentMdmAttestationChainRoute =
+  ApiAgentMdmAttestationChainRouteImport.update({
+    id: '/api/agent/mdm/attestation-chain',
+    path: '/api/agent/mdm/attestation-chain',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const DocsHeaderLayoutDocsInferenceAuthenticationRoute =
   DocsHeaderLayoutDocsInferenceAuthenticationRouteImport.update({
     id: '/authentication',
@@ -508,6 +575,12 @@ const DocsHeaderLayoutDocsInferenceSlugRoute =
     id: '/$slug',
     path: '/$slug',
     getParentRoute: () => DocsHeaderLayoutDocsInferenceRoute,
+  } as any)
+const ApiV1VerifiedChatCompletionsRoute =
+  ApiV1VerifiedChatCompletionsRouteImport.update({
+    id: '/api/v1/verified/chat/completions',
+    path: '/api/v1/verified/chat/completions',
+    getParentRoute: () => rootRouteImport,
   } as any)
 const ApiV1PrivateChatCompletionsRoute =
   ApiV1PrivateChatCompletionsRouteImport.update({
@@ -544,6 +617,7 @@ export interface FileRoutesByFullPath {
   '/exchange/did.json': typeof ExchangeDidDotjsonRoute
   '/lexicons/$nsid': typeof LexiconsNsidRoute
   '/v1/models': typeof V1ModelsRoute
+  '/v1/recommended-models': typeof V1RecommendedModelsRoute
   '/xrpc/dev.cocore.account.createApiKey': typeof XrpcDevDotcocoreDotaccountDotcreateApiKeyRoute
   '/xrpc/dev.cocore.account.deleteApiKey': typeof XrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute
   '/xrpc/dev.cocore.account.listApiKeys': typeof XrpcDevDotcocoreDotaccountDotlistApiKeysRoute
@@ -553,6 +627,7 @@ export interface FileRoutesByFullPath {
   '/docs/community-tools': typeof DocsHeaderLayoutDocsCommunityToolsRoute
   '/docs/inference': typeof DocsHeaderLayoutDocsInferenceRouteWithChildren
   '/docs/lexicons': typeof DocsHeaderLayoutDocsLexiconsRoute
+  '/docs/security': typeof DocsHeaderLayoutDocsSecurityRoute
   '/admin/disputes': typeof HeaderLayoutAdminDisputesRoute
   '/blog/$slug': typeof HeaderLayoutBlogSlugRoute
   '/devices/new': typeof HeaderLayoutDevicesNewRoute
@@ -562,8 +637,12 @@ export interface FileRoutesByFullPath {
   '/api/agent/health': typeof ApiAgentHealthRoute
   '/api/agent/status': typeof ApiAgentStatusRoute
   '/api/agent/whoami': typeof ApiAgentWhoamiRoute
+  '/api/internal/migrate-sessions-to-appview': typeof ApiInternalMigrateSessionsToAppviewRoute
   '/api/internal/wipe': typeof ApiInternalWipeRoute
   '/api/internal/wipe-everything': typeof ApiInternalWipeEverythingRoute
+  '/api/pds/createRecord': typeof ApiPdsCreateRecordRoute
+  '/api/pds/deleteRecord': typeof ApiPdsDeleteRecordRoute
+  '/api/pds/putRecord': typeof ApiPdsPutRecordRoute
   '/api/v1/models': typeof ApiV1ModelsRoute
   '/api/xrpc/dev.cocore.account.createApiKey': typeof ApiXrpcDevDotcocoreDotaccountDotcreateApiKeyRoute
   '/api/xrpc/dev.cocore.account.deleteApiKey': typeof ApiXrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute
@@ -573,8 +652,6 @@ export interface FileRoutesByFullPath {
   '/api/xrpc/dev.cocore.devicePair.poll': typeof ApiXrpcDevDotcocoreDotdevicePairDotpollRoute
   '/api/xrpc/dev.cocore.devicePair.start': typeof ApiXrpcDevDotcocoreDotdevicePairDotstartRoute
   '/api/xrpc/dev.cocore.inference.dispatch': typeof ApiXrpcDevDotcocoreDotinferenceDotdispatchRoute
-  '/api/xrpc/dev.cocore.inference.status': typeof ApiXrpcDevDotcocoreDotinferenceDotstatusRoute
-  '/api/xrpc/dev.cocore.inference.submit': typeof ApiXrpcDevDotcocoreDotinferenceDotsubmitRoute
   '/api/xrpc/dev.cocore.proxy.createRecord': typeof ApiXrpcDevDotcocoreDotproxyDotcreateRecordRoute
   '/api/xrpc/dev.cocore.proxy.deleteRecord': typeof ApiXrpcDevDotcocoreDotproxyDotdeleteRecordRoute
   '/api/xrpc/dev.cocore.proxy.putRecord': typeof ApiXrpcDevDotcocoreDotproxyDotputRecordRoute
@@ -584,6 +661,11 @@ export interface FileRoutesByFullPath {
   '/machines/': typeof HeaderLayoutMachinesIndexRoute
   '/docs/inference/$slug': typeof DocsHeaderLayoutDocsInferenceSlugRoute
   '/docs/inference/authentication': typeof DocsHeaderLayoutDocsInferenceAuthenticationRoute
+  '/api/agent/mdm/attestation-chain': typeof ApiAgentMdmAttestationChainRoute
+  '/api/agent/mdm/enroll-profile': typeof ApiAgentMdmEnrollProfileRoute
+  '/api/agent/mdm/nanomdm-webhook': typeof ApiAgentMdmNanomdmWebhookRoute
+  '/api/agent/mdm/push-attestation': typeof ApiAgentMdmPushAttestationRoute
+  '/api/agent/mdm/request-attestation': typeof ApiAgentMdmRequestAttestationRoute
   '/api/auth/atproto/authorize': typeof ApiAuthAtprotoAuthorizeRoute
   '/api/auth/atproto/callback': typeof ApiAuthAtprotoCallbackRoute
   '/api/auth/atproto/jwks.json': typeof ApiAuthAtprotoJwksDotjsonRoute
@@ -592,8 +674,10 @@ export interface FileRoutesByFullPath {
   '/api/internal/disputes/resolve': typeof ApiInternalDisputesResolveRoute
   '/api/v1/chat/completions': typeof ApiV1ChatCompletionsRoute
   '/v1/private/chat/completions': typeof V1PrivateChatCompletionsRoute
+  '/v1/verified/chat/completions': typeof V1VerifiedChatCompletionsRoute
   '/docs/inference/': typeof DocsHeaderLayoutDocsInferenceIndexRoute
   '/api/v1/private/chat/completions': typeof ApiV1PrivateChatCompletionsRoute
+  '/api/v1/verified/chat/completions': typeof ApiV1VerifiedChatCompletionsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof HeaderLayoutIndexRoute
@@ -623,6 +707,7 @@ export interface FileRoutesByTo {
   '/exchange/did.json': typeof ExchangeDidDotjsonRoute
   '/lexicons/$nsid': typeof LexiconsNsidRoute
   '/v1/models': typeof V1ModelsRoute
+  '/v1/recommended-models': typeof V1RecommendedModelsRoute
   '/xrpc/dev.cocore.account.createApiKey': typeof XrpcDevDotcocoreDotaccountDotcreateApiKeyRoute
   '/xrpc/dev.cocore.account.deleteApiKey': typeof XrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute
   '/xrpc/dev.cocore.account.listApiKeys': typeof XrpcDevDotcocoreDotaccountDotlistApiKeysRoute
@@ -631,6 +716,7 @@ export interface FileRoutesByTo {
   '/docs/api': typeof DocsHeaderLayoutDocsApiRoute
   '/docs/community-tools': typeof DocsHeaderLayoutDocsCommunityToolsRoute
   '/docs/lexicons': typeof DocsHeaderLayoutDocsLexiconsRoute
+  '/docs/security': typeof DocsHeaderLayoutDocsSecurityRoute
   '/admin/disputes': typeof HeaderLayoutAdminDisputesRoute
   '/blog/$slug': typeof HeaderLayoutBlogSlugRoute
   '/devices/new': typeof HeaderLayoutDevicesNewRoute
@@ -640,8 +726,12 @@ export interface FileRoutesByTo {
   '/api/agent/health': typeof ApiAgentHealthRoute
   '/api/agent/status': typeof ApiAgentStatusRoute
   '/api/agent/whoami': typeof ApiAgentWhoamiRoute
+  '/api/internal/migrate-sessions-to-appview': typeof ApiInternalMigrateSessionsToAppviewRoute
   '/api/internal/wipe': typeof ApiInternalWipeRoute
   '/api/internal/wipe-everything': typeof ApiInternalWipeEverythingRoute
+  '/api/pds/createRecord': typeof ApiPdsCreateRecordRoute
+  '/api/pds/deleteRecord': typeof ApiPdsDeleteRecordRoute
+  '/api/pds/putRecord': typeof ApiPdsPutRecordRoute
   '/api/v1/models': typeof ApiV1ModelsRoute
   '/api/xrpc/dev.cocore.account.createApiKey': typeof ApiXrpcDevDotcocoreDotaccountDotcreateApiKeyRoute
   '/api/xrpc/dev.cocore.account.deleteApiKey': typeof ApiXrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute
@@ -651,8 +741,6 @@ export interface FileRoutesByTo {
   '/api/xrpc/dev.cocore.devicePair.poll': typeof ApiXrpcDevDotcocoreDotdevicePairDotpollRoute
   '/api/xrpc/dev.cocore.devicePair.start': typeof ApiXrpcDevDotcocoreDotdevicePairDotstartRoute
   '/api/xrpc/dev.cocore.inference.dispatch': typeof ApiXrpcDevDotcocoreDotinferenceDotdispatchRoute
-  '/api/xrpc/dev.cocore.inference.status': typeof ApiXrpcDevDotcocoreDotinferenceDotstatusRoute
-  '/api/xrpc/dev.cocore.inference.submit': typeof ApiXrpcDevDotcocoreDotinferenceDotsubmitRoute
   '/api/xrpc/dev.cocore.proxy.createRecord': typeof ApiXrpcDevDotcocoreDotproxyDotcreateRecordRoute
   '/api/xrpc/dev.cocore.proxy.deleteRecord': typeof ApiXrpcDevDotcocoreDotproxyDotdeleteRecordRoute
   '/api/xrpc/dev.cocore.proxy.putRecord': typeof ApiXrpcDevDotcocoreDotproxyDotputRecordRoute
@@ -662,6 +750,11 @@ export interface FileRoutesByTo {
   '/machines': typeof HeaderLayoutMachinesIndexRoute
   '/docs/inference/$slug': typeof DocsHeaderLayoutDocsInferenceSlugRoute
   '/docs/inference/authentication': typeof DocsHeaderLayoutDocsInferenceAuthenticationRoute
+  '/api/agent/mdm/attestation-chain': typeof ApiAgentMdmAttestationChainRoute
+  '/api/agent/mdm/enroll-profile': typeof ApiAgentMdmEnrollProfileRoute
+  '/api/agent/mdm/nanomdm-webhook': typeof ApiAgentMdmNanomdmWebhookRoute
+  '/api/agent/mdm/push-attestation': typeof ApiAgentMdmPushAttestationRoute
+  '/api/agent/mdm/request-attestation': typeof ApiAgentMdmRequestAttestationRoute
   '/api/auth/atproto/authorize': typeof ApiAuthAtprotoAuthorizeRoute
   '/api/auth/atproto/callback': typeof ApiAuthAtprotoCallbackRoute
   '/api/auth/atproto/jwks.json': typeof ApiAuthAtprotoJwksDotjsonRoute
@@ -670,8 +763,10 @@ export interface FileRoutesByTo {
   '/api/internal/disputes/resolve': typeof ApiInternalDisputesResolveRoute
   '/api/v1/chat/completions': typeof ApiV1ChatCompletionsRoute
   '/v1/private/chat/completions': typeof V1PrivateChatCompletionsRoute
+  '/v1/verified/chat/completions': typeof V1VerifiedChatCompletionsRoute
   '/docs/inference': typeof DocsHeaderLayoutDocsInferenceIndexRoute
   '/api/v1/private/chat/completions': typeof ApiV1PrivateChatCompletionsRoute
+  '/api/v1/verified/chat/completions': typeof ApiV1VerifiedChatCompletionsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -703,6 +798,7 @@ export interface FileRoutesById {
   '/exchange/did.json': typeof ExchangeDidDotjsonRoute
   '/lexicons/$nsid': typeof LexiconsNsidRoute
   '/v1/models': typeof V1ModelsRoute
+  '/v1/recommended-models': typeof V1RecommendedModelsRoute
   '/xrpc/dev.cocore.account.createApiKey': typeof XrpcDevDotcocoreDotaccountDotcreateApiKeyRoute
   '/xrpc/dev.cocore.account.deleteApiKey': typeof XrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute
   '/xrpc/dev.cocore.account.listApiKeys': typeof XrpcDevDotcocoreDotaccountDotlistApiKeysRoute
@@ -713,6 +809,7 @@ export interface FileRoutesById {
   '/_docs-header-layout/docs/community-tools': typeof DocsHeaderLayoutDocsCommunityToolsRoute
   '/_docs-header-layout/docs/inference': typeof DocsHeaderLayoutDocsInferenceRouteWithChildren
   '/_docs-header-layout/docs/lexicons': typeof DocsHeaderLayoutDocsLexiconsRoute
+  '/_docs-header-layout/docs/security': typeof DocsHeaderLayoutDocsSecurityRoute
   '/_header-layout/admin/disputes': typeof HeaderLayoutAdminDisputesRoute
   '/_header-layout/blog/$slug': typeof HeaderLayoutBlogSlugRoute
   '/_header-layout/devices/new': typeof HeaderLayoutDevicesNewRoute
@@ -722,8 +819,12 @@ export interface FileRoutesById {
   '/api/agent/health': typeof ApiAgentHealthRoute
   '/api/agent/status': typeof ApiAgentStatusRoute
   '/api/agent/whoami': typeof ApiAgentWhoamiRoute
+  '/api/internal/migrate-sessions-to-appview': typeof ApiInternalMigrateSessionsToAppviewRoute
   '/api/internal/wipe': typeof ApiInternalWipeRoute
   '/api/internal/wipe-everything': typeof ApiInternalWipeEverythingRoute
+  '/api/pds/createRecord': typeof ApiPdsCreateRecordRoute
+  '/api/pds/deleteRecord': typeof ApiPdsDeleteRecordRoute
+  '/api/pds/putRecord': typeof ApiPdsPutRecordRoute
   '/api/v1/models': typeof ApiV1ModelsRoute
   '/api/xrpc/dev.cocore.account.createApiKey': typeof ApiXrpcDevDotcocoreDotaccountDotcreateApiKeyRoute
   '/api/xrpc/dev.cocore.account.deleteApiKey': typeof ApiXrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute
@@ -733,8 +834,6 @@ export interface FileRoutesById {
   '/api/xrpc/dev.cocore.devicePair.poll': typeof ApiXrpcDevDotcocoreDotdevicePairDotpollRoute
   '/api/xrpc/dev.cocore.devicePair.start': typeof ApiXrpcDevDotcocoreDotdevicePairDotstartRoute
   '/api/xrpc/dev.cocore.inference.dispatch': typeof ApiXrpcDevDotcocoreDotinferenceDotdispatchRoute
-  '/api/xrpc/dev.cocore.inference.status': typeof ApiXrpcDevDotcocoreDotinferenceDotstatusRoute
-  '/api/xrpc/dev.cocore.inference.submit': typeof ApiXrpcDevDotcocoreDotinferenceDotsubmitRoute
   '/api/xrpc/dev.cocore.proxy.createRecord': typeof ApiXrpcDevDotcocoreDotproxyDotcreateRecordRoute
   '/api/xrpc/dev.cocore.proxy.deleteRecord': typeof ApiXrpcDevDotcocoreDotproxyDotdeleteRecordRoute
   '/api/xrpc/dev.cocore.proxy.putRecord': typeof ApiXrpcDevDotcocoreDotproxyDotputRecordRoute
@@ -744,6 +843,11 @@ export interface FileRoutesById {
   '/_header-layout/machines/': typeof HeaderLayoutMachinesIndexRoute
   '/_docs-header-layout/docs/inference/$slug': typeof DocsHeaderLayoutDocsInferenceSlugRoute
   '/_docs-header-layout/docs/inference/authentication': typeof DocsHeaderLayoutDocsInferenceAuthenticationRoute
+  '/api/agent/mdm/attestation-chain': typeof ApiAgentMdmAttestationChainRoute
+  '/api/agent/mdm/enroll-profile': typeof ApiAgentMdmEnrollProfileRoute
+  '/api/agent/mdm/nanomdm-webhook': typeof ApiAgentMdmNanomdmWebhookRoute
+  '/api/agent/mdm/push-attestation': typeof ApiAgentMdmPushAttestationRoute
+  '/api/agent/mdm/request-attestation': typeof ApiAgentMdmRequestAttestationRoute
   '/api/auth/atproto/authorize': typeof ApiAuthAtprotoAuthorizeRoute
   '/api/auth/atproto/callback': typeof ApiAuthAtprotoCallbackRoute
   '/api/auth/atproto/jwks.json': typeof ApiAuthAtprotoJwksDotjsonRoute
@@ -752,8 +856,10 @@ export interface FileRoutesById {
   '/api/internal/disputes/resolve': typeof ApiInternalDisputesResolveRoute
   '/api/v1/chat/completions': typeof ApiV1ChatCompletionsRoute
   '/v1/private/chat/completions': typeof V1PrivateChatCompletionsRoute
+  '/v1/verified/chat/completions': typeof V1VerifiedChatCompletionsRoute
   '/_docs-header-layout/docs/inference/': typeof DocsHeaderLayoutDocsInferenceIndexRoute
   '/api/v1/private/chat/completions': typeof ApiV1PrivateChatCompletionsRoute
+  '/api/v1/verified/chat/completions': typeof ApiV1VerifiedChatCompletionsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -785,6 +891,7 @@ export interface FileRouteTypes {
     | '/exchange/did.json'
     | '/lexicons/$nsid'
     | '/v1/models'
+    | '/v1/recommended-models'
     | '/xrpc/dev.cocore.account.createApiKey'
     | '/xrpc/dev.cocore.account.deleteApiKey'
     | '/xrpc/dev.cocore.account.listApiKeys'
@@ -794,6 +901,7 @@ export interface FileRouteTypes {
     | '/docs/community-tools'
     | '/docs/inference'
     | '/docs/lexicons'
+    | '/docs/security'
     | '/admin/disputes'
     | '/blog/$slug'
     | '/devices/new'
@@ -803,8 +911,12 @@ export interface FileRouteTypes {
     | '/api/agent/health'
     | '/api/agent/status'
     | '/api/agent/whoami'
+    | '/api/internal/migrate-sessions-to-appview'
     | '/api/internal/wipe'
     | '/api/internal/wipe-everything'
+    | '/api/pds/createRecord'
+    | '/api/pds/deleteRecord'
+    | '/api/pds/putRecord'
     | '/api/v1/models'
     | '/api/xrpc/dev.cocore.account.createApiKey'
     | '/api/xrpc/dev.cocore.account.deleteApiKey'
@@ -814,8 +926,6 @@ export interface FileRouteTypes {
     | '/api/xrpc/dev.cocore.devicePair.poll'
     | '/api/xrpc/dev.cocore.devicePair.start'
     | '/api/xrpc/dev.cocore.inference.dispatch'
-    | '/api/xrpc/dev.cocore.inference.status'
-    | '/api/xrpc/dev.cocore.inference.submit'
     | '/api/xrpc/dev.cocore.proxy.createRecord'
     | '/api/xrpc/dev.cocore.proxy.deleteRecord'
     | '/api/xrpc/dev.cocore.proxy.putRecord'
@@ -825,6 +935,11 @@ export interface FileRouteTypes {
     | '/machines/'
     | '/docs/inference/$slug'
     | '/docs/inference/authentication'
+    | '/api/agent/mdm/attestation-chain'
+    | '/api/agent/mdm/enroll-profile'
+    | '/api/agent/mdm/nanomdm-webhook'
+    | '/api/agent/mdm/push-attestation'
+    | '/api/agent/mdm/request-attestation'
     | '/api/auth/atproto/authorize'
     | '/api/auth/atproto/callback'
     | '/api/auth/atproto/jwks.json'
@@ -833,8 +948,10 @@ export interface FileRouteTypes {
     | '/api/internal/disputes/resolve'
     | '/api/v1/chat/completions'
     | '/v1/private/chat/completions'
+    | '/v1/verified/chat/completions'
     | '/docs/inference/'
     | '/api/v1/private/chat/completions'
+    | '/api/v1/verified/chat/completions'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -864,6 +981,7 @@ export interface FileRouteTypes {
     | '/exchange/did.json'
     | '/lexicons/$nsid'
     | '/v1/models'
+    | '/v1/recommended-models'
     | '/xrpc/dev.cocore.account.createApiKey'
     | '/xrpc/dev.cocore.account.deleteApiKey'
     | '/xrpc/dev.cocore.account.listApiKeys'
@@ -872,6 +990,7 @@ export interface FileRouteTypes {
     | '/docs/api'
     | '/docs/community-tools'
     | '/docs/lexicons'
+    | '/docs/security'
     | '/admin/disputes'
     | '/blog/$slug'
     | '/devices/new'
@@ -881,8 +1000,12 @@ export interface FileRouteTypes {
     | '/api/agent/health'
     | '/api/agent/status'
     | '/api/agent/whoami'
+    | '/api/internal/migrate-sessions-to-appview'
     | '/api/internal/wipe'
     | '/api/internal/wipe-everything'
+    | '/api/pds/createRecord'
+    | '/api/pds/deleteRecord'
+    | '/api/pds/putRecord'
     | '/api/v1/models'
     | '/api/xrpc/dev.cocore.account.createApiKey'
     | '/api/xrpc/dev.cocore.account.deleteApiKey'
@@ -892,8 +1015,6 @@ export interface FileRouteTypes {
     | '/api/xrpc/dev.cocore.devicePair.poll'
     | '/api/xrpc/dev.cocore.devicePair.start'
     | '/api/xrpc/dev.cocore.inference.dispatch'
-    | '/api/xrpc/dev.cocore.inference.status'
-    | '/api/xrpc/dev.cocore.inference.submit'
     | '/api/xrpc/dev.cocore.proxy.createRecord'
     | '/api/xrpc/dev.cocore.proxy.deleteRecord'
     | '/api/xrpc/dev.cocore.proxy.putRecord'
@@ -903,6 +1024,11 @@ export interface FileRouteTypes {
     | '/machines'
     | '/docs/inference/$slug'
     | '/docs/inference/authentication'
+    | '/api/agent/mdm/attestation-chain'
+    | '/api/agent/mdm/enroll-profile'
+    | '/api/agent/mdm/nanomdm-webhook'
+    | '/api/agent/mdm/push-attestation'
+    | '/api/agent/mdm/request-attestation'
     | '/api/auth/atproto/authorize'
     | '/api/auth/atproto/callback'
     | '/api/auth/atproto/jwks.json'
@@ -911,8 +1037,10 @@ export interface FileRouteTypes {
     | '/api/internal/disputes/resolve'
     | '/api/v1/chat/completions'
     | '/v1/private/chat/completions'
+    | '/v1/verified/chat/completions'
     | '/docs/inference'
     | '/api/v1/private/chat/completions'
+    | '/api/v1/verified/chat/completions'
   id:
     | '__root__'
     | '/_docs-header-layout'
@@ -943,6 +1071,7 @@ export interface FileRouteTypes {
     | '/exchange/did.json'
     | '/lexicons/$nsid'
     | '/v1/models'
+    | '/v1/recommended-models'
     | '/xrpc/dev.cocore.account.createApiKey'
     | '/xrpc/dev.cocore.account.deleteApiKey'
     | '/xrpc/dev.cocore.account.listApiKeys'
@@ -953,6 +1082,7 @@ export interface FileRouteTypes {
     | '/_docs-header-layout/docs/community-tools'
     | '/_docs-header-layout/docs/inference'
     | '/_docs-header-layout/docs/lexicons'
+    | '/_docs-header-layout/docs/security'
     | '/_header-layout/admin/disputes'
     | '/_header-layout/blog/$slug'
     | '/_header-layout/devices/new'
@@ -962,8 +1092,12 @@ export interface FileRouteTypes {
     | '/api/agent/health'
     | '/api/agent/status'
     | '/api/agent/whoami'
+    | '/api/internal/migrate-sessions-to-appview'
     | '/api/internal/wipe'
     | '/api/internal/wipe-everything'
+    | '/api/pds/createRecord'
+    | '/api/pds/deleteRecord'
+    | '/api/pds/putRecord'
     | '/api/v1/models'
     | '/api/xrpc/dev.cocore.account.createApiKey'
     | '/api/xrpc/dev.cocore.account.deleteApiKey'
@@ -973,8 +1107,6 @@ export interface FileRouteTypes {
     | '/api/xrpc/dev.cocore.devicePair.poll'
     | '/api/xrpc/dev.cocore.devicePair.start'
     | '/api/xrpc/dev.cocore.inference.dispatch'
-    | '/api/xrpc/dev.cocore.inference.status'
-    | '/api/xrpc/dev.cocore.inference.submit'
     | '/api/xrpc/dev.cocore.proxy.createRecord'
     | '/api/xrpc/dev.cocore.proxy.deleteRecord'
     | '/api/xrpc/dev.cocore.proxy.putRecord'
@@ -984,6 +1116,11 @@ export interface FileRouteTypes {
     | '/_header-layout/machines/'
     | '/_docs-header-layout/docs/inference/$slug'
     | '/_docs-header-layout/docs/inference/authentication'
+    | '/api/agent/mdm/attestation-chain'
+    | '/api/agent/mdm/enroll-profile'
+    | '/api/agent/mdm/nanomdm-webhook'
+    | '/api/agent/mdm/push-attestation'
+    | '/api/agent/mdm/request-attestation'
     | '/api/auth/atproto/authorize'
     | '/api/auth/atproto/callback'
     | '/api/auth/atproto/jwks.json'
@@ -992,8 +1129,10 @@ export interface FileRouteTypes {
     | '/api/internal/disputes/resolve'
     | '/api/v1/chat/completions'
     | '/v1/private/chat/completions'
+    | '/v1/verified/chat/completions'
     | '/_docs-header-layout/docs/inference/'
     | '/api/v1/private/chat/completions'
+    | '/api/v1/verified/chat/completions'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -1006,6 +1145,7 @@ export interface RootRouteChildren {
   ExchangeDidDotjsonRoute: typeof ExchangeDidDotjsonRoute
   LexiconsNsidRoute: typeof LexiconsNsidRoute
   V1ModelsRoute: typeof V1ModelsRoute
+  V1RecommendedModelsRoute: typeof V1RecommendedModelsRoute
   XrpcDevDotcocoreDotaccountDotcreateApiKeyRoute: typeof XrpcDevDotcocoreDotaccountDotcreateApiKeyRoute
   XrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute: typeof XrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute
   XrpcDevDotcocoreDotaccountDotlistApiKeysRoute: typeof XrpcDevDotcocoreDotaccountDotlistApiKeysRoute
@@ -1015,8 +1155,12 @@ export interface RootRouteChildren {
   ApiAgentHealthRoute: typeof ApiAgentHealthRoute
   ApiAgentStatusRoute: typeof ApiAgentStatusRoute
   ApiAgentWhoamiRoute: typeof ApiAgentWhoamiRoute
+  ApiInternalMigrateSessionsToAppviewRoute: typeof ApiInternalMigrateSessionsToAppviewRoute
   ApiInternalWipeRoute: typeof ApiInternalWipeRoute
   ApiInternalWipeEverythingRoute: typeof ApiInternalWipeEverythingRoute
+  ApiPdsCreateRecordRoute: typeof ApiPdsCreateRecordRoute
+  ApiPdsDeleteRecordRoute: typeof ApiPdsDeleteRecordRoute
+  ApiPdsPutRecordRoute: typeof ApiPdsPutRecordRoute
   ApiV1ModelsRoute: typeof ApiV1ModelsRoute
   ApiXrpcDevDotcocoreDotaccountDotcreateApiKeyRoute: typeof ApiXrpcDevDotcocoreDotaccountDotcreateApiKeyRoute
   ApiXrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute: typeof ApiXrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute
@@ -1026,12 +1170,15 @@ export interface RootRouteChildren {
   ApiXrpcDevDotcocoreDotdevicePairDotpollRoute: typeof ApiXrpcDevDotcocoreDotdevicePairDotpollRoute
   ApiXrpcDevDotcocoreDotdevicePairDotstartRoute: typeof ApiXrpcDevDotcocoreDotdevicePairDotstartRoute
   ApiXrpcDevDotcocoreDotinferenceDotdispatchRoute: typeof ApiXrpcDevDotcocoreDotinferenceDotdispatchRoute
-  ApiXrpcDevDotcocoreDotinferenceDotstatusRoute: typeof ApiXrpcDevDotcocoreDotinferenceDotstatusRoute
-  ApiXrpcDevDotcocoreDotinferenceDotsubmitRoute: typeof ApiXrpcDevDotcocoreDotinferenceDotsubmitRoute
   ApiXrpcDevDotcocoreDotproxyDotcreateRecordRoute: typeof ApiXrpcDevDotcocoreDotproxyDotcreateRecordRoute
   ApiXrpcDevDotcocoreDotproxyDotdeleteRecordRoute: typeof ApiXrpcDevDotcocoreDotproxyDotdeleteRecordRoute
   ApiXrpcDevDotcocoreDotproxyDotputRecordRoute: typeof ApiXrpcDevDotcocoreDotproxyDotputRecordRoute
   V1ChatCompletionsRoute: typeof V1ChatCompletionsRoute
+  ApiAgentMdmAttestationChainRoute: typeof ApiAgentMdmAttestationChainRoute
+  ApiAgentMdmEnrollProfileRoute: typeof ApiAgentMdmEnrollProfileRoute
+  ApiAgentMdmNanomdmWebhookRoute: typeof ApiAgentMdmNanomdmWebhookRoute
+  ApiAgentMdmPushAttestationRoute: typeof ApiAgentMdmPushAttestationRoute
+  ApiAgentMdmRequestAttestationRoute: typeof ApiAgentMdmRequestAttestationRoute
   ApiAuthAtprotoAuthorizeRoute: typeof ApiAuthAtprotoAuthorizeRoute
   ApiAuthAtprotoCallbackRoute: typeof ApiAuthAtprotoCallbackRoute
   ApiAuthAtprotoJwksDotjsonRoute: typeof ApiAuthAtprotoJwksDotjsonRoute
@@ -1040,7 +1187,9 @@ export interface RootRouteChildren {
   ApiInternalDisputesResolveRoute: typeof ApiInternalDisputesResolveRoute
   ApiV1ChatCompletionsRoute: typeof ApiV1ChatCompletionsRoute
   V1PrivateChatCompletionsRoute: typeof V1PrivateChatCompletionsRoute
+  V1VerifiedChatCompletionsRoute: typeof V1VerifiedChatCompletionsRoute
   ApiV1PrivateChatCompletionsRoute: typeof ApiV1PrivateChatCompletionsRoute
+  ApiV1VerifiedChatCompletionsRoute: typeof ApiV1VerifiedChatCompletionsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -1120,6 +1269,13 @@ declare module '@tanstack/react-router' {
       path: '/xrpc/dev.cocore.account.createApiKey'
       fullPath: '/xrpc/dev.cocore.account.createApiKey'
       preLoaderRoute: typeof XrpcDevDotcocoreDotaccountDotcreateApiKeyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/v1/recommended-models': {
+      id: '/v1/recommended-models'
+      path: '/v1/recommended-models'
+      fullPath: '/v1/recommended-models'
+      preLoaderRoute: typeof V1RecommendedModelsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/v1/models': {
@@ -1332,20 +1488,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiXrpcDevDotcocoreDotproxyDotcreateRecordRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/xrpc/dev.cocore.inference.submit': {
-      id: '/api/xrpc/dev.cocore.inference.submit'
-      path: '/api/xrpc/dev.cocore.inference.submit'
-      fullPath: '/api/xrpc/dev.cocore.inference.submit'
-      preLoaderRoute: typeof ApiXrpcDevDotcocoreDotinferenceDotsubmitRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/xrpc/dev.cocore.inference.status': {
-      id: '/api/xrpc/dev.cocore.inference.status'
-      path: '/api/xrpc/dev.cocore.inference.status'
-      fullPath: '/api/xrpc/dev.cocore.inference.status'
-      preLoaderRoute: typeof ApiXrpcDevDotcocoreDotinferenceDotstatusRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/api/xrpc/dev.cocore.inference.dispatch': {
       id: '/api/xrpc/dev.cocore.inference.dispatch'
       path: '/api/xrpc/dev.cocore.inference.dispatch'
@@ -1409,6 +1551,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiV1ModelsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/pds/putRecord': {
+      id: '/api/pds/putRecord'
+      path: '/api/pds/putRecord'
+      fullPath: '/api/pds/putRecord'
+      preLoaderRoute: typeof ApiPdsPutRecordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/pds/deleteRecord': {
+      id: '/api/pds/deleteRecord'
+      path: '/api/pds/deleteRecord'
+      fullPath: '/api/pds/deleteRecord'
+      preLoaderRoute: typeof ApiPdsDeleteRecordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/pds/createRecord': {
+      id: '/api/pds/createRecord'
+      path: '/api/pds/createRecord'
+      fullPath: '/api/pds/createRecord'
+      preLoaderRoute: typeof ApiPdsCreateRecordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/internal/wipe-everything': {
       id: '/api/internal/wipe-everything'
       path: '/api/internal/wipe-everything'
@@ -1421,6 +1584,13 @@ declare module '@tanstack/react-router' {
       path: '/api/internal/wipe'
       fullPath: '/api/internal/wipe'
       preLoaderRoute: typeof ApiInternalWipeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/internal/migrate-sessions-to-appview': {
+      id: '/api/internal/migrate-sessions-to-appview'
+      path: '/api/internal/migrate-sessions-to-appview'
+      fullPath: '/api/internal/migrate-sessions-to-appview'
+      preLoaderRoute: typeof ApiInternalMigrateSessionsToAppviewRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/agent/whoami': {
@@ -1486,6 +1656,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HeaderLayoutAdminDisputesRouteImport
       parentRoute: typeof HeaderLayoutRoute
     }
+    '/_docs-header-layout/docs/security': {
+      id: '/_docs-header-layout/docs/security'
+      path: '/docs/security'
+      fullPath: '/docs/security'
+      preLoaderRoute: typeof DocsHeaderLayoutDocsSecurityRouteImport
+      parentRoute: typeof DocsHeaderLayoutRoute
+    }
     '/_docs-header-layout/docs/lexicons': {
       id: '/_docs-header-layout/docs/lexicons'
       path: '/docs/lexicons'
@@ -1520,6 +1697,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/docs/inference/'
       preLoaderRoute: typeof DocsHeaderLayoutDocsInferenceIndexRouteImport
       parentRoute: typeof DocsHeaderLayoutDocsInferenceRoute
+    }
+    '/v1/verified/chat/completions': {
+      id: '/v1/verified/chat/completions'
+      path: '/v1/verified/chat/completions'
+      fullPath: '/v1/verified/chat/completions'
+      preLoaderRoute: typeof V1VerifiedChatCompletionsRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/v1/private/chat/completions': {
       id: '/v1/private/chat/completions'
@@ -1577,6 +1761,41 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAuthAtprotoAuthorizeRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/agent/mdm/request-attestation': {
+      id: '/api/agent/mdm/request-attestation'
+      path: '/api/agent/mdm/request-attestation'
+      fullPath: '/api/agent/mdm/request-attestation'
+      preLoaderRoute: typeof ApiAgentMdmRequestAttestationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/agent/mdm/push-attestation': {
+      id: '/api/agent/mdm/push-attestation'
+      path: '/api/agent/mdm/push-attestation'
+      fullPath: '/api/agent/mdm/push-attestation'
+      preLoaderRoute: typeof ApiAgentMdmPushAttestationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/agent/mdm/nanomdm-webhook': {
+      id: '/api/agent/mdm/nanomdm-webhook'
+      path: '/api/agent/mdm/nanomdm-webhook'
+      fullPath: '/api/agent/mdm/nanomdm-webhook'
+      preLoaderRoute: typeof ApiAgentMdmNanomdmWebhookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/agent/mdm/enroll-profile': {
+      id: '/api/agent/mdm/enroll-profile'
+      path: '/api/agent/mdm/enroll-profile'
+      fullPath: '/api/agent/mdm/enroll-profile'
+      preLoaderRoute: typeof ApiAgentMdmEnrollProfileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/agent/mdm/attestation-chain': {
+      id: '/api/agent/mdm/attestation-chain'
+      path: '/api/agent/mdm/attestation-chain'
+      fullPath: '/api/agent/mdm/attestation-chain'
+      preLoaderRoute: typeof ApiAgentMdmAttestationChainRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_docs-header-layout/docs/inference/authentication': {
       id: '/_docs-header-layout/docs/inference/authentication'
       path: '/authentication'
@@ -1590,6 +1809,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/docs/inference/$slug'
       preLoaderRoute: typeof DocsHeaderLayoutDocsInferenceSlugRouteImport
       parentRoute: typeof DocsHeaderLayoutDocsInferenceRoute
+    }
+    '/api/v1/verified/chat/completions': {
+      id: '/api/v1/verified/chat/completions'
+      path: '/api/v1/verified/chat/completions'
+      fullPath: '/api/v1/verified/chat/completions'
+      preLoaderRoute: typeof ApiV1VerifiedChatCompletionsRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/api/v1/private/chat/completions': {
       id: '/api/v1/private/chat/completions'
@@ -1627,6 +1853,7 @@ interface DocsHeaderLayoutRouteChildren {
   DocsHeaderLayoutDocsCommunityToolsRoute: typeof DocsHeaderLayoutDocsCommunityToolsRoute
   DocsHeaderLayoutDocsInferenceRoute: typeof DocsHeaderLayoutDocsInferenceRouteWithChildren
   DocsHeaderLayoutDocsLexiconsRoute: typeof DocsHeaderLayoutDocsLexiconsRoute
+  DocsHeaderLayoutDocsSecurityRoute: typeof DocsHeaderLayoutDocsSecurityRoute
   DocsHeaderLayoutDocsIndexRoute: typeof DocsHeaderLayoutDocsIndexRoute
 }
 
@@ -1637,6 +1864,7 @@ const DocsHeaderLayoutRouteChildren: DocsHeaderLayoutRouteChildren = {
   DocsHeaderLayoutDocsInferenceRoute:
     DocsHeaderLayoutDocsInferenceRouteWithChildren,
   DocsHeaderLayoutDocsLexiconsRoute: DocsHeaderLayoutDocsLexiconsRoute,
+  DocsHeaderLayoutDocsSecurityRoute: DocsHeaderLayoutDocsSecurityRoute,
   DocsHeaderLayoutDocsIndexRoute: DocsHeaderLayoutDocsIndexRoute,
 }
 
@@ -1725,6 +1953,7 @@ const rootRouteChildren: RootRouteChildren = {
   ExchangeDidDotjsonRoute: ExchangeDidDotjsonRoute,
   LexiconsNsidRoute: LexiconsNsidRoute,
   V1ModelsRoute: V1ModelsRoute,
+  V1RecommendedModelsRoute: V1RecommendedModelsRoute,
   XrpcDevDotcocoreDotaccountDotcreateApiKeyRoute:
     XrpcDevDotcocoreDotaccountDotcreateApiKeyRoute,
   XrpcDevDotcocoreDotaccountDotdeleteApiKeyRoute:
@@ -1738,8 +1967,13 @@ const rootRouteChildren: RootRouteChildren = {
   ApiAgentHealthRoute: ApiAgentHealthRoute,
   ApiAgentStatusRoute: ApiAgentStatusRoute,
   ApiAgentWhoamiRoute: ApiAgentWhoamiRoute,
+  ApiInternalMigrateSessionsToAppviewRoute:
+    ApiInternalMigrateSessionsToAppviewRoute,
   ApiInternalWipeRoute: ApiInternalWipeRoute,
   ApiInternalWipeEverythingRoute: ApiInternalWipeEverythingRoute,
+  ApiPdsCreateRecordRoute: ApiPdsCreateRecordRoute,
+  ApiPdsDeleteRecordRoute: ApiPdsDeleteRecordRoute,
+  ApiPdsPutRecordRoute: ApiPdsPutRecordRoute,
   ApiV1ModelsRoute: ApiV1ModelsRoute,
   ApiXrpcDevDotcocoreDotaccountDotcreateApiKeyRoute:
     ApiXrpcDevDotcocoreDotaccountDotcreateApiKeyRoute,
@@ -1757,10 +1991,6 @@ const rootRouteChildren: RootRouteChildren = {
     ApiXrpcDevDotcocoreDotdevicePairDotstartRoute,
   ApiXrpcDevDotcocoreDotinferenceDotdispatchRoute:
     ApiXrpcDevDotcocoreDotinferenceDotdispatchRoute,
-  ApiXrpcDevDotcocoreDotinferenceDotstatusRoute:
-    ApiXrpcDevDotcocoreDotinferenceDotstatusRoute,
-  ApiXrpcDevDotcocoreDotinferenceDotsubmitRoute:
-    ApiXrpcDevDotcocoreDotinferenceDotsubmitRoute,
   ApiXrpcDevDotcocoreDotproxyDotcreateRecordRoute:
     ApiXrpcDevDotcocoreDotproxyDotcreateRecordRoute,
   ApiXrpcDevDotcocoreDotproxyDotdeleteRecordRoute:
@@ -1768,6 +1998,11 @@ const rootRouteChildren: RootRouteChildren = {
   ApiXrpcDevDotcocoreDotproxyDotputRecordRoute:
     ApiXrpcDevDotcocoreDotproxyDotputRecordRoute,
   V1ChatCompletionsRoute: V1ChatCompletionsRoute,
+  ApiAgentMdmAttestationChainRoute: ApiAgentMdmAttestationChainRoute,
+  ApiAgentMdmEnrollProfileRoute: ApiAgentMdmEnrollProfileRoute,
+  ApiAgentMdmNanomdmWebhookRoute: ApiAgentMdmNanomdmWebhookRoute,
+  ApiAgentMdmPushAttestationRoute: ApiAgentMdmPushAttestationRoute,
+  ApiAgentMdmRequestAttestationRoute: ApiAgentMdmRequestAttestationRoute,
   ApiAuthAtprotoAuthorizeRoute: ApiAuthAtprotoAuthorizeRoute,
   ApiAuthAtprotoCallbackRoute: ApiAuthAtprotoCallbackRoute,
   ApiAuthAtprotoJwksDotjsonRoute: ApiAuthAtprotoJwksDotjsonRoute,
@@ -1776,7 +2011,9 @@ const rootRouteChildren: RootRouteChildren = {
   ApiInternalDisputesResolveRoute: ApiInternalDisputesResolveRoute,
   ApiV1ChatCompletionsRoute: ApiV1ChatCompletionsRoute,
   V1PrivateChatCompletionsRoute: V1PrivateChatCompletionsRoute,
+  V1VerifiedChatCompletionsRoute: V1VerifiedChatCompletionsRoute,
   ApiV1PrivateChatCompletionsRoute: ApiV1PrivateChatCompletionsRoute,
+  ApiV1VerifiedChatCompletionsRoute: ApiV1VerifiedChatCompletionsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

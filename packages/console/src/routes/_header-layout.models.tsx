@@ -19,6 +19,7 @@ import {
 } from "@/components/api-docs/snippets.ts";
 import { modelDirectoryRouteQueryOptions } from "@/components/models/models.functions.ts";
 import { OperatorChip } from "@/components/profile/OperatorChip.tsx";
+import { TrustTierBadge } from "@/components/TrustTierBadge.tsx";
 import { Button } from "@/design-system/button";
 import { CopyToClipboardButton } from "@/design-system/copy-to-clipboard-button";
 import { Flex } from "@/design-system/flex";
@@ -43,7 +44,7 @@ import type { ModelDirectoryEntry } from "@/lib/model-directory.server.ts";
 
 const ButtonLink = createLink(Button);
 
-const DEFAULT_API_V1_BASE = "https://console.cocore.dev/v1";
+const DEFAULT_API_V1_BASE = "https://cocore.dev/v1";
 
 const KIND_TABS = ["all", "text", "image", "audio", "video", "test", "other"] as const;
 type ModelKind = (typeof KIND_TABS)[number];
@@ -989,7 +990,7 @@ function ModelsPage() {
               {isStub(selected.modelId) ? (
                 <Body variant="secondary">
                   <strong>This is not a real model.</strong> <InlineCode>stub</InlineCode> is
-                  cocore&apos;s hello-world end-to-end test — every paired machine advertises it,
+                  co/core&apos;s hello-world end-to-end test — every paired machine advertises it,
                   every request routes through the exchange, every receipt gets signed, and you get
                   a canned response back. It exists so a new provider can pair, dispatch one
                   request, and confirm that their box is alive on the network without burning tokens
@@ -1085,7 +1086,7 @@ function ModelsPage() {
                       const isLast = i === selected.machines.length - 1;
                       return (
                         <tr
-                          key={`${selected.modelId}-${mach.did}`}
+                          key={`${selected.modelId}-${mach.attestationPubKey ?? mach.did}`}
                           {...stylex.props(styles.tableRow)}
                         >
                           <td {...stylex.props(styles.td, isLast && styles.tdLastRow)}>
@@ -1094,6 +1095,7 @@ function ModelsPage() {
                               {mach.chip ? ` · ${mach.chip}` : ""}
                               {mach.ramGB != null ? `, ${mach.ramGB} GB` : ""}
                             </SmallBody>
+                            <TrustTierBadge tier={mach.verifiedTier} />
                           </td>
                           <td {...stylex.props(styles.td, isLast && styles.tdLastRow)}>
                             <OperatorChip

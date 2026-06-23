@@ -1,11 +1,11 @@
 ---
-title: "How the cocore economy is shaped, and why"
-summary: "A design rationale for the cocore token market — what each mechanic does, why it's there, what we deliberately left out, and how the whole thing stays honest."
+title: "How the co/core economy is shaped, and why"
+summary: "A design rationale for the co/core token market — what each mechanic does, why it's there, what we deliberately left out, and how the whole thing stays honest."
 date: "2026-05-11"
-author: "cocore"
+author: "co/core"
 ---
 
-The cocore protocol is built around _receipts of computational work_:
+The co/core protocol is built around _receipts of computational work_:
 a provider runs an inference job, signs a record with the input
 commitment, output commitment, token counts, model id, and price, and
 publishes it to their PDS. Anyone with the lexicon and the provider's
@@ -32,7 +32,7 @@ Below: what we built, why, and what we left out.
 
 ## The unit
 
-The unit of account between cocore members is the **token**.
+The unit of account between co/core members is the **token**.
 Balances are integers; every receipt's price is denominated in
 tokens. The exchange's `tokenRate` fixes the conversion between
 model tokens and balance tokens at **1:1** — one token of model
@@ -77,7 +77,7 @@ and why it exists.
 
 ### 1. The onboarding grant
 
-Every DID that interacts with cocore for the first time receives
+Every DID that interacts with co/core for the first time receives
 **1,000,000 tokens** as a one-time grant. At the 1:1 rate that's
 one million tokens of inference — enough for a few thousand small
 completions, plus headroom for one or two long ones, before you'd
@@ -138,7 +138,7 @@ thousands of tokens, the floor goes up proportionally.
 
 ### 3. Conservation: the 95/5 split
 
-The substantive economic event in cocore is the receipt. When a
+The substantive economic event in co/core is the receipt. When a
 provider publishes a `dev.cocore.compute.receipt`, the exchange
 verifies it and writes three balance changes atomically:
 
@@ -187,7 +187,7 @@ Active members get **70,000 tokens** per week, issued **lazily**
 when they next touch the network. The lazy part is load-bearing:
 
 - A dormant DID never touches the ledger, so it never accrues a
-  refresh. Members who've stopped using cocore don't continue
+  refresh. Members who've stopped using co/core don't continue
   receiving tokens they're not going to spend.
 - An active member receives the refresh as a side effect of their
   next receipt, balance read, or governance act. There's no
@@ -195,7 +195,7 @@ when they next touch the network. The lazy part is load-bearing:
   on Sunday — instead the refresh fires when there's already a
   reason to be writing to the ledger.
 
-The refresh is the cocore equivalent of a credit union's
+The refresh is the co/core equivalent of a credit union's
 basic-account fee waiver: a small thing that's worth more for
 what it _doesn't_ do than for what it does. It doesn't make
 anyone rich. It does mean a member who logs in once a month
@@ -319,7 +319,7 @@ the rules without publishing a new policy record and bumping the
 on their next page load.
 
 **The exchange is federable.** Receipts live on provider PDSes,
-not on a cocore-owned database; settlements live on the
+not on a co/core-owned database; settlements live on the
 exchange's PDS, but the receipt is the canonical artifact and
 anyone can index the firehose and run a different exchange off
 the same receipts. The cocore.dev exchange isn't a chokepoint —
@@ -409,7 +409,7 @@ building an entirely new implementation from scratch — the
 "receipt on a self-verifying PDS" pattern lands closer to where we
 wanted it because their public work let us learn from what they'd
 already figured out. The user-facing framing ("compute, but
-shared") comes from the Silicon Florist post that named cocore in
+shared") comes from the Silicon Florist post that named co/core in
 the first place.
 
 We don't think we've invented an economy. We've translated a

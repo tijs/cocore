@@ -39,6 +39,19 @@ export interface Register {
   attestation_uri: string;
   /** Optional / additive — absent on a healthy serve. */
   engine_fault?: EngineFault;
+  /** Measured cdHash echoed from the signed attestation — the advisor checks
+   *  it against its known-good set when computing confidential eligibility.
+   *  Additive. */
+  cd_hash?: string;
+  /** Provider's self-asserted tier (`attested-confidential` | `best-effort`),
+   *  echoed from the signed attestation. Advisory — the advisor recomputes.
+   *  Additive. */
+  tier?: string;
+  /** APNs device token (hex) for the measured agent process, when it could
+   *  register for remote notifications (confidential build + GUI session). The
+   *  advisor sends the code-identity challenge here. Omitted on headless
+   *  installs, which therefore stay best-effort. Additive. */
+  apns_device_token?: string;
 }
 
 /** Content-free crash signature the provider folds into its heartbeat
@@ -84,6 +97,17 @@ export interface AttestationResponse {
   signature: number[] | string;
 }
 
+/** Provider → advisor: response to an APNs code-identity challenge. The
+ *  challenge arrives out-of-band over APNs (a nonce sealed to the provider's
+ *  X25519 key `K`); only the genuine, AMFI-gated binary can receive and open
+ *  it. The provider echoes the recovered `nonce` and a Secure-Enclave P-256
+ *  signature (DER) over the canonical `{ nonce }`. Mirror of the Rust
+ *  `CodeAttestationResponse`. Additive. */
+export interface CodeAttestationResponse {
+  nonce: string;
+  signature: number[] | string;
+}
+
 export interface InferenceRequest {
   job_uri: string;
   /** Optional CID half of the job strong-ref. The provider needs
@@ -102,6 +126,9 @@ export interface InferenceRequest {
 interface InferenceChunk {
   session_id: string;
   seq: number;
+  /** Which channel this chunk's plaintext belongs to. Absent (older
+   *  providers) means the answer. The advisor relays it opaquely. */
+  channel?: "content" | "reasoning";
   ciphertext: number[] | string;
 }
 
@@ -181,6 +208,7 @@ export type AdvisorMessage =
   | ({ type: "heartbeat" } & Heartbeat)
   | ({ type: "attestation_challenge" } & AttestationChallenge)
   | ({ type: "attestation_response" } & AttestationResponse)
+  | ({ type: "code_attestation_response" } & CodeAttestationResponse)
   | ({ type: "inference_request" } & InferenceRequest)
   | ({ type: "inference_chunk" } & InferenceChunk)
   | ({ type: "inference_keepalive" } & InferenceKeepalive)

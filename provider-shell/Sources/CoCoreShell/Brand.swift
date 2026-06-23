@@ -1,5 +1,5 @@
 // Brand: the cocore visual identity, shared by every window the tray
-// opens so the app matches the console (console.cocore.dev) instead of
+// opens so the app matches the console (cocore.dev) instead of
 // defaulting to system blue.
 //
 // Colors are transcribed from the console design system — a Radix

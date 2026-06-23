@@ -7,6 +7,7 @@ import { Effect } from "effect";
 import { z } from "zod";
 
 import { atprotoOAuthAuthorizeEffect } from "@/integrations/auth/atproto.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { sanitizeAuthRedirectTarget } from "@/utils/auth-redirect.ts";
 import { getSavedHandlesFromCookieHeader } from "@/utils/saved-handles.ts";
 
@@ -21,7 +22,8 @@ export type AtprotoAuthorizeInput = z.infer<typeof authorizeInputSchema>;
 export const atprotoAuthorizeServerFn = createServerFn({ method: "GET" })
   .inputValidator(authorizeInputSchema)
   .handler(async ({ data }) =>
-    Effect.runPromise(
+    runTraced(
+      "auth.oauthAuthorize",
       Effect.gen(function* () {
         const request = getRequest();
         const normalized = data.handle.replace(/^@/, "").trim() as ActorIdentifier;
@@ -57,7 +59,8 @@ export type AtprotoSignupInput = z.infer<typeof signupInputSchema>;
 export const atprotoSignupServerFn = createServerFn({ method: "GET" })
   .inputValidator(signupInputSchema)
   .handler(async ({ data }) =>
-    Effect.runPromise(
+    runTraced(
+      "auth.oauthSignup",
       Effect.gen(function* () {
         const request = getRequest();
         const redirectTarget = sanitizeAuthRedirectTarget(data.redirect ?? undefined, request.url);
@@ -90,7 +93,8 @@ export const atprotoSignupMutationOptions = mutationOptions({
  * client-only flash.
  */
 const getSavedHandlesServerFn = createServerFn({ method: "GET" }).handler(() =>
-  Effect.runPromise(
+  runTraced(
+    "auth.getSavedHandles",
     Effect.sync(() => {
       const request = getRequest();
       return getSavedHandlesFromCookieHeader(request.headers.get("cookie"));

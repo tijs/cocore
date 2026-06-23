@@ -163,6 +163,9 @@ final class AgentSupervisor {
     /// session or the upload fails, so the user can still attach it by hand.
     func sendBugReport(note: String? = nil) async -> String? {
         guard let bundle = Self.generateBugReportBundle() else { return nil }
+        // Target session.apiBase — the service that paired us holds our bearer
+        // key. (Follow-up: the AppView should serve /api/agent/bug-report too,
+        // so device-pair'd agents can upload; today only the console does.)
         guard let session = SessionStore.load(),
               let apiKey = session.apiKey,
               let base = session.apiBase,
@@ -222,12 +225,16 @@ final class AgentSupervisor {
         // A fresh deliberate start clears the stop latch so a later
         // unexpected exit is treated as a crash and respawned.
         intentionalStop = false
-        guard let bin = Self.locateBinary() else {
+        // Probe the owner's trust tier ONCE: it selects the worker binary AND
+        // gates the inference-model env below (a confidential machine is
+        // native-only, so we must not inject subprocess models).
+        let tier = Self.probeTier()
+        let confidential = (tier == "attested-confidential")
+        guard let bin = Self.serveBinary(tier: tier) else {
             NSLog("cocore: provider binary not found")
             return
         }
-        let advisor = UserDefaults.standard.string(forKey: "advisorUrl")
-            ?? "wss://advisor.cocore.dev/v1/agent"
+        let advisor = Endpoints.advisorURL
         let p = Process()
         p.executableURL = bin
         p.arguments = ["agent", "serve", "--advisor", advisor]
@@ -240,8 +247,7 @@ final class AgentSupervisor {
             "HOME": NSHomeDirectory(),
             "PATH": "\(NSHomeDirectory())/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "COCORE_LOG": "info",
-            "COCORE_CONSOLE": UserDefaults.standard.string(forKey: "consoleBaseUrl")
-                ?? "https://console.cocore.dev",
+            "COCORE_CONSOLE": Endpoints.consoleURL,
             "COCORE_PYTHON_VENV": "\(NSHomeDirectory())/.cocore/python",
             // Full backtraces so the next panic the agent writes to
             // ~/.cocore/last-panic.txt names the exact frame, not just
@@ -249,9 +255,13 @@ final class AgentSupervisor {
             // but this also enriches the stderr line we persist below.
             "RUST_BACKTRACE": "full",
         ]
+        // Best-effort machines serve the owner's subprocess models; a
+        // confidential machine is native-only (inference stays in the measured
+        // binary), so never inject subprocess models there — the agent also
+        // clears them defensively, but not passing them avoids the spawn churn.
         let models = (UserDefaults.standard.string(forKey: "inferenceModels") ?? "")
             .trimmingCharacters(in: .whitespaces)
-        if !models.isEmpty { env["COCORE_INFERENCE_MODELS"] = models }
+        if !confidential, !models.isEmpty { env["COCORE_INFERENCE_MODELS"] = models }
         // Owner-chosen display name (set in the tray during setup), so the
         // provider record shows that instead of the raw `.local` hostname.
         let label = (UserDefaults.standard.string(forKey: "machineLabel") ?? "")
@@ -282,7 +292,7 @@ final class AgentSupervisor {
         p.standardError = errPipe
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             guard let line = String(data: h.availableData, encoding: .utf8), !line.isEmpty else { return }
-            Task { @MainActor in self?.onLine?(line) }
+            Task { @MainActor [weak self] in self?.onLine?(line) }
         }
         errPipe.fileHandleForReading.readabilityHandler = { h in
             if let s = String(data: h.availableData, encoding: .utf8), !s.isEmpty {
@@ -298,7 +308,7 @@ final class AgentSupervisor {
             }
         }
         p.terminationHandler = { [weak self] proc in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.process = nil
                 NSLog("cocore agent exited with %d", proc.terminationStatus)
@@ -353,15 +363,30 @@ final class AgentSupervisor {
         }
     }
 
-    /// SIGTERM any `cocore agent serve` process owned by this user that we
-    /// aren't currently tracking. Best-effort and synchronous (it runs
-    /// before a spawn, where a ~half-second wait is acceptable). Uses
-    /// `pgrep`/`kill` rather than `pkill` so we can exclude our own PID and
-    /// log what we reaped.
+    /// SIGTERM any launchd-orphaned `cocore agent serve` process — one whose
+    /// parent is pid 1, i.e. a previous app session's agent that was
+    /// reparented to launchd when its shell quit without reaping it. Scoped
+    /// to ppid==1 deliberately: a worker parented to a LIVE supervisor is
+    /// that supervisor's to manage, never ours to kill. Without the `-P 1`
+    /// scope, two coexisting tray instances (a botched relaunch, or an
+    /// in-place update where the old instance hadn't quit yet) each reaped
+    /// the OTHER's live worker on every pre-spawn pass — the worker
+    /// respawned and ~30s later got reaped again, the "⚠ the agent keeps
+    /// crashing N×" war that hit the confidential nested worker most
+    /// visibly. `pgrep -P 1 -f <pattern>` is AND semantics on macOS, so we
+    /// catch genuine orphans while leaving live supervised workers alone.
+    /// Best-effort and synchronous (it runs before a spawn, where a
+    /// ~half-second wait is acceptable). Uses `pgrep`/`kill` rather than
+    /// `pkill` so we can exclude our own PID and log what we reaped.
     private static func killStrayAgents() {
         let pgrep = Process()
         pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        pgrep.arguments = ["-f", "cocore agent serve"]
+        // Match both the default CLI (`cocore agent serve`) and the nested
+        // confidential worker (`cocore-provider agent serve`) — a confidential
+        // machine runs the latter, and an orphan of either kind must be reaped.
+        // `-P 1` restricts to launchd orphans (ppid==1); a worker parented to
+        // a running supervisor is left alone.
+        pgrep.arguments = ["-P", "1", "-f", "cocore(-provider)? agent serve"]
         let pipe = Pipe()
         pgrep.standardOutput = pipe
         pgrep.standardError = FileHandle.nullDevice
@@ -375,7 +400,7 @@ final class AgentSupervisor {
                 .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
                 .filter { $0 != mine }
             guard !pids.isEmpty else { return }
-            NSLog("cocore: reaping %d stray agent process(es) before spawn: %@",
+            NSLog("cocore: reaping %d orphaned agent process(es) before spawn: %@",
                   pids.count, pids.map(String.init).joined(separator: ","))
             for pid in pids { kill(pid, SIGTERM) }
             // Give them a moment to unwind (their Drop SIGTERMs the Python
@@ -481,9 +506,8 @@ final class AgentSupervisor {
     /// UserDefaults) to the running agent and reconnect. Same mode split
     /// as `applyScheduleAndReconnect`.
     func applyNetworkAndReconnect() async {
-        let d = UserDefaults.standard
-        let console = d.string(forKey: "consoleBaseUrl") ?? "https://console.cocore.dev"
-        let advisor = d.string(forKey: "advisorUrl") ?? "wss://advisor.cocore.dev/v1/agent"
+        let console = Endpoints.consoleURL
+        let advisor = Endpoints.advisorURL
         if isLaunchAgentManaged {
             Self.applyNetworkConfig(console: console, advisor: advisor)
         } else {
@@ -641,5 +665,55 @@ final class AgentSupervisor {
             candidate = candidate.deletingLastPathComponent()
         }
         return nil
+    }
+
+    /// This machine's owner-chosen trust tier, read by running the bundled
+    /// CLI's `agent tier` (which consults the PDS provider record). Returns
+    /// `"best-effort"` on any error — the safe default that runs the
+    /// non-entitled default binary. Synchronous + called once per spawn (the
+    /// same pattern as the other CLI shell-outs in this type).
+    nonisolated static func probeTier() -> String {
+        guard let bin = locateBinary() else { return "best-effort" }
+        let p = Process()
+        p.executableURL = bin
+        p.arguments = ["agent", "tier"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            let out = (String(data: data, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return out == "attested-confidential" ? "attested-confidential" : "best-effort"
+        } catch {
+            return "best-effort"
+        }
+    }
+
+    /// The binary to run for `agent serve`. On a machine the owner opted into
+    /// attested-confidential we spawn the nested, measured push-receiver bundle
+    /// `Contents/CoCoreProvider.app/Contents/MacOS/cocore-provider` — it holds
+    /// the embedded provisioning profile + aps-environment entitlement that lets
+    /// it answer the advisor's APNs code-identity challenge, and it runs the
+    /// in-process MLX engine so plaintext never leaves the measured binary.
+    /// Every other machine runs the default `cocore`: no provisioning profile
+    /// to expire, behaviour identical to a normal release. Falls back to the
+    /// default binary when the worker bundle isn't present (a non-apns build).
+    nonisolated static func serveBinary(tier: String) -> URL? {
+        if tier == "attested-confidential" {
+            let worker = Bundle.main.bundleURL
+                .appendingPathComponent(
+                    "Contents/CoCoreProvider.app/Contents/MacOS/cocore-provider")
+            if FileManager.default.isExecutableFile(atPath: worker.path) {
+                NSLog("cocore: confidential tier — spawning nested worker %@", worker.path)
+                return worker
+            }
+            NSLog(
+                "cocore: confidential tier requested but nested worker bundle missing; using default binary"
+            )
+        }
+        return locateBinary()
     }
 }

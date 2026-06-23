@@ -11,7 +11,11 @@
     "typecheck": "tsc -p . --noEmit"
   },
   "dependencies": {
+    "@cocore/o11y": "workspace:*",
     "@cocore/sdk": "workspace:*",
+    "@effect/platform": "^0.96.2",
+    "effect": "^3.21.4",
+    "tweetnacl": "^1.0.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {

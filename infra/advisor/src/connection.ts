@@ -16,10 +16,48 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 
-import { isFresh, makeChallenge, verifyAttestation } from "./attest.ts";
+import { type ApnsConfig, sendCodeChallenge as pushCodeChallenge } from "./apns.ts";
+import {
+  isFresh,
+  makeChallenge,
+  makeCodeNonce,
+  verifyAttestation,
+  verifyCodeAttestation,
+} from "./attest.ts";
 import type { AdvisorMessage, AttestationChallenge } from "./protocol.ts";
 import { CRASH_LOOP_THRESHOLD, ProviderRegistry } from "./registry.ts";
 import type { SessionManager } from "./sessions.ts";
+
+// Code-attestation survives brief reconnects. A machine's binary identity
+// doesn't change across a Railway-edge socket recycle (the frequent `1006`
+// churn), so re-pushing an APNs code-challenge on EVERY re-register exhausted
+// Apple's per-device background-push budget and left machines stuck
+// best-effort. Instead we cache the proof by (did, machineId) + the measured
+// cdHash and restore standing on re-register without a push; the periodic
+// re-challenge refreshes it. A cdHash change (new build) invalidates the cache
+// — that machine must re-prove. TTL caps how long a proof is honored unrefreshed.
+const CODE_ATTEST_TTL_MS = 11 * 60_000;
+const codeAttestCache = new Map<string, { cdHash: string; at: number }>();
+const codeAttestKey = (did: string, machineId: string): string => `${did} ${machineId}`;
+function cachedCodeAttestFresh(
+  did: string,
+  machineId: string,
+  cdHash: string | null,
+  now: number,
+): boolean {
+  if (!cdHash) return false;
+  const e = codeAttestCache.get(codeAttestKey(did, machineId));
+  return !!e && e.cdHash === cdHash && now - e.at < CODE_ATTEST_TTL_MS;
+}
+function rememberCodeAttest(
+  did: string,
+  machineId: string,
+  cdHash: string | null,
+  now: number,
+): void {
+  if (!cdHash) return;
+  codeAttestCache.set(codeAttestKey(did, machineId), { cdHash, at: now });
+}
 
 export interface ConnectionConfig {
   /** How often to issue a fresh attestation challenge to the
@@ -61,6 +99,11 @@ export interface ConnectionConfig {
    *  inevitable cut into a predictable, graceful cycle we control instead
    *  of an edge-initiated reset. 0 / unset disables. */
   maxConnectionMs?: number;
+  /** APNs sender config for the code-identity challenge. Null/absent disables
+   *  it: no challenges are sent and confidential eligibility is NOT gated on
+   *  code-attestation (the pre-APNs behavior). Set exactly when the advisor has
+   *  APNs configured (and the registry is constructed with enforcement on). */
+  apns?: ApnsConfig | null;
 }
 
 export function handleConnection(
@@ -74,6 +117,8 @@ export function handleConnection(
   let registeredDid: string | null = null;
   let registeredMachineId: string | null = null;
   let pendingChallenge: AttestationChallenge | null = null;
+  // Nonce of the most recent unanswered APNs code-identity challenge, if any.
+  let pendingCodeNonce: string | null = null;
   let challengeTimer: NodeJS.Timeout | null = null;
   let challengeResponseTimer: NodeJS.Timeout | null = null;
   let keepaliveTimer: NodeJS.Timeout | null = null;
@@ -211,6 +256,41 @@ export function handleConnection(
     );
   };
 
+  // Send an APNs code-identity challenge: a fresh nonce sealed to the machine's
+  // X25519 key, pushed to its device token. Only the genuine, AMFI-gated binary
+  // can receive + open it, so a valid response proves code identity. No-ops
+  // when APNs isn't configured or the machine reported no device token (those
+  // machines simply stay best-effort). Unlike the WS attestation challenge,
+  // a missed code challenge does NOT close the socket — it only drops the
+  // machine's confidential standing (best-effort serving is unaffected).
+  const issueCodeChallenge = async (): Promise<void> => {
+    if (!config.apns || !registeredDid || !registeredMachineId) return;
+    const entry = registry.get(registeredDid, registeredMachineId);
+    if (!entry || !entry.apnsDeviceToken) return;
+    // A still-pending nonce from the previous cycle means the machine missed a
+    // challenge — revoke its code-attested standing until it answers again.
+    if (pendingCodeNonce) {
+      registry.dropCodeAttested(registeredDid, registeredMachineId);
+    }
+    const nonce = makeCodeNonce();
+    pendingCodeNonce = nonce;
+    const res = await pushCodeChallenge(
+      config.apns,
+      entry.apnsDeviceToken,
+      entry.encryptionPubKey,
+      nonce,
+    );
+    if (!res.ok) {
+      console.error(
+        `[ws] code-challenge push failed did=${registeredDid} status=${res.status} reason=${res.reason ?? "?"}`,
+      );
+    } else {
+      console.error(
+        `[ws] -> code-challenge did=${registeredDid ?? "?"} nonce=${nonce.slice(0, 8)}…`,
+      );
+    }
+  };
+
   socket.on("message", (data) => {
     let msg: AdvisorMessage;
     try {
@@ -240,7 +320,28 @@ export function handleConnection(
           );
         }
         sendChallenge();
-        challengeTimer = setInterval(sendChallenge, config.rechallengeIntervalMs);
+        // Restore code-attested standing across a reconnect WITHOUT a fresh
+        // APNs push when the cached proof is still valid for this exact binary
+        // (cdHash). Only push a new challenge when there's no fresh proof — a
+        // first connect, an expired cache, or a changed cdHash. This keeps the
+        // background-push rate to ~the re-challenge cadence instead of once per
+        // (frequent) reconnect, which Apple throttles.
+        {
+          const e = registry.get(registeredDid, registeredMachineId);
+          if (
+            config.apns &&
+            e &&
+            cachedCodeAttestFresh(registeredDid, registeredMachineId, e.cdHash, Date.now())
+          ) {
+            registry.markCodeAttested(registeredDid, registeredMachineId);
+          } else {
+            void issueCodeChallenge();
+          }
+        }
+        challengeTimer = setInterval(() => {
+          sendChallenge();
+          void issueCodeChallenge();
+        }, config.rechallengeIntervalMs);
         challengeTimer.unref();
         return;
       }
@@ -292,9 +393,55 @@ export function handleConnection(
           return close(1008, "attestation-bad-signature");
         }
         registry.markAttested(registeredDid, registeredMachineId);
+        // darkbloom-parity continuous SIP check: a verified challenge that
+        // reports SIP off immediately drops the machine from confidential
+        // routing. (`sip_enabled` is part of the signed challenge payload, so
+        // a provider can't claim SIP-on without holding the attestation key.)
+        registry.recordChallengeSip(registeredDid, registeredMachineId, msg.sip_enabled === true);
         console.error(`[ws] attestation OK did=${registeredDid} machine=${registeredMachineId}`);
         pendingChallenge = null;
         clearResponseTimer();
+        return;
+      }
+      case "code_attestation_response": {
+        // APNs code-identity proof: the machine recovered the nonce we sealed
+        // to its X25519 key (so it received the AMFI-gated push and holds K)
+        // and SE-signed it. Grant code-attested standing. A bad/stale response
+        // only drops confidential standing — best-effort serving is unaffected,
+        // so we don't close the socket.
+        if (!registeredDid || !registeredMachineId || !pendingCodeNonce) {
+          console.error(`[ws] unsolicited code-attestation peer=${peer}`);
+          return;
+        }
+        const entry = registry.get(registeredDid, registeredMachineId);
+        if (!entry) return;
+        // Bind the proof to the REGISTERED cdHash (0.9.23): the agent SE-signs
+        // {cdHash, nonce} over its measured cdHash, and we reconstruct with the
+        // cdHash it registered — so the code-identity proof is tied to a specific
+        // measured binary, not just "answered the push". A confidential machine
+        // always reports a cdHash; if it's absent we can't bind, so fail closed.
+        const ok =
+          entry.cdHash != null &&
+          (await verifyCodeAttestation(
+            msg,
+            pendingCodeNonce,
+            entry.attestationPubKey,
+            entry.cdHash,
+          ));
+        if (!ok) {
+          console.error(
+            `[ws] BAD code-attestation did=${registeredDid} machine=${registeredMachineId}`,
+          );
+          registry.dropCodeAttested(registeredDid, registeredMachineId);
+          return;
+        }
+        registry.markCodeAttested(registeredDid, registeredMachineId);
+        // Cache the proof so a reconnect restores standing without re-pushing.
+        rememberCodeAttest(registeredDid, registeredMachineId, entry.cdHash, Date.now());
+        console.error(
+          `[ws] code-attestation OK did=${registeredDid} machine=${registeredMachineId}`,
+        );
+        pendingCodeNonce = null;
         return;
       }
       case "inference_chunk": {
@@ -305,6 +452,7 @@ export function handleConnection(
           type: "chunk",
           sessionId: msg.session_id,
           seq: msg.seq,
+          ...(msg.channel ? { channel: msg.channel } : {}),
           ciphertext: msg.ciphertext,
         });
         return;

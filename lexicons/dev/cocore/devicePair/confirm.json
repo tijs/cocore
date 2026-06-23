@@ -1,0 +1,38 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.devicePair.confirm",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Approve or deny a pending device-pairing attempt, identified by the `userCode` the device displayed. Called from the verification UI by a signed-in user. Approving requires the provider `session` to grant to the device.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["userCode", "decision"],
+          "properties": {
+            "userCode": { "type": "string", "description": "The code the device displayed (case-insensitive)." },
+            "decision": { "type": "string", "enum": ["approve", "deny"] },
+            "session": { "type": "unknown", "description": "Provider session to grant to the device; required when `decision` is `approve`." }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ok", "status"],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "status": { "type": "string" }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest", "description": "Missing `userCode`, an invalid `decision`, or `approve` without a `session`." },
+        { "name": "NotFound", "description": "No pairing attempt matches the `userCode`." },
+        { "name": "Conflict", "description": "The pairing attempt could not be approved in its current state." }
+      ]
+    }
+  }
+}

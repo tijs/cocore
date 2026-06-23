@@ -22,6 +22,8 @@
 
 import { Effect } from "effect";
 
+import { runTraced } from "@/lib/o11y.server.ts";
+
 import {
   appviewListProfilesEffect,
   appviewListProvidersEffect,
@@ -30,6 +32,8 @@ import {
   type AppviewModelActivityResponse,
 } from "@/integrations/appview/appview.server.ts";
 import { cocoreConfig } from "@/lib/cocore-config.ts";
+import { RECOMMENDED_MODEL_IDS } from "@/lib/recommended-models.ts";
+import { verifiedTierFor, type VerifiedTier } from "@/lib/verified-standing.server.ts";
 
 interface PriceEntry {
   modelId?: string;
@@ -68,6 +72,14 @@ interface ModelMachine {
   ramGB: number | null;
   attestationPubKey: string | null;
   lastSeen: string | null;
+  /** True when the machine's VERIFIED tier is `attested-confidential`.
+   *  Kept for back-compat; prefer `verifiedTier`. */
+  confidential: boolean;
+  /** The machine's tier recomputed from its actual signed attestation —
+   *  `attested-confidential`, `hardware-attested`, or `best-effort`. Never the
+   *  self-asserted `trustLevel`; proof-backed (see verified-standing.server.ts).
+   *  Drives the directory trust badges. */
+  verifiedTier: VerifiedTier;
   /** Host profile chip (display name + handle + avatar). null when
    *  the DID has no `dev.cocore.account.profile` record yet — the UI
    *  falls back to a shortened DID in that case. */
@@ -94,6 +106,11 @@ export interface ModelDirectoryEntry {
   /** Aggregate request + token totals across every machine that has
    *  served the model in each window. */
   activity: AppviewActivityStats;
+  /** True when this model id is part of the curated recommended
+   *  rotation (see src/lib/recommended-models.ts). Lets consumers
+   *  distinguish blessed/recommended models from legacy ones a
+   *  provider happens to advertise. Additive — never gates routing. */
+  recommended: boolean;
 }
 
 export interface ModelDirectoryResponse {
@@ -150,6 +167,70 @@ function safeNumber(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+const SLINGSHOT_BASE = "https://slingshot.microcosm.blue";
+
+/** Resolve a DID's operator chip (handle + display name + avatar) WITHOUT the
+ *  Bluesky appview: microcosm's Slingshot returns the bidirectionally-verified
+ *  handle + PDS, then we read the `app.bsky.actor.profile` record off that PDS
+ *  for the display name + avatar blob (served back through the PDS's getBlob,
+ *  so still appview-agnostic). Best-effort — any failure yields whatever we
+ *  resolved, or null. Used for provider DIDs with no local
+ *  `dev.cocore.account.profile` record so the directory shows a real operator
+ *  instead of a bare DID. */
+async function hydrateMicrocosmProfile(did: string): Promise<ProfileChip | null> {
+  try {
+    const idRes = await fetch(
+      `${SLINGSHOT_BASE}/xrpc/com.bad-example.identity.resolveMiniDoc?identifier=${encodeURIComponent(did)}`,
+      { headers: { Accept: "application/json" } },
+    );
+    if (!idRes.ok) return null;
+    const mini = (await idRes.json()) as { handle?: string; pds?: string };
+    const handle = safeString(mini.handle);
+    const pds = safeString(mini.pds)?.replace(/\/$/, "") ?? null;
+
+    let displayName: string | null = null;
+    let avatarUrl: string | null = null;
+    if (pds) {
+      try {
+        const recRes = await fetch(
+          `${pds}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(did)}` +
+            `&collection=app.bsky.actor.profile&rkey=self`,
+          { headers: { Accept: "application/json" } },
+        );
+        if (recRes.ok) {
+          const body = (await recRes.json()) as {
+            value?: { displayName?: unknown; avatar?: { ref?: { $link?: unknown } } };
+          };
+          displayName = safeString(body.value?.displayName);
+          const cid = body.value?.avatar?.ref?.$link;
+          if (typeof cid === "string" && cid.length > 0) {
+            avatarUrl =
+              `${pds}/xrpc/com.atproto.sync.getBlob?did=${encodeURIComponent(did)}` +
+              `&cid=${encodeURIComponent(cid)}`;
+          }
+        }
+      } catch {
+        // profile record is optional — the handle alone is already a win.
+      }
+    }
+    if (!handle && !displayName && !avatarUrl) return null;
+    return { did, handle, displayName, avatarUrl };
+  } catch {
+    return null;
+  }
+}
+
+/** Batch-hydrate operator chips for the given DIDs via microcosm. Best-effort
+ *  and parallel; a slow/failed lookup never blocks the directory. */
+async function hydrateMicrocosmProfiles(dids: string[]): Promise<Map<string, ProfileChip>> {
+  const out = new Map<string, ProfileChip>();
+  const results = await Promise.allSettled(dids.map((d) => hydrateMicrocosmProfile(d)));
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled" && r.value) out.set(dids[i]!, r.value);
+  });
+  return out;
+}
+
 function emptyActivityStats(): AppviewActivityStats {
   return {
     hour: { requests: 0, tokens: 0 },
@@ -186,6 +267,15 @@ interface AdvisorProviderRow {
   attestedAt: string | null;
   active?: boolean;
   lastSeen?: string;
+  /** Recomputed routing tier from the advisor (WS-COORDINATOR): the
+   *  advisor flips a machine to "attested-confidential" only when its
+   *  cdHash is known-good AND its challenge-verified posture holds. */
+  trustTier?: string;
+  confidentialEligible?: boolean;
+  /** Strong-ref to the machine's attestation record — verified offline to
+   *  prove the hardware-attested tier (see verified-standing.server.ts). */
+  attestationUri?: string | null;
+  codeAttested?: boolean;
 }
 
 /** DIDs the advisor currently considers routable — attested and not
@@ -193,23 +283,70 @@ interface AdvisorProviderRow {
  *  plus the advisor registry's `active` gate. Returns null when the
  *  advisor is unreachable so callers can treat every indexed provider
  *  as offline rather than showing stale PDS records. */
-async function fetchAdvisorOnlineDids(): Promise<Map<string, string> | null> {
+interface AdvisorOnline {
+  lastSeen: string;
+  /** The machine's tier recomputed from its ACTUAL signed attestation (the
+   *  SDK verifier), not the self-asserted label. Drives the directory badges. */
+  verifiedTier: VerifiedTier;
+}
+
+async function fetchAdvisorOnlineDids(): Promise<Map<string, AdvisorOnline> | null> {
   const base = cocoreConfig().advisorUrl.replace(/\/$/, "");
   try {
     const r = await fetch(`${base}/providers`);
     if (!r.ok) return null;
     const list = (await r.json()) as AdvisorProviderRow[];
-    const online = new Map<string, string>();
-    for (const p of list) {
-      if (!p.attestedAt) continue;
-      if (p.active === false) continue;
-      online.set(p.did, p.lastSeen ?? p.attestedAt);
-    }
-    return online;
+    const rows = list.filter((p) => p.attestedAt && p.active !== false);
+    // Recompute each machine's tier from its attestation — proof-backed, never
+    // the self-asserted trustLevel. The offline crypto is cached by attestation
+    // CID, so a warm directory is cheap; a machine whose attestation can't be
+    // fetched/verified degrades to best-effort rather than failing the page.
+    const entries = await Promise.all(
+      rows.map(async (p): Promise<[string, AdvisorOnline]> => {
+        const verifiedTier = await verifiedTierFor({
+          did: p.did,
+          attestationUri: p.attestationUri ?? null,
+          confidentialEligible: p.confidentialEligible,
+          codeAttested: p.codeAttested,
+        });
+        return [p.did, { lastSeen: p.lastSeen ?? p.attestedAt!, verifiedTier }];
+      }),
+    );
+    return new Map(entries);
   } catch (reason) {
     console.warn("[model-directory] Advisor /providers failed:", reason);
     return null;
   }
+}
+
+// Substrings that mark a vision / multimodal (image-in) model. The inference
+// path is text-only (vllm-mlx serves text LLMs; the chat UI sends no images),
+// so these can't actually be served and are omitted from the directory. Single
+// tokens are matched at id-segment boundaries (ids split on /-._) so a bare
+// "vl" doesn't match unrelated words; multi-token markers match as substrings.
+const VISION_MODEL_MARKERS = [
+  "vl",
+  "vlm",
+  "vision",
+  "llava",
+  "internvl",
+  "pixtral",
+  "moondream",
+  "minicpm-v",
+  "idefics",
+  "smolvlm",
+  "paligemma",
+  "florence",
+];
+
+/** Whether `modelId` looks like a vision/multimodal model we can't serve. */
+export function isVisionModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return VISION_MODEL_MARKERS.some((marker) =>
+    marker.includes("-")
+      ? lower.includes(marker)
+      : new RegExp(`(^|[^a-z])${marker}([^a-z]|$)`).test(lower),
+  );
 }
 
 export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
@@ -219,25 +356,31 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
   // tolerant of AppView failure independently — providers being
   // unreachable means an empty directory, but a profile or
   // activity miss just means we render bare DIDs / zero counts.
-  const [appviewResults, advisorOnline] = await Promise.all([
-    Promise.allSettled([
-      Effect.runPromise(appviewListProvidersEffect),
-      Effect.runPromise(appviewListProfilesEffect),
-      Effect.runPromise(appviewModelActivityEffect),
-    ]),
+  const [[providersResult, profilesResult, activityResult], advisorOnline] = await Promise.all([
+    // One root span, three concurrent child `appview.request` spans.
+    runTraced(
+      "models.directory.appview",
+      Effect.all(
+        [
+          Effect.either(appviewListProvidersEffect),
+          Effect.either(appviewListProfilesEffect),
+          Effect.either(appviewModelActivityEffect),
+        ],
+        { concurrency: "unbounded" },
+      ),
+    ),
     fetchAdvisorOnlineDids(),
   ]);
-  const [providersResult, profilesResult, activityResult] = appviewResults;
 
-  if (providersResult.status !== "fulfilled") {
-    logAppviewUnreachable(providersResult.reason);
+  if (providersResult._tag !== "Right") {
+    logAppviewUnreachable(providersResult.left);
     return { models: [], generatedAt, appviewUnreachable: true };
   }
   logAppviewRecovered();
 
   const profilesByDid = new Map<string, ProfileChip>();
-  if (profilesResult.status === "fulfilled") {
-    for (const row of profilesResult.value.profiles) {
+  if (profilesResult._tag === "Right") {
+    for (const row of profilesResult.right.profiles) {
       const body = row.body as ProfileRecordView;
       profilesByDid.set(row.repo, {
         did: row.repo,
@@ -247,17 +390,38 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
       });
     }
   } else {
-    console.warn("[model-directory] AppView listProfiles failed:", profilesResult.reason);
+    console.warn("[model-directory] AppView listProfiles failed:", profilesResult.left);
   }
 
-  const activity = activityResult.status === "fulfilled" ? activityResult.value : null;
-  if (activityResult.status !== "fulfilled") {
-    console.warn("[model-directory] AppView modelActivity failed:", activityResult.reason);
+  const activity = activityResult._tag === "Right" ? activityResult.right : null;
+  if (activityResult._tag !== "Right") {
+    console.warn("[model-directory] AppView modelActivity failed:", activityResult.left);
   }
 
-  // Group machines by model id.
+  // Fall back to microcosm for operator chips: any online provider DID without
+  // a local dev.cocore.account.profile record gets its handle/name/avatar from
+  // Slingshot + its PDS, so the table shows a real user instead of a bare DID.
+  const onlineMissingProfile = [
+    ...new Set(
+      providersResult.right.providers
+        .map((row) => row.repo)
+        .filter((did) => (advisorOnline?.has(did) ?? false) && !profilesByDid.has(did)),
+    ),
+  ];
+  const microcosmByDid =
+    onlineMissingProfile.length > 0
+      ? await hydrateMicrocosmProfiles(onlineMissingProfile)
+      : new Map<string, ProfileChip>();
+  const hostFor = (did: string): ProfileChip | null =>
+    profilesByDid.get(did) ?? microcosmByDid.get(did) ?? null;
+
+  // Group machines by model id, deduping by physical machine. A machine is
+  // keyed by its attestationPubKey (its identity key), so when one box has
+  // more than one provider record indexed (e.g. a stale rkey that never got
+  // cleaned up) we keep just the freshest — exactly one row per machine.
   const byModel = new Map<string, ModelDirectoryEntry>();
-  for (const row of providersResult.value.providers) {
+  const machinesByModel = new Map<string, Map<string, ModelMachine>>();
+  for (const row of providersResult.right.providers) {
     const body = row.body as ProviderRecordView;
     const supportedModels = body.supportedModels ?? [];
     const did = row.repo;
@@ -266,6 +430,9 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
 
     for (const modelId of supportedModels) {
       if (typeof modelId !== "string" || modelId.length === 0) continue;
+      // Vision/multimodal models can't be served by the text-only path — drop
+      // them so they never surface in the picker or directory.
+      if (isVisionModel(modelId)) continue;
       let entry = byModel.get(modelId);
       if (!entry) {
         entry = {
@@ -277,21 +444,34 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
           currency: null,
           freshestAt: null,
           activity: totalsFor(activity, modelId),
+          recommended: RECOMMENDED_MODEL_IDS.has(modelId),
         };
         byModel.set(modelId, entry);
       }
-      const seen = advisorOnline.get(did) ?? lastSeen;
-      entry.machines.push({
-        did,
-        machineLabel: safeString(body.machineLabel),
-        chip: safeString(body.chip),
-        ramGB: safeNumber(body.ramGB),
-        attestationPubKey: safeString(body.attestationPubKey),
-        lastSeen: seen,
-        host: profilesByDid.get(did) ?? null,
-        activity: activityFor(activity, modelId, did),
-      });
-      entry.machineCount = entry.machines.length;
+      const onlineInfo = advisorOnline.get(did);
+      const seen = onlineInfo?.lastSeen ?? lastSeen;
+      const attestationPubKey = safeString(body.attestationPubKey);
+      const machineKey = attestationPubKey ?? did;
+      let machines = machinesByModel.get(modelId);
+      if (!machines) {
+        machines = new Map<string, ModelMachine>();
+        machinesByModel.set(modelId, machines);
+      }
+      const prev = machines.get(machineKey);
+      if (!prev || (seen != null && (prev.lastSeen == null || seen > prev.lastSeen))) {
+        machines.set(machineKey, {
+          did,
+          machineLabel: safeString(body.machineLabel),
+          chip: safeString(body.chip),
+          ramGB: safeNumber(body.ramGB),
+          attestationPubKey,
+          lastSeen: seen,
+          confidential: (onlineInfo?.verifiedTier ?? "best-effort") === "attested-confidential",
+          verifiedTier: onlineInfo?.verifiedTier ?? "best-effort",
+          host: hostFor(did),
+          activity: activityFor(activity, modelId, did),
+        });
+      }
       const price = pickPrice(body.priceList, modelId);
       if (price) {
         // Take the first price we see for the model id. The exchange
@@ -310,6 +490,14 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
         }
       }
     }
+  }
+
+  // Materialize the deduped machine rows onto each entry.
+  for (const [modelId, machines] of machinesByModel) {
+    const entry = byModel.get(modelId);
+    if (!entry) continue;
+    entry.machines = [...machines.values()];
+    entry.machineCount = entry.machines.length;
   }
 
   // Sort models: most-provisioned first; within that, alphabetical.

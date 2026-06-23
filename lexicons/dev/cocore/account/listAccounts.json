@@ -1,0 +1,53 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.account.listAccounts",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Discovery directory of every signed-up DID (any DID with a record under `dev.cocore.*`), joined with profile + provider counts so a card grid can render without further fan-out. DIDs without a local profile record are hydrated from the public Bluesky AppView.",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 24 },
+          "offset": { "type": "integer", "minimum": 0, "default": 0 },
+          "sortBy": { "type": "string", "enum": ["recent", "newest"], "default": "recent", "description": "`recent` = last activity descending; `newest` = signup order." },
+          "providersOnly": { "type": "boolean", "default": false },
+          "viewerDid": { "type": "string", "format": "did", "description": "Excludes the caller's own DID from results." },
+          "excludeViewerFriends": { "type": "boolean", "default": false, "description": "With `viewerDid`, also omits DIDs the viewer has already published a friend record for." },
+          "q": { "type": "string", "description": "Case-insensitive substring on profile handle and/or DID. A leading @ is ignored." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["accounts", "total", "limit", "offset", "sortBy", "providersOnly", "excludeViewerFriends"],
+          "properties": {
+            "accounts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["did"],
+                "properties": {
+                  "did": { "type": "string", "format": "did" },
+                  "handle": { "type": "string" },
+                  "displayName": { "type": "string" },
+                  "avatarUrl": { "type": "string" },
+                  "providerCount": { "type": "integer" },
+                  "lastActivityAt": { "type": "string", "format": "datetime" }
+                }
+              }
+            },
+            "total": { "type": "integer" },
+            "limit": { "type": "integer" },
+            "offset": { "type": "integer" },
+            "sortBy": { "type": "string", "enum": ["recent", "newest"] },
+            "providersOnly": { "type": "boolean" },
+            "excludeViewerFriends": { "type": "boolean" },
+            "q": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

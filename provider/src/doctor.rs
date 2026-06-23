@@ -421,7 +421,7 @@ fn launchagent_status() -> Check {
             name: "LaunchAgent",
             ok: false,
             note: format!(
-                "{target} not loaded. The installer didn't run, or the LaunchAgent was unloaded. Re-run the installer with `curl -fsSL console.cocore.dev/agent | sh`."
+                "{target} not loaded. The installer didn't run, or the LaunchAgent was unloaded. Re-run the installer with `curl -fsSL cocore.dev/agent | sh`."
             ),
         };
     }
@@ -468,7 +468,7 @@ fn apply_fixes() {
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !installed {
-        println!("  - LaunchAgent not installed; skipping kickstart. Re-run `curl -fsSL console.cocore.dev/agent | sh` if you want it installed.");
+        println!("  - LaunchAgent not installed; skipping kickstart. Re-run `curl -fsSL cocore.dev/agent | sh` if you want it installed.");
         return;
     }
     let bounced = Command::new("launchctl")

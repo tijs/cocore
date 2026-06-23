@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cocore agent uninstaller — the curl | sh entrypoint.
 #
-# Hosted at https://console.cocore.dev/agent/uninstall. Removes
+# Hosted at https://cocore.dev/agent/uninstall. Removes
 # every artifact a cocore install leaves on disk:
 #
 #   1. Bounces the LaunchAgent and removes it from launchd's
@@ -41,9 +41,9 @@
 #     via /account or an operator-side wipe.
 #
 # Usage:
-#   curl -fsSL https://console.cocore.dev/agent/uninstall | sh
-#   curl -fsSL https://console.cocore.dev/agent/uninstall | sh -s -- --unpair
-#   curl -fsSL https://console.cocore.dev/agent/uninstall | COCORE_UNPAIR=1 sh
+#   curl -fsSL https://cocore.dev/agent/uninstall | sh
+#   curl -fsSL https://cocore.dev/agent/uninstall | sh -s -- --unpair
+#   curl -fsSL https://cocore.dev/agent/uninstall | COCORE_UNPAIR=1 sh
 #
 # Env knobs (all optional):
 #   COCORE_PREFIX     install prefix to clean (default: $HOME/.local)
@@ -213,15 +213,15 @@ unpair_pds() {
     return 0
   fi
   if [[ ! -f "$STATE_DIR/identity.pem" ]]; then
-    warn "no $STATE_DIR/identity.pem — this looks like a Secure-Enclave build (the private key isn't on disk). Skipping PDS-side unpair; finish at https://console.cocore.dev/machines."
+    warn "no $STATE_DIR/identity.pem — this looks like a Secure-Enclave build (the private key isn't on disk). Skipping PDS-side unpair; finish at https://cocore.dev/machines."
     return 0
   fi
   if ! command -v openssl >/dev/null 2>&1; then
-    warn "openssl not found in PATH — cannot derive attestationPubKey. Finish at https://console.cocore.dev/machines."
+    warn "openssl not found in PATH — cannot derive attestationPubKey. Finish at https://cocore.dev/machines."
     return 0
   fi
   if ! command -v python3 >/dev/null 2>&1; then
-    warn "python3 not found in PATH — cannot parse PDS listRecords response. Finish at https://console.cocore.dev/machines."
+    warn "python3 not found in PATH — cannot parse PDS listRecords response. Finish at https://cocore.dev/machines."
     return 0
   fi
 
@@ -248,14 +248,14 @@ print(s.get("apiKey", ""))
 print(s.get("apiBase", ""))
 ' "$STATE_DIR/session.json" 2>/dev/null || true)"
   if [[ -z "$session_blob" ]]; then
-    warn "could not parse $STATE_DIR/session.json. Finish at https://console.cocore.dev/machines."
+    warn "could not parse $STATE_DIR/session.json. Finish at https://cocore.dev/machines."
     return 0
   fi
   did="$(printf '%s\n' "$session_blob" | sed -n '1p')"
   api_key="$(printf '%s\n' "$session_blob" | sed -n '2p')"
   api_base="$(printf '%s\n' "$session_blob" | sed -n '3p')"
   if [[ -z "$did" || -z "$api_key" || -z "$api_base" ]]; then
-    warn "$STATE_DIR/session.json missing did/apiKey/apiBase. Finish at https://console.cocore.dev/machines."
+    warn "$STATE_DIR/session.json missing did/apiKey/apiBase. Finish at https://cocore.dev/machines."
     return 0
   fi
 
@@ -275,7 +275,7 @@ print(s.get("apiBase", ""))
   pubkey="$(openssl pkey -in "$STATE_DIR/identity.pem" -pubout -outform DER 2>/dev/null \
             | tail -c 64 | base64 | tr -d '\n ' || true)"
   if [[ -z "$pubkey" ]]; then
-    warn "could not extract pubkey from $STATE_DIR/identity.pem. Finish at https://console.cocore.dev/machines."
+    warn "could not extract pubkey from $STATE_DIR/identity.pem. Finish at https://cocore.dev/machines."
     return 0
   fi
 
@@ -287,7 +287,7 @@ print(s.get("apiBase", ""))
     did:plc:*)
       local plc_doc
       if ! plc_doc="$(curl -fsSL "https://plc.directory/$did" 2>/dev/null)"; then
-        warn "could not resolve $did via plc.directory. Finish at https://console.cocore.dev/machines."
+        warn "could not resolve $did via plc.directory. Finish at https://cocore.dev/machines."
         return 0
       fi
       pds="$(printf '%s' "$plc_doc" | python3 -c '
@@ -303,12 +303,12 @@ for s in d.get("service", []) or []:
       pds="https://${did#did:web:}"
       ;;
     *)
-      warn "unsupported DID method on session ($did). Finish at https://console.cocore.dev/machines."
+      warn "unsupported DID method on session ($did). Finish at https://cocore.dev/machines."
       return 0
       ;;
   esac
   if [[ -z "$pds" ]]; then
-    warn "could not find atproto_pds service for $did. Finish at https://console.cocore.dev/machines."
+    warn "could not find atproto_pds service for $did. Finish at https://cocore.dev/machines."
     return 0
   fi
 
@@ -325,7 +325,7 @@ for s in d.get("service", []) or []:
     fi
     local body
     if ! body="$(curl -fsSL "$url" 2>/dev/null)"; then
-      warn "PDS listRecords failed. Finish at https://console.cocore.dev/machines."
+      warn "PDS listRecords failed. Finish at https://cocore.dev/machines."
       return 0
     fi
     local found
@@ -376,7 +376,7 @@ print("cursor", data.get("cursor") or "")
       -d "{\"collection\":\"dev.cocore.compute.provider\",\"rkey\":\"$rkey\"}" \
       "$api_base/api/xrpc/dev.cocore.proxy.deleteRecord" 2>&1)" || {
     warn "deleteRecord rejected: ${del_resp:0:240}"
-    warn "finish manually at https://console.cocore.dev/machines."
+    warn "finish manually at https://cocore.dev/machines."
     return 0
   }
   note "deleted provider record $rkey from PDS for $did."
@@ -446,7 +446,7 @@ else
     note "there, or re-run this script with --unpair (or COCORE_UNPAIR=1)."
   fi
   note "to remove ALL identity-level state, use 'Wipe my data' at"
-  note "https://console.cocore.dev/account."
+  note "https://cocore.dev/account."
   note ""
-  note "to reinstall: curl -fsSL https://console.cocore.dev/agent | sh"
+  note "to reinstall: curl -fsSL https://cocore.dev/agent | sh"
 fi

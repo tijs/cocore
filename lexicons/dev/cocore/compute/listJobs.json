@@ -1,0 +1,30 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.compute.listJobs",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Indexed `dev.cocore.compute.job` records authored by a requester (capped at 500). `requester` is required; omitting it returns no jobs.",
+      "parameters": {
+        "type": "params",
+        "required": ["requester"],
+        "properties": {
+          "requester": { "type": "string", "format": "did", "description": "The requester DID whose jobs to return." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["jobs"],
+          "properties": {
+            "jobs": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "dev.cocore.defs#indexedRecord" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

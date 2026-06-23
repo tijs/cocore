@@ -32,6 +32,12 @@ pub enum AdvisorMessage {
     AttestationChallenge(AttestationChallenge),
     /// Provider → advisor: signed challenge response.
     AttestationResponse(AttestationResponse),
+    /// Provider → advisor (→ requester): per-request ephemeral session key for
+    /// the confidential tier. Minted fresh inside the measured engine and
+    /// SE-signed over the requester's nonce + the active attestation CID, so a
+    /// confidential requester can prove the key it seals to is controlled by
+    /// the attested enclave and was produced for THIS request (not replayed).
+    SessionKey(SessionKey),
     /// Advisor → provider: liveness probe. The provider answers `Pong`
     /// with the same nonce immediately from its serve loop, so a pong
     /// proves the request loop is pumping (stronger than a WS-level pong,
@@ -40,6 +46,16 @@ pub enum AdvisorMessage {
     Ping(Ping),
     /// Provider → advisor: reply to `Ping`, echoing the nonce.
     Pong(Pong),
+    /// Provider → advisor: response to an APNs code-identity challenge.
+    /// The challenge is delivered out-of-band over APNs (not on this socket):
+    /// the advisor pushes a nonce sealed to the provider's X25519 key `K`, and
+    /// only the genuine, Apple-provisioned binary can (a) receive that push at
+    /// all (AMFI gates the topic to our code signature) and (b) decrypt it with
+    /// `K`. The provider recovers the nonce and returns it here alongside a
+    /// Secure-Enclave signature over it, proving the same binary that received
+    /// the push also controls the attested signing key. Additive — pre-APNs
+    /// advisors never send a challenge and so never receive this.
+    CodeAttestationResponse(CodeAttestationResponse),
     /// Advisor → provider: standing change. `Bad` means the advisor
     /// stopped routing jobs here (failed preflight / went silent mid-job);
     /// the agent surfaces it to the operator. `Ok` clears it. Additive.
@@ -136,6 +152,26 @@ pub struct Register {
     /// advisors ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_fault: Option<crate::pds::EngineFault>,
+    /// Measured cdHash of the running binary, echoed from the signed
+    /// attestation so the advisor can check it against its known-good set when
+    /// computing confidential eligibility (an accelerator only — a confidential
+    /// requester re-verifies the PDS attestation at seal time). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cd_hash: Option<String>,
+    /// Provider's self-asserted tier (`attested-confidential` | `best-effort`),
+    /// echoed from the signed attestation. Advisory — the advisor recomputes
+    /// eligibility from cdHash ∈ known-good + challenge-verified SIP. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// APNs device token (hex) for this machine's measured agent process, when
+    /// it could register for remote notifications (a logged-in GUI session with
+    /// the push entitlement). Lets the advisor send the APNs code-identity
+    /// challenge that proves this exact binary is the genuine, team-signed
+    /// agent — the un-self-reportable complement to `cd_hash`. Omitted on
+    /// headless/launchd installs (no GUI session → no APNs), which therefore
+    /// stay best-effort. Additive — pre-APNs advisors ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apns_device_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,13 +213,73 @@ pub struct InferenceRequest {
     pub max_tokens_out: u32,
     pub ciphertext: Vec<u8>, // sealed plaintext prompt, base64-decoded by the wire layer
     pub session_id: String,
+    /// Confidential tier: the requester's fresh nonce. When present, the
+    /// provider mints a per-request ephemeral key and returns a `SessionKey`
+    /// signed over this nonce before serving. Additive — absent = best-effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    /// Confidential tier: CID of the attestation the requester verified, which
+    /// the provider's `SessionKey` signature binds to (so a key signed for a
+    /// different attestation can't be replayed). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_cid: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionKey {
+    pub session_id: String,
+    /// base64 X25519 public key the requester seals the prompt to.
+    pub ephemeral_pub_key: String,
+    /// Echo of the requester's fresh nonce.
+    pub nonce: String,
+    /// CID of the attestation this session is bound to.
+    pub attestation_cid: String,
+    /// Secure Enclave P-256 signature (DER) over the canonical bytes of
+    /// `{attestationCid, ephemeralPubKey, nonce}` — the exact form the SDK's
+    /// `sessionKeyMessage` reconstructs and verifies against
+    /// `attestation.publicKey`.
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeAttestationResponse {
+    /// The plaintext nonce recovered by decrypting the APNs-delivered
+    /// challenge with the provider's X25519 key `K`. Echoing it proves the
+    /// responder holds `K` (and, because only the genuine binary could receive
+    /// the AMFI-gated push, that the responder *is* that binary).
+    pub nonce: String,
+    /// Secure Enclave P-256 signature (DER) over the canonical bytes of
+    /// `{ nonce }` — the same canonicalisation the advisor's verifier
+    /// reconstructs. Binds the recovered nonce to the attested signing key so
+    /// the push receipt and the attestation chain are the same machine.
+    pub signature: Vec<u8>,
+}
+
+/// Which logical channel a streamed chunk's plaintext belongs to. Lets a
+/// requester separate a thinking model's reasoning from the answer. Absent
+/// on the wire (old providers) deserializes to [`Content`](ChunkChannel::Content),
+/// so the field is purely additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkChannel {
+    #[default]
+    Content,
+    Reasoning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceChunk {
     pub session_id: String,
     pub seq: u32,
+    #[serde(default, skip_serializing_if = "is_content_channel")]
+    pub channel: ChunkChannel,
     pub ciphertext: Vec<u8>,
+}
+
+/// Skip serializing the default `content` channel so existing wire bytes for
+/// answer chunks are unchanged; only `reasoning` chunks carry the field.
+fn is_content_channel(c: &ChunkChannel) -> bool {
+    matches!(c, ChunkChannel::Content)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,4 +326,43 @@ pub struct AttestationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hypervisor_present: Option<bool>,
     pub signature: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inference_chunk_channel_defaults_to_content_when_absent() {
+        // An old provider sends no `channel` field; it must deserialize as the
+        // answer channel so existing peers keep working.
+        let json = r#"{"session_id":"s","seq":0,"ciphertext":[1,2,3]}"#;
+        let chunk: InferenceChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.channel, ChunkChannel::Content);
+    }
+
+    #[test]
+    fn content_channel_is_omitted_but_reasoning_is_serialized() {
+        let content = InferenceChunk {
+            session_id: "s".into(),
+            seq: 0,
+            channel: ChunkChannel::Content,
+            ciphertext: vec![1],
+        };
+        let s = serde_json::to_string(&content).unwrap();
+        assert!(
+            !s.contains("channel"),
+            "content channel should be omitted: {s}"
+        );
+
+        let reasoning = InferenceChunk {
+            channel: ChunkChannel::Reasoning,
+            ..content
+        };
+        let s = serde_json::to_string(&reasoning).unwrap();
+        assert!(s.contains("\"channel\":\"reasoning\""), "got: {s}");
+        // And it round-trips back.
+        let back: InferenceChunk = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.channel, ChunkChannel::Reasoning);
+    }
 }

@@ -24,15 +24,9 @@ import { Flex } from "@/design-system/flex";
 import { Page } from "@/design-system/page/index.tsx";
 import { SegmentedControl, SegmentedControlItem } from "@/design-system/segmented-control";
 import { Select, SelectItem } from "@/design-system/select";
-import { successColor, uiColor } from "@/design-system/theme/color.stylex";
-import { radius } from "@/design-system/theme/radius.stylex";
-import { horizontalSpace, verticalSpace } from "@/design-system/theme/semantic-spacing.stylex";
-import {
-  fontFamily,
-  fontSize,
-  fontWeight,
-  lineHeight,
-} from "@/design-system/theme/typography.stylex";
+import { uiColor } from "@/design-system/theme/color.stylex";
+import { verticalSpace } from "@/design-system/theme/semantic-spacing.stylex";
+import { fontFamily, fontSize, fontWeight } from "@/design-system/theme/typography.stylex";
 import { Body, Heading1, InlineCode } from "@/design-system/typography";
 
 const REQUESTER_SNIPPET_LANG: SnippetLang = "typescript";
@@ -74,30 +68,6 @@ const styles = stylex.create({
     fontSize: fontSize.xs,
     color: uiColor.text1,
     fontWeight: fontWeight.normal,
-  },
-  cliBox: {
-    backgroundColor: uiColor.component1,
-    borderRadius: radius.md,
-    color: uiColor.text2,
-    fontSize: fontSize.xs,
-    lineHeight: lineHeight.base,
-    marginBottom: verticalSpace["xl"],
-    marginTop: verticalSpace["xl"],
-    paddingBottom: verticalSpace["3xl"],
-    paddingLeft: horizontalSpace["2xl"],
-    paddingRight: horizontalSpace["2xl"],
-    paddingTop: verticalSpace["3xl"],
-    position: "relative",
-  },
-  cliCopy: {
-    position: "absolute",
-    right: horizontalSpace.sm,
-    top: verticalSpace.sm,
-  },
-  cliPrompt: {
-    color: successColor.solid1,
-    marginRight: horizontalSpace.md,
-    userSelect: "none",
   },
   usage: {
     fontFamily: fontFamily.mono,
@@ -177,9 +147,7 @@ export function StartGuide() {
   }, [directory.data]);
 
   const baseUrl =
-    typeof window !== "undefined"
-      ? `${window.location.origin}/v1`
-      : "https://console.cocore.dev/v1";
+    typeof window !== "undefined" ? `${window.location.origin}/v1` : "https://cocore.dev/v1";
   const snippet = useMemo(
     () => buildSnippet(REQUESTER_SNIPPET_LANG, baseUrl, model),
     [baseUrl, model],
@@ -230,7 +198,7 @@ export function StartGuide() {
               <CardHeader hasBorder>
                 <CardTitle style={styles.cardTitleMono}>Run a machine</CardTitle>
                 <CardDescription style={styles.cardDescription}>
-                  Download the cocore app for your Apple Silicon Mac — it pairs with this account
+                  Download the co/core app for your Apple Silicon Mac — it pairs with this account
                   and serves inference.
                 </CardDescription>
               </CardHeader>
@@ -260,21 +228,6 @@ export function StartGuide() {
                   memory — it installs the <InlineCode>vllm-mlx</InlineCode> runtime for you — and
                   starting to serve.
                 </Body>
-
-                <Body style={styles.subtleNote}>
-                  Running headless or a fleet of Macs with no GUI? The terminal installer still
-                  works (the app is the recommended path for everyone else):
-                </Body>
-                <div {...stylex.props(styles.cliBox)}>
-                  <CopyToClipboardButton
-                    text="curl -fsSL console.cocore.dev/agent | sh"
-                    style={styles.cliCopy}
-                  />
-                  <div>
-                    <span {...stylex.props(styles.cliPrompt)}>$</span>curl -fsSL
-                    console.cocore.dev/agent | sh
-                  </div>
-                </div>
 
                 <Flex direction="row" gap="md" style={styles.bodySpaced} wrap>
                   <ButtonLink to="/machines" variant="secondary" size="sm">

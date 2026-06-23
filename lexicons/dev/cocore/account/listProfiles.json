@@ -1,0 +1,23 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.account.listProfiles",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List every indexed `dev.cocore.account.profile` record (capped at 500). Used to render display-name + avatar chips for the DIDs hosting machines.",
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["profiles"],
+          "properties": {
+            "profiles": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "dev.cocore.defs#indexedRecord" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

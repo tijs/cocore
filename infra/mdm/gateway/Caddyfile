@@ -1,0 +1,41 @@
+# co/core MDM CA gateway — a publicly-trusted front door for step-ca.
+#
+# WHY THIS EXISTS: macOS will not install an MDM/ACME enrollment profile
+# whose CA endpoint serves a self-signed cert (an unsupervised Mac can't be
+# made to trust a private root without a manual per-device dance). step-ca
+# only speaks its OWN self-signed HTTPS, and Railway's HTTP edge can't talk
+# to an HTTPS upstream — which is why step-ca was stuck behind a raw TCP
+# proxy (reseau.proxy.rlwy.net) with an untrusted cert, and why enrollment
+# failed with "install the Trust Profile."
+#
+# This Caddy service bridges that gap: Railway terminates a PUBLICLY-TRUSTED
+# cert for the custom domain (ca.cocore.dev) and forwards plain HTTP here;
+# we re-originate TLS to step-ca's self-signed HTTPS upstream. skip-verify
+# is correct here — it's our own CA, reached over Railway's network, and the
+# trust the Mac cares about is the public edge cert, not this internal hop.
+#
+# step-ca generates its ACME directory URLs from the inbound Host header, so
+# preserving Host keeps the directory self-consistent with the public domain.
+{
+	admin off
+	# Railway terminates public TLS at its edge; Caddy serves plain HTTP on
+	# $PORT. No on-box certs to manage.
+	auto_https off
+}
+
+:{$PORT:8080} {
+	reverse_proxy https://{$STEPCA_UPSTREAM:reseau.proxy.rlwy.net:43462} {
+		transport http {
+			# step-ca presents its own self-signed cert; the public trust
+			# lives at the Railway edge, so verifying this hop adds nothing.
+			tls_insecure_skip_verify
+		}
+		# Preserve the public host so step-ca emits ca.cocore.dev ACME URLs.
+		header_up Host {host}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

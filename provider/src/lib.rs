@@ -18,6 +18,7 @@
 pub mod advisor;
 pub mod attestation;
 pub mod canonical;
+pub mod codesign;
 pub mod crypto;
 pub mod diagnostics;
 pub mod engines;
@@ -27,12 +28,17 @@ pub mod hypervisor;
 // alongside the rest of the in-process Python design. See
 // `engines::subprocess` for the replacement (out-of-process Python via
 // uvicorn-on-UDS).
+pub mod appattest;
 pub mod mda;
 pub mod mda_loader;
 pub mod oauth;
 pub mod pds;
 pub mod pricing;
 pub mod protocol;
+/// APNs push host (confidential-tier code identity). macOS + `apns` only; the
+/// security-critical crypto lives in `advisor` and is tested cross-platform.
+#[cfg(all(target_os = "macos", feature = "apns"))]
+pub mod push_host;
 pub mod receipt;
 pub mod schedule;
 pub mod secure_enclave;

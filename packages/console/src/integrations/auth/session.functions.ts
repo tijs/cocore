@@ -1,24 +1,20 @@
-import type { Did } from "@atcute/lexicons";
 import { mutationOptions, queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
-import { getRequest, setCookie } from "@tanstack/react-start/server";
+import { getRequest } from "@tanstack/react-start/server";
 import { Effect, Either } from "effect";
 
 import { revokeAppSession } from "@/integrations/auth/app-session-store.server.ts";
-import { AUTH_SESSION_TOKEN_COOKIE } from "@/integrations/auth/constants.ts";
-import { authCookieDomain } from "@/integrations/auth/cookie-domain.ts";
-import { readAuthSessionToken } from "@/integrations/auth/cookie-parse.ts";
+import { clearAllAuthSessionCookies } from "@/integrations/auth/clear-session-cookie.server.ts";
+import { readAllAuthSessionTokens } from "@/integrations/auth/cookie-parse.ts";
 import { ensureMyProfile } from "@/lib/account-profile.server.ts";
 import { deriveChatStorageKey } from "@/lib/chat-storage-key.server.ts";
 import { fetchBlueskyPublicProfileFieldsEffect } from "@/lib/bluesky-public-profile.server.ts";
-import {
-  type ProviderSessionWire,
-  providerSessionForDidEffect,
-} from "@/lib/provider-session-from-oauth.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { atprotoSessionForRequestEffect } from "@/middleware/auth.server.ts";
 
 const getSessionServerFn = createServerFn({ method: "GET" }).handler(() =>
-  Effect.runPromise(
+  runTraced(
+    "auth.getSession",
     Effect.gen(function* () {
       const request = getRequest();
       const ctx = yield* atprotoSessionForRequestEffect(request);
@@ -70,26 +66,19 @@ export const getSessionQueryOptions = queryOptions({
 // each API key (and we can add a "Sign out everywhere" affordance
 // later that clears the oauth_sessions row + revokes all keys).
 const signOutServerFn = createServerFn({ method: "POST" }).handler(() =>
-  Effect.runPromise(
+  runTraced(
+    "auth.signOut",
     Effect.sync(() => {
       const request = getRequest();
-      const token = readAuthSessionToken(request.headers.get("cookie"));
-      if (token) {
+      // Revoke every candidate token — a browser carrying both the legacy
+      // host-only cookie and the current domain-scoped one presents two.
+      for (const token of readAllAuthSessionTokens(request.headers.get("cookie"))) {
         revokeAppSession(token);
       }
 
-      const isHttps = request.url.startsWith("https://");
-      // Must match the Domain used when the cookie was set (oauth-callback),
-      // or the browser won't clear the .cocore.dev-scoped cookie on sign-out.
-      const cookieDomain = authCookieDomain(new URL(request.url).host);
-      setCookie(AUTH_SESSION_TOKEN_COOKIE, "", {
-        path: "/",
-        httpOnly: true,
-        sameSite: "lax",
-        maxAge: 0,
-        ...(isHttps ? { secure: true } : {}),
-        ...(cookieDomain ? { domain: cookieDomain } : {}),
-      });
+      // Clear every cookie scope (host-only + Domain=cocore.dev), or the
+      // orphan host-only cookie survives sign-out and re-shadows the next login.
+      clearAllAuthSessionCookies(request.url);
 
       return { success: true } as const;
     }),
@@ -100,27 +89,7 @@ export const signOutMutationOptions = mutationOptions({
   mutationFn: () => signOutServerFn(),
 });
 
-// Used by /devices/new — converts the cookie's OAuth session into the
-// JSON-serializable ProviderSession shape that
-// `dev.cocore.devicePair.confirm` expects. Returns null if the user
-// is not signed in.
-const getProviderSessionForPairingServerFn = createServerFn({ method: "GET" }).handler(
-  (): Promise<ProviderSessionWire | null> =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        const request = getRequest();
-        const ctx = yield* atprotoSessionForRequestEffect(request);
-        if (!ctx) return null;
-        return yield* providerSessionForDidEffect(ctx.did as Did);
-      }),
-    ),
-);
-
-export const getProviderSessionForPairingQueryOptions = queryOptions({
-  queryKey: ["session", "provider-for-pairing"] as const,
-  queryFn: getProviderSessionForPairingServerFn,
-  // Always refetch — the access token rotates on use; we want the
-  // freshest one stamped into the agent's session.json.
-  staleTime: 0,
-  gcTime: 0,
-});
+// The device-pair ProviderSession is now minted on the server side of
+// `dev.cocore.devicePair.confirm` (AppView path: from the verified
+// service-auth DID; legacy path: from the request's OAuth session), so the
+// browser no longer pre-derives it.

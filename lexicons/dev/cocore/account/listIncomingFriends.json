@@ -1,0 +1,45 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.account.listIncomingFriends",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Every `dev.cocore.account.friend` record whose subject equals the queried DID — \"who has trusted me with work?\". Newest first; frienders are hydrated to a handle via the public Bluesky AppView when no local profile exists.",
+      "parameters": {
+        "type": "params",
+        "required": ["did"],
+        "properties": {
+          "did": { "type": "string", "format": "did" },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["friends", "total"],
+          "properties": {
+            "friends": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["friender", "subject"],
+                "properties": {
+                  "friender": { "type": "string", "format": "did" },
+                  "frienderHandle": { "type": "string" },
+                  "subject": { "type": "string", "format": "did" },
+                  "uri": { "type": "string", "format": "at-uri" },
+                  "createdAt": { "type": "string", "format": "datetime" }
+                }
+              }
+            },
+            "total": { "type": "integer" }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest", "description": "The `did` parameter is missing or not a DID." }
+      ]
+    }
+  }
+}

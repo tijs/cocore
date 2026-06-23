@@ -1,0 +1,30 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.compute.listSettlements",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Indexed `dev.cocore.compute.settlement` records (capped at 200), optionally filtered by the settled receipt URI and/or the requester DID (matched against the authorization URI prefix).",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "receipt": { "type": "string", "format": "at-uri", "description": "Filter to settlements of this receipt URI." },
+          "requester": { "type": "string", "format": "did", "description": "Filter to settlements whose requester authorization is hosted by this DID." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["settlements"],
+          "properties": {
+            "settlements": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "dev.cocore.defs#indexedRecord" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

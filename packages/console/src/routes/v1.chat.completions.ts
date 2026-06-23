@@ -2,7 +2,7 @@
 //
 // The canonical OpenAI-compatible chat-completions endpoint. Point any
 // OpenAI SDK / LiteLLM / etc. at
-// `base_url="https://console.cocore.dev/v1"` and it appends
+// `base_url="https://cocore.dev/v1"` and it appends
 // `/chat/completions` exactly as it would for `https://api.openai.com/v1`.
 //
 // Authed by an API key (`Authorization: Bearer cocore-…`). The key

@@ -11,14 +11,21 @@
 // Each #commit event carries an array of ops; we filter to cocore
 // collections and convert into IndexedRecord shapes.
 
-import { Firehose as AtFirehose, MemoryRunner, type Event as AtEvent } from "@atproto/sync";
+import {
+  Firehose as AtFirehose,
+  FirehoseSubscriptionError,
+  MemoryRunner,
+  type Event as AtEvent,
+} from "@atproto/sync";
 import { IdResolver } from "@atproto/identity";
+import { logWarn, makeRuntime, type O11yRuntime } from "@cocore/o11y";
 import {
   COLLECTIONS,
   type CollectionId,
   type Firehose as CocoreFirehose,
   type IndexedRecord,
 } from "@cocore/sdk";
+import { Effect, Fiber, Schedule } from "effect";
 
 /** All cocore collections the firehose listens for. `COLLECTIONS`
  *  itself only enumerates `dev.cocore.compute.*` (the receipt-side
@@ -36,6 +43,21 @@ const ACCOUNT_COLLECTIONS = [
 const ALL_COLLECTIONS = [...COLLECTIONS, ...ACCOUNT_COLLECTIONS];
 
 const COLLECTION_SET = new Set<string>(ALL_COLLECTIONS);
+
+// One o11y runtime for the module — provides the tracing layer that
+// `Effect.withSpan` reports through and the logger `logWarn` flows to.
+// A no-op until OTEL_EXPORTER_OTLP_* is set (see @cocore/o11y).
+const runtime: O11yRuntime = makeRuntime({ serviceName: "cocore-appview" });
+
+// Supervised reconnect backoff for the relay subscription. Jittered
+// exponential starting at 1s, capped at 30s via `either(spaced(30s))`
+// (`either` takes the shorter of the two delays, so once the
+// exponential growth passes 30s the 30s schedule wins). Recurs
+// forever, so a dropped subscription always tries to reconnect.
+const RECONNECT_SCHEDULE = Schedule.exponential("1 second").pipe(
+  Schedule.jittered,
+  Schedule.either(Schedule.spaced("30 seconds")),
+);
 
 export interface RelayFirehoseOpts {
   /** WebSocket URL of the relay. e.g. `wss://bsky.network` or
@@ -62,18 +84,21 @@ export class RelayFirehose {
   private inner: AtFirehose;
   private opts: RelayFirehoseOpts;
   private idResolver: IdResolver;
+  private runner: MemoryRunner;
+  /** Fiber running the supervised reconnect loop; set by `start()`. */
+  private fiber?: Fiber.RuntimeFiber<void, unknown>;
 
   constructor(opts: RelayFirehoseOpts) {
     this.opts = opts;
     this.idResolver = new IdResolver();
     const setCursor = opts.setCursor ?? (async () => {});
     let lastCursor: number | undefined = opts.initialCursor;
-    const runner = new MemoryRunner({ setCursor });
+    this.runner = new MemoryRunner({ setCursor });
 
     this.inner = new AtFirehose({
       service: opts.service,
       idResolver: this.idResolver,
-      runner,
+      runner: this.runner,
       unauthenticatedCommits: opts.unauthenticatedCommits ?? false,
       filterCollections: ALL_COLLECTIONS,
       handleEvent: async (evt: AtEvent) => {
@@ -89,6 +114,14 @@ export class RelayFirehose {
         if (typeof seq === "number") lastCursor = seq;
       },
       onError: (err: Error) => {
+        // A subscription-level error means the upstream connection
+        // dropped/failed. @atproto/sync would otherwise swallow it and
+        // recurse internally on a fixed delay; instead we re-throw so
+        // it escapes `start()` and the supervised loop below reconnects
+        // it with jittered exponential backoff + tracing. Per-event
+        // errors (validation/parse/handler) are recoverable — log and
+        // keep consuming the stream.
+        if (err instanceof FirehoseSubscriptionError) throw err;
         // eslint-disable-next-line no-console
         console.error("relay-firehose error:", err.message);
       },
@@ -96,12 +129,63 @@ export class RelayFirehose {
     void lastCursor;
   }
 
+  /** Run one subscription attempt. `inner.start()` resolves only on a
+   *  clean abort (via `stop()`); a dropped subscription rejects it (the
+   *  `onError` re-throw above). On interruption the finalizer aborts the
+   *  live connection so `stop()` can wind the WS down cleanly.
+   *
+   *  Re-running `inner.start()` re-iterates the underlying subscription,
+   *  which re-reads the cursor from the shared `MemoryRunner` — so a
+   *  reconnect resumes from the persisted cursor, never from head. */
+  private connectOnce(): Effect.Effect<void, unknown> {
+    return Effect.async<void, unknown>((resume) => {
+      let settled = false;
+      this.inner.start().then(
+        () => {
+          if (!settled) {
+            settled = true;
+            resume(Effect.void);
+          }
+        },
+        (err: unknown) => {
+          if (!settled) {
+            settled = true;
+            resume(Effect.fail(err));
+          }
+        },
+      );
+      return Effect.promise(async () => {
+        settled = true;
+        await this.inner.destroy();
+      });
+    }).pipe(
+      Effect.withSpan("relay.subscribe", { attributes: { "relay.service": this.opts.service } }),
+      Effect.tapError((err) =>
+        logWarn("relay-firehose subscription dropped; reconnecting", {
+          service: this.opts.service,
+          cursor: this.runner.getCursor(),
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      ),
+    );
+  }
+
   start(): void {
-    this.inner.start();
+    if (this.fiber) return;
+    this.fiber = runtime.runFork(this.connectOnce().pipe(Effect.retry(RECONNECT_SCHEDULE)));
   }
 
   async stop(): Promise<void> {
-    await this.inner.destroy();
+    const fiber = this.fiber;
+    this.fiber = undefined;
+    if (fiber) {
+      // Interrupting runs `connectOnce`'s finalizer, which aborts the
+      // live subscription (resolving `inner.destroy()`); if we're mid
+      // backoff it just cancels the sleep.
+      await runtime.runPromise(Fiber.interrupt(fiber)).catch(() => {});
+    } else {
+      await this.inner.destroy();
+    }
   }
 }
 

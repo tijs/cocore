@@ -77,7 +77,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-use crate::engines::{Engine, GenerateRequest, GenerateResponse};
+use crate::engines::{
+    model_prefills_think, DeltaChannel, Engine, GenerateRequest, GenerateResponse, ThinkTagSplitter,
+};
 
 /// Max stderr/stdout lines retained per stream for engine-crash
 /// diagnostics. The agent NEVER logs child output during normal
@@ -171,10 +173,19 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     total
 }
 
-/// Content-safe human size for progress logs (bytes only, never any
-/// prompt/token data).
-fn human_mb(bytes: u64) -> String {
-    format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0))
+/// Content-safe adaptive human size for progress logs (bytes only, never
+/// any prompt/token data). Scales B → TB so a multi-GB weight download
+/// doesn't read as "20480 MB"; GB/TB keep one decimal.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut i = 0;
+    while value >= 1024.0 && i < UNITS.len() - 1 {
+        value /= 1024.0;
+        i += 1;
+    }
+    let decimals = if i >= 3 { 1 } else { 0 };
+    format!("{value:.decimals$} {}", UNITS[i])
 }
 
 /// Embedded Python wrapper. Written to disk once at first spawn so the
@@ -389,7 +400,7 @@ impl SubprocessEngine {
 
         if !self.venv_python.exists() {
             bail!(
-                "venv python missing at {}. Run `curl … console.cocore.dev/agent | sh` to (re)provision the venv.",
+                "venv python missing at {}. Run `curl … cocore.dev/agent | sh` to (re)provision the venv.",
                 self.venv_python.display()
             );
         }
@@ -495,7 +506,7 @@ impl SubprocessEngine {
             if last_bytes > 0 && now.duration_since(last_log) >= Duration::from_secs(15) {
                 tracing::info!(
                     model = %self.model_id,
-                    downloaded = %human_mb(last_bytes),
+                    downloaded = %human_bytes(last_bytes),
                     "provisioning: model weights downloading"
                 );
                 last_log = now;
@@ -509,7 +520,7 @@ impl SubprocessEngine {
                      Recent engine output (no request has been served yet — content-safe to share):\n{}\n{}",
                     self.model_id,
                     READY_STALL_TIMEOUT.as_secs(),
-                    human_mb(last_bytes),
+                    human_bytes(last_bytes),
                     render_ring("stdout", &stdout_buf),
                     render_ring("stderr", &stderr_buf),
                 );
@@ -521,7 +532,7 @@ impl SubprocessEngine {
                      Recent engine output (content-safe):\n{}\n{}",
                     self.model_id,
                     READY_HARD_CAP.as_secs() / 3600,
-                    human_mb(last_bytes),
+                    human_bytes(last_bytes),
                     render_ring("stdout", &stdout_buf),
                     render_ring("stderr", &stderr_buf),
                 );
@@ -701,7 +712,8 @@ impl SubprocessEngine {
     fn process_sse_buffer(
         buf: &mut Vec<u8>,
         cursor: &mut usize,
-        on_data: &mut dyn FnMut(&str) -> Result<()>,
+        splitter: &mut ThinkTagSplitter,
+        on_data: &mut dyn FnMut(DeltaChannel, &str) -> Result<()>,
         tokens: &mut (u64, u64),
     ) -> Result<()> {
         while *cursor < buf.len() {
@@ -729,12 +741,27 @@ impl SubprocessEngine {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
                 continue;
             };
+            // Reasoning ("thinking") arrives on a sibling field in
+            // vLLM/DeepSeek-style servers; forward it verbatim on the
+            // Reasoning channel.
+            if let Some(reasoning) = v
+                .pointer("/choices/0/delta/reasoning_content")
+                .or_else(|| v.pointer("/choices/0/delta/reasoning"))
+                .and_then(|c| c.as_str())
+            {
+                if !reasoning.is_empty() {
+                    on_data(DeltaChannel::Reasoning, reasoning)?;
+                }
+            }
+            // The answer text may itself carry inline <think>...</think>
+            // markers (local MLX models that don't use a reasoning field);
+            // the splitter separates those, buffering across deltas.
             if let Some(content) = v
                 .pointer("/choices/0/delta/content")
                 .and_then(|c| c.as_str())
             {
                 if !content.is_empty() {
-                    on_data(content)?;
+                    splitter.push(content, on_data)?;
                 }
             }
             if let Some(u) = v.get("usage") {
@@ -757,7 +784,8 @@ impl SubprocessEngine {
         &self,
         path: &str,
         body: &[u8],
-        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+        start_in_reasoning: bool,
+        on_delta: &mut dyn FnMut(DeltaChannel, &str) -> Result<()>,
     ) -> Result<(u64, u64)> {
         let mut stream = UnixStream::connect(&self.socket_path).with_context(|| {
             format!(
@@ -790,6 +818,11 @@ impl SubprocessEngine {
         let mut header_end: Option<usize> = None;
         let mut body_cursor = 0usize;
         let mut tokens = (0u64, 0u64);
+        let mut splitter = if start_in_reasoning {
+            ThinkTagSplitter::new_in_reasoning()
+        } else {
+            ThinkTagSplitter::new()
+        };
 
         loop {
             let n = match stream.read(&mut read_buf) {
@@ -819,8 +852,16 @@ impl SubprocessEngine {
                 continue;
             }
 
-            Self::process_sse_buffer(&mut buf, &mut body_cursor, on_delta, &mut tokens)?;
+            Self::process_sse_buffer(
+                &mut buf,
+                &mut body_cursor,
+                &mut splitter,
+                on_delta,
+                &mut tokens,
+            )?;
         }
+        // Flush any partial <think> marker held at end of stream.
+        splitter.finish(on_delta)?;
 
         Ok(tokens)
     }
@@ -941,16 +982,97 @@ impl Engine for SubprocessEngine {
     fn generate_stream(
         &self,
         request: &GenerateRequest,
-        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+        on_delta: &mut dyn FnMut(DeltaChannel, &str) -> Result<()>,
     ) -> Result<GenerateResponse> {
         let body = Self::build_chat_body(request, true)?;
         let body_bytes = Zeroizing::new(serde_json::to_vec(&body)?);
-        let (tokens_in, tokens_out) =
-            self.http_post_stream_uds("/v1/chat/completions", &body_bytes, on_delta)?;
+        let (tokens_in, tokens_out) = self.http_post_stream_uds(
+            "/v1/chat/completions",
+            &body_bytes,
+            model_prefills_think(&request.model),
+            on_delta,
+        )?;
         Ok(GenerateResponse {
             text: String::new(),
             tokens_in,
             tokens_out,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feed a full SSE body through the parser and collect channel-tagged
+    /// deltas plus the final token counts.
+    fn drain(body: &str) -> (Vec<(DeltaChannel, String)>, (u64, u64)) {
+        let mut buf = body.as_bytes().to_vec();
+        let mut cursor = 0usize;
+        let mut splitter = ThinkTagSplitter::new();
+        let mut tokens = (0u64, 0u64);
+        let mut out: Vec<(DeltaChannel, String)> = Vec::new();
+        SubprocessEngine::process_sse_buffer(
+            &mut buf,
+            &mut cursor,
+            &mut splitter,
+            &mut |ch, s| {
+                out.push((ch, s.to_string()));
+                Ok(())
+            },
+            &mut tokens,
+        )
+        .unwrap();
+        splitter
+            .finish(&mut |ch, s| {
+                out.push((ch, s.to_string()));
+                Ok(())
+            })
+            .unwrap();
+        (out, tokens)
+    }
+
+    #[test]
+    fn extracts_reasoning_content_field_onto_reasoning_channel() {
+        let body = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\
+                    data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\
+                    data: {\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\
+                    data: [DONE]\n";
+        let (out, tokens) = drain(body);
+        let reasoning: String = out
+            .iter()
+            .filter(|(c, _)| *c == DeltaChannel::Reasoning)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        let content: String = out
+            .iter()
+            .filter(|(c, _)| *c == DeltaChannel::Content)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(reasoning, "hmm");
+        assert_eq!(content, "hi");
+        assert_eq!(tokens, (4, 2));
+    }
+
+    #[test]
+    fn splits_inline_think_tags_in_content_field() {
+        // A model that has no reasoning_content field but inlines <think> in
+        // its content stream is still separated.
+        let body =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"<think>why</think>because\"}}]}\n\
+             data: [DONE]\n";
+        let (out, _) = drain(body);
+        let reasoning: String = out
+            .iter()
+            .filter(|(c, _)| *c == DeltaChannel::Reasoning)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        let content: String = out
+            .iter()
+            .filter(|(c, _)| *c == DeltaChannel::Content)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(reasoning, "why");
+        assert_eq!(content, "because");
     }
 }

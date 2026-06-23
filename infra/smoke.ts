@@ -27,14 +27,11 @@ function step(label: string): void {
   process.stderr.write(`\n--- ${label} ---\n`);
 }
 
-async function getStats(): Promise<{ charges: number; settled: number }> {
+async function getStats(): Promise<{ settled: number; treasuryBalance: number }> {
   const res = await fetch(`${BRIDGE}/xrpc/dev.cocore.bridge.stats`);
   if (!res.ok) throw new Error(`stats: ${res.status}`);
-  const body = (await res.json()) as {
-    payments: { charges: number; payouts: number };
-    settled: number;
-  };
-  return { charges: body.payments.charges, settled: body.settled };
+  const body = (await res.json()) as { settled: number; treasuryBalance: number };
+  return { settled: body.settled, treasuryBalance: body.treasuryBalance };
 }
 
 async function main() {
@@ -44,7 +41,7 @@ async function main() {
 
   step("2. snapshot starting state");
   const start = await getStats();
-  console.log(`charges=${start.charges} settled=${start.settled}`);
+  console.log(`settled=${start.settled} treasuryBalance=${start.treasuryBalance}`);
 
   step("3–4. publish provider + authorization, job, attestation, signed receipt");
   const { receiptUri } = await seedDevStack({ bridge: BRIDGE });
@@ -53,22 +50,22 @@ async function main() {
   const t0 = Date.now();
   while (Date.now() - t0 < DEADLINE_MS) {
     const cur = await getStats();
-    if (cur.charges > start.charges && cur.settled > start.settled) {
+    if (cur.settled > start.settled) {
       console.log(
-        `settled (charges ${start.charges}->${cur.charges}, settlements ${start.settled}->${cur.settled})`,
+        `settled (settlements ${start.settled}->${cur.settled}, treasury ${start.treasuryBalance}->${cur.treasuryBalance})`,
       );
       break;
     }
     await new Promise((r) => setTimeout(r, 500));
   }
   const final = await getStats();
-  if (final.charges <= start.charges) {
-    throw new Error("charge counter did not increment");
+  if (final.settled <= start.settled) {
+    throw new Error("settled counter did not increment");
   }
 
   step("6. verifyReceipt at the AppView (cryptographic)");
   const verifyRes = await fetch(
-    `${APPVIEW}/xrpc/dev.cocore.appview.verifyReceipt?uri=${encodeURIComponent(receiptUri)}`,
+    `${APPVIEW}/xrpc/dev.cocore.compute.verifyReceipt?uri=${encodeURIComponent(receiptUri)}`,
   );
   const verify = (await verifyRes.json()) as { ok: boolean; findings: { code: string }[] };
   console.log(JSON.stringify(verify));
@@ -79,7 +76,7 @@ async function main() {
 
   step("7. assert receipt indexed for this provider");
   const list = (await fetch(
-    `${APPVIEW}/xrpc/dev.cocore.appview.getReceipts?provider=${encodeURIComponent(PROVIDER)}`,
+    `${APPVIEW}/xrpc/dev.cocore.compute.listReceipts?provider=${encodeURIComponent(PROVIDER)}`,
   ).then((r) => r.json())) as { receipts: { uri: string }[] };
   if (!list.receipts.some((r) => r.uri === receiptUri)) {
     throw new Error("receipt not in AppView getReceipts response");

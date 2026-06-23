@@ -1,6 +1,7 @@
 import { Effect, Either } from "effect";
 
 import { ensureMyProfile } from "@/lib/account-profile.server.ts";
+import { handOffSessionToAppview } from "@/lib/appview-session-handoff.server.ts";
 import { issueAppSession } from "@/integrations/auth/app-session-store.server.ts";
 import { atprotoOAuthCallbackEffect } from "@/integrations/auth/atproto.server.ts";
 import { AUTH_SESSION_TOKEN_COOKIE } from "@/integrations/auth/constants.ts";
@@ -46,6 +47,10 @@ function oauthCallbackResponseEffect(request: Request): Effect.Effect<Response, 
         ),
       ),
     );
+    // Hand the just-minted session off to the AppView so it can own the
+    // PDS-write path. Best-effort + gated on config; never blocks login.
+    yield* Effect.either(Effect.tryPromise(() => handOffSessionToAppview(did)));
+
     const sessionToken = issueAppSession(did);
     const isSecure = request.url.startsWith("https://");
     const cookieDomain = authCookieDomain(new URL(request.url).host);
@@ -76,6 +81,19 @@ function oauthCallbackResponseEffect(request: Request): Effect.Effect<Response, 
       "Set-Cookie",
       `${AUTH_SESSION_TOKEN_COOKIE}=${sessionToken}; ${cookieAttributes}`,
     );
+    // When we just set a Domain=cocore.dev cookie, also expire any legacy
+    // host-only `cocore-auth.session_token` (no Domain) left from before the
+    // cutover. Otherwise it survives, sorts first in the Cookie header, and
+    // shadows this fresh session — the "logged out despite logging in" loop
+    // that only a manual cookie clear used to fix. Skip on host-only hosts
+    // (localhost/preview): there the cookie above IS host-only, so clearing it
+    // would drop the session we just minted.
+    if (cookieDomain) {
+      headers.append(
+        "Set-Cookie",
+        `${AUTH_SESSION_TOKEN_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; ${isSecure ? "Secure; " : ""}Max-Age=0`,
+      );
+    }
 
     return new Response(null, {
       status: 302,

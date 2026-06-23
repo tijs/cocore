@@ -35,6 +35,7 @@ import {
   titleFromText,
 } from "@/components/chat/chat-store.ts";
 import { ChatMarkdown } from "@/components/chat/chat-markdown.tsx";
+import { ThinkingDisclosure } from "@/components/chat/chat-thinking.tsx";
 import { modelDirectoryRouteQueryOptions } from "@/components/models/models.functions.ts";
 import { formatTokensCompact } from "@/lib/token-display.ts";
 import type { ModelDirectoryEntry } from "@/lib/model-directory.server.ts";
@@ -836,7 +837,16 @@ function ModelPicker({
   onMaxTokens: (n: number) => void;
 }): ReactElement {
   const [open, setOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
   const selected = models.find((m) => m.modelId === modelId) ?? null;
+  const filteredModels = useMemo(() => {
+    const q = modelQuery.trim().toLowerCase();
+    if (!q) return models;
+    return models.filter((m) => {
+      if (m.modelId.toLowerCase().includes(q)) return true;
+      return m.machines.some((mac) => machineLabel(mac).toLowerCase().includes(q));
+    });
+  }, [models, modelQuery]);
   const machines: MachineOption[] = (selected?.machines ?? []).map((m) => ({
     did: m.did,
     label: machineLabel(m),
@@ -864,7 +874,10 @@ function ModelPicker({
     <div {...stylex.props(styles.modelPickerRoot)}>
       <Popover
         isOpen={open}
-        onOpenChange={setOpen}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next) setModelQuery("");
+        }}
         placement="top start"
         trigger={
           <AriaButton {...stylex.props(styles.chipBtn)}>
@@ -885,13 +898,27 @@ function ModelPicker({
           <span>model</span>
           <span {...stylex.props(styles.popSectHint)}>models live on the network</span>
         </div>
+        {models.length > 4 ? (
+          <SearchField
+            size="sm"
+            placeholder="search models"
+            value={modelQuery}
+            onChange={setModelQuery}
+            aria-label="search models"
+          />
+        ) : null}
         <Flex direction="column" gap="xs">
           {models.length === 0 ? (
             <Text variant="secondary" size="sm">
               no models online right now
             </Text>
           ) : null}
-          {models.map((m) => (
+          {models.length > 0 && filteredModels.length === 0 ? (
+            <Text variant="secondary" size="sm">
+              no models match “{modelQuery.trim()}”
+            </Text>
+          ) : null}
+          {filteredModels.map((m) => (
             <button
               key={m.modelId}
               type="button"
@@ -1312,6 +1339,7 @@ export function ChatPage(): ReactElement {
       id: newSessionId(),
       role: "assistant",
       text: "",
+      reasoning: "",
       modelId,
       createdAt: now,
     };
@@ -1345,6 +1373,12 @@ export function ChatPage(): ReactElement {
         },
         onChunk: (chunk) => {
           patchMessage(sessionId, assistantMsg.id, (m) => ({ ...m, text: m.text + chunk }));
+        },
+        onReasoning: (chunk) => {
+          patchMessage(sessionId, assistantMsg.id, (m) => ({
+            ...m,
+            reasoning: (m.reasoning ?? "") + chunk,
+          }));
         },
       });
       patchMessage(sessionId, assistantMsg.id, (m) => ({
@@ -1588,45 +1622,60 @@ export function ChatPage(): ReactElement {
                       {m.text}
                     </div>
                   ) : (
-                    <div key={m.id} {...stylex.props(styles.msgAssistant)}>
-                      <div {...stylex.props(styles.msgGutter)}>
-                        <span {...stylex.props(styles.msgGutterModel)}>{m.modelId ?? modelId}</span>
-                        {m.providerLabel || m.providerDid ? (
-                          <>
-                            <span {...stylex.props(styles.metaSep)}>·</span>
-                            <span>{m.providerLabel ?? shortDid(m.providerDid ?? "")}</span>
-                          </>
-                        ) : null}
-                      </div>
-                      <div {...stylex.props(styles.msgBody)}>
-                        <ChatMarkdown streaming={m.id === streamingId} text={m.text} />
-                      </div>
-                      {m.meta ? (
-                        <div {...stylex.props(styles.msgMeta)}>
-                          <span>
-                            −
-                            <span {...stylex.props(styles.emphasis)}>
-                              {m.meta.tokensIn + m.meta.tokensOut}
-                            </span>{" "}
-                            tok
-                          </span>
-                          {m.meta.durationMs > 0 ? (
-                            <span>
-                              <span {...stylex.props(styles.emphasis)}>
-                                {Math.round((m.meta.tokensOut / m.meta.durationMs) * 1000)}
-                              </span>{" "}
-                              tok/s
+                    (() => {
+                      const streaming = m.id === streamingId;
+                      // "Thinking" is active only while reasoning is arriving and
+                      // the answer hasn't started; once content begins the caret
+                      // (and the disclosure) move to the answer.
+                      const thinkingActive = streaming && !!m.reasoning && !m.text;
+                      const answerActive = streaming && !thinkingActive;
+                      return (
+                        <div key={m.id} {...stylex.props(styles.msgAssistant)}>
+                          <div {...stylex.props(styles.msgGutter)}>
+                            <span {...stylex.props(styles.msgGutterModel)}>
+                              {m.modelId ?? modelId}
                             </span>
+                            {m.providerLabel || m.providerDid ? (
+                              <>
+                                <span {...stylex.props(styles.metaSep)}>·</span>
+                                <span>{m.providerLabel ?? shortDid(m.providerDid ?? "")}</span>
+                              </>
+                            ) : null}
+                          </div>
+                          <div {...stylex.props(styles.msgBody)}>
+                            {m.reasoning ? (
+                              <ThinkingDisclosure reasoning={m.reasoning} active={thinkingActive} />
+                            ) : null}
+                            <ChatMarkdown streaming={answerActive} text={m.text} />
+                          </div>
+                          {m.meta ? (
+                            <div {...stylex.props(styles.msgMeta)}>
+                              <span>
+                                −
+                                <span {...stylex.props(styles.emphasis)}>
+                                  {m.meta.tokensIn + m.meta.tokensOut}
+                                </span>{" "}
+                                tok
+                              </span>
+                              {m.meta.durationMs > 0 ? (
+                                <span>
+                                  <span {...stylex.props(styles.emphasis)}>
+                                    {Math.round((m.meta.tokensOut / m.meta.durationMs) * 1000)}
+                                  </span>{" "}
+                                  tok/s
+                                </span>
+                              ) : null}
+                              <span>{(m.meta.durationMs / 1000).toFixed(1)}s</span>
+                            </div>
                           ) : null}
-                          <span>{(m.meta.durationMs / 1000).toFixed(1)}s</span>
+                          {m.errorReason ? (
+                            <div {...stylex.props(styles.msgError)}>
+                              failed ({m.errorCode}): {m.errorReason}
+                            </div>
+                          ) : null}
                         </div>
-                      ) : null}
-                      {m.errorReason ? (
-                        <div {...stylex.props(styles.msgError)}>
-                          failed ({m.errorCode}): {m.errorReason}
-                        </div>
-                      ) : null}
-                    </div>
+                      );
+                    })()
                   ),
                 )}
               </div>

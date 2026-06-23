@@ -1,7 +1,6 @@
 import { mutationOptions, queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
-import { Effect } from "effect";
 import { z } from "zod";
 
 import {
@@ -9,6 +8,7 @@ import {
   acceptTerms,
   getActiveTermsStateEffect,
 } from "@/lib/terms-acceptance.server.ts";
+import { runTraced } from "@/lib/o11y.server.ts";
 import { authMiddleware } from "@/middleware/auth.ts";
 import { getAtprotoSessionForRequest } from "@/middleware/auth.server.ts";
 
@@ -24,7 +24,7 @@ const getMyTermsStateServerFn = createServerFn({ method: "GET" }).handler(
     const request = getRequest();
     const ctx = await getAtprotoSessionForRequest(request);
     if (!ctx) return null;
-    return Effect.runPromise(getActiveTermsStateEffect(ctx.oauthSession));
+    return runTraced("terms.getActiveState", getActiveTermsStateEffect(ctx.oauthSession));
   },
 );
 

@@ -114,10 +114,10 @@
   // (Makefile targets, mise tasks, shell scripts).
   "workspaces": {
     ".": {
-      // Root scripts referenced from package.json + mise.toml +
-      // Makefile + scripts/dev.sh that knip can't see by static
-      // analysis of those non-JS files.
-      "entry": ["infra/smoke.ts"],
+      // infra/*.ts are run via Makefile / mise tasks (e.g. infra/smoke.ts
+      // from `make stack-smoke`), not imported. Scope knip's root project to
+      // them; an explicit entry for smoke.ts is no longer needed — knip
+      // resolves their reachability from the project glob.
       "project": ["infra/*.ts"]
     },
     "packages/console": {

@@ -1,5 +1,6 @@
 import { mutationOptions, queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
+import { getRequest } from "@tanstack/react-start/server";
 import { z } from "zod";
 
 import {
@@ -9,7 +10,11 @@ import {
   listKeysForDid,
   revokeKey,
 } from "@/lib/api-keys.server.ts";
+import { type ResetConnectionReport, resetMyConnection } from "@/lib/reset-connection.server.ts";
 import { wipeMyData } from "@/lib/wipe-my-data.server.ts";
+import { revokeAppSession } from "@/integrations/auth/app-session-store.server.ts";
+import { clearAllAuthSessionCookies } from "@/integrations/auth/clear-session-cookie.server.ts";
+import { readAllAuthSessionTokens } from "@/integrations/auth/cookie-parse.ts";
 import { authMiddleware } from "@/middleware/auth.ts";
 
 const createKeySchema = z.object({
@@ -78,6 +83,30 @@ const wipeMyDataServerFn = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .handler(({ context }) => wipeMyData(context.oauthSession));
 
+// Reset connection: rebuild the caller's auth plumbing (revoke keys, drop
+// the OAuth session in both stores) without deleting any data, then clear
+// the browser session so the next step is a fresh OAuth login — the
+// handshake that re-establishes a valid write session. Distinct from wipe,
+// which destroys PDS records + the AppView index.
+const resetConnectionServerFn = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }): Promise<ResetConnectionReport> => {
+    const report = await resetMyConnection(context.did);
+
+    // Force re-auth: drop the app-session rows + clear the cookies. We do
+    // this AFTER the reset so this request still completes; the client
+    // redirects to /login on success. Mirrors signOutServerFn.
+    const request = getRequest();
+    for (const token of readAllAuthSessionTokens(request.headers.get("cookie"))) {
+      revokeAppSession(token);
+    }
+    // Clear every cookie scope (host-only + Domain=cocore.dev) so the legacy
+    // orphan cookie can't re-shadow the next login.
+    clearAllAuthSessionCookies(request.url);
+
+    return report;
+  });
+
 export type CreateMyApiKeyInput = z.infer<typeof createKeySchema>;
 export type RevokeMyApiKeyInput = z.infer<typeof revokeKeySchema>;
 export type DeleteMyApiKeyInput = z.infer<typeof deleteKeySchema>;
@@ -96,4 +125,8 @@ export const deleteMyApiKeyMutationOptions = mutationOptions({
 
 export const wipeMyDataMutationOptions = mutationOptions({
   mutationFn: () => wipeMyDataServerFn(),
+});
+
+export const resetConnectionMutationOptions = mutationOptions({
+  mutationFn: () => resetConnectionServerFn(),
 });

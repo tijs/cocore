@@ -42,6 +42,7 @@ import {
   myMachineDetailQueryOptions,
   setMyProviderActiveMutationOptions,
   setMyProviderDesiredModelsMutationOptions,
+  setMyProviderDesiredTierMutationOptions,
   setMyProviderMachineLabelMutationOptions,
 } from "@/components/machines/machines.functions.ts";
 import type { MachineWorkItem } from "@/components/machines/machines.server.ts";
@@ -349,6 +350,14 @@ export function MachineDetail({ rkey }: { rkey: string }) {
       setRenameOpen(false);
     },
   });
+  // Optional, per-machine confidential opt-in. Writes the owner's INTENT
+  // (desiredTier) to the provider record; the agent reconciles toward it and
+  // only publishes the higher achieved tier once earned. Opting out reverts the
+  // machine to exactly its prior behavior — nothing here breaks serving.
+  const desiredTierM = useMutation({
+    ...setMyProviderDesiredTierMutationOptions,
+    onSuccess: invalidate,
+  });
 
   const machine = detailQ.data?.machine ?? null;
   const timeline = detailQ.data?.timeline ?? [];
@@ -491,10 +500,22 @@ export function MachineDetail({ rkey }: { rkey: string }) {
             <dd {...stylex.props(styles.kvDd)}>{m.pairedAt}</dd>
             {m.trustLevel ? (
               <>
-                <dt {...stylex.props(styles.kvDt)}>Trust</dt>
-                <dd {...stylex.props(styles.kvDd)}>{m.trustLevel}</dd>
+                <dt {...stylex.props(styles.kvDt)}>Attestation</dt>
+                <dd {...stylex.props(styles.kvDd)}>
+                  {m.trustLevel === "hardware-attested"
+                    ? "Hardware-attested — genuine Apple hardware, SIP verified"
+                    : "Self-attested (software)"}
+                </dd>
               </>
             ) : null}
+            <dt {...stylex.props(styles.kvDt)}>Confidential tier</dt>
+            <dd {...stylex.props(styles.kvDd)}>
+              {m.tier === "attested-confidential"
+                ? "🔒 Confidential — the operator cannot read your prompts"
+                : m.desiredTier === "attested-confidential"
+                  ? "Upgrade pending — opted in; finishing on the next serve"
+                  : "Best-effort — fast, but the operator can read prompts"}
+            </dd>
             <dt {...stylex.props(styles.kvDt)}>Supported models</dt>
             <dd {...stylex.props(styles.kvDd)}>
               {m.supportedModels && m.supportedModels.length > 0
@@ -508,6 +529,43 @@ export function MachineDetail({ rkey }: { rkey: string }) {
                 : "not pinned — serving local default"}
             </dd>
           </dl>
+          {/* Optional confidential upgrade — per machine, never forced. Opting
+              in writes the owner's intent (desiredTier); the agent earns the
+              tier and only then does it change anything. Opting out reverts. */}
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+            {m.desiredTier === "attested-confidential" ? (
+              <>
+                <LabelText variant="secondary">
+                  Opted into confidential. The machine earns it once it runs the measured native
+                  build under a hardware-attested posture; until then it keeps serving best-effort.
+                </LabelText>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  isDisabled={desiredTierM.isPending}
+                  onClick={() => desiredTierM.mutate({ rkey: m.id, tier: "best-effort" })}
+                >
+                  Turn off confidential
+                </Button>
+              </>
+            ) : (
+              <>
+                <LabelText variant="secondary">
+                  Optional: upgrade this machine to the confidential tier so the operator can&apos;t
+                  read prompts. It won&apos;t change how this machine serves today — you can turn it
+                  off anytime.
+                </LabelText>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  isDisabled={desiredTierM.isPending}
+                  onClick={() => desiredTierM.mutate({ rkey: m.id, tier: "attested-confidential" })}
+                >
+                  Upgrade to confidential…
+                </Button>
+              </>
+            )}
+          </div>
         </CardBody>
       </Card>
 

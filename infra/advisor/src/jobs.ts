@@ -24,8 +24,15 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { Headers, HttpServerRequest, HttpServerResponse } from "@effect/platform";
+import { Effect, Exit, Mailbox, Metric, Stream } from "effect";
+
+import { err } from "@cocore/o11y/http";
+
+import { dispatchOutcome } from "./metrics.ts";
 import type { AdvisorMessage, InferenceRequest } from "./protocol.ts";
 import type { ProviderEntry, ProviderRegistry } from "./registry.ts";
+import type { SseResponse } from "./sessions.ts";
 import type { SessionManager } from "./sessions.ts";
 
 interface JobBody {
@@ -173,25 +180,27 @@ export interface JobsContext {
   preflightTimeoutMs?: number;
 }
 
-/** Handle one POST /jobs request. Writes the response (success: SSE
- *  stream owned by SessionManager; failure: JSON status). */
-export async function handleJobsRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
+/** Outcome of selecting + preflighting a provider for a parsed job. */
+type SelectResult =
+  | { kind: "error"; status: number; error: string }
+  | { kind: "aborted" }
+  | { kind: "ok"; provider: ProviderEntry; job: ParsedJob["body"] };
+
+/** Parse the request body, build the candidate list, and preflight down to
+ *  the first responsive provider. Pure of any response transport — both the
+ *  raw-`ServerResponse` path (handleJobsRequest, used by tests) and the
+ *  HttpRouter stream path (jobsRoute) share it.
+ *
+ *  `isAborted` lets the caller bail mid-preflight if the requester hung up
+ *  (the raw path checks `res.writableEnded`; the stream path leaves it to the
+ *  platform's stream cancellation). */
+async function selectProvider(
+  raw: unknown,
   ctx: JobsContext,
-): Promise<void> {
-  // Start of the time-to-first-token clock: the moment cocore received
-  // this dispatch. Carried into the session so the first relayed chunk
-  // records received → first-chunk.
-  const receivedAt = Date.now();
-  let raw: unknown;
-  try {
-    raw = await readBody(req);
-  } catch (e) {
-    return jsonError(res, 400, `invalid JSON body: ${(e as Error).message}`);
-  }
+  isAborted: () => boolean,
+): Promise<SelectResult> {
   const parsed = parseJobBody(raw, ctx.generateId);
-  if (!parsed.ok) return jsonError(res, parsed.status, parsed.error);
+  if (!parsed.ok) return { kind: "error", status: parsed.status, error: parsed.error };
   const job = parsed.body;
 
   const preflightTimeoutMs = ctx.preflightTimeoutMs ?? 1500;
@@ -210,7 +219,11 @@ export async function handleJobsRequest(
       .getMachines(job.targetProviderDid)
       .filter((m) => !job.targetMachineId || m.machineId === job.targetMachineId);
     if (machines.length === 0) {
-      return jsonError(res, 503, `provider ${job.targetProviderDid} not connected`);
+      return {
+        kind: "error",
+        status: 503,
+        error: `provider ${job.targetProviderDid} not connected`,
+      };
     }
     // Apply the same eligibility the open pool gets: owner-active, attested,
     // fresh, and in good standing. Naming a provider doesn't buy a pass on
@@ -226,18 +239,18 @@ export async function handleJobsRequest(
       return true;
     });
     if (eligible.length === 0) {
-      return jsonError(
-        res,
-        503,
-        `provider ${job.targetProviderDid} has no attested, healthy machine available`,
-      );
+      return {
+        kind: "error",
+        status: 503,
+        error: `provider ${job.targetProviderDid} has no attested, healthy machine available`,
+      };
     }
     eligible.sort((a, b) => b.lastSeen - a.lastSeen);
     candidates = eligible;
   } else {
     candidates = ctx.registry.pickCandidates(job.model || undefined, true, ctx.attestationMaxAgeMs);
     if (candidates.length === 0) {
-      return jsonError(res, 503, "no attested providers available");
+      return { kind: "error", status: 503, error: "no attested providers available" };
     }
   }
 
@@ -277,7 +290,7 @@ export async function handleJobsRequest(
       alive = false;
     }
     // The requester may have hung up while we were probing.
-    if (res.writableEnded) return;
+    if (isAborted()) return { kind: "aborted" };
     if (alive) {
       ctx.registry.markHealthy(cand.did, cand.machineId);
       provider = cand;
@@ -299,28 +312,35 @@ export async function handleJobsRequest(
   }
 
   if (!provider) {
-    return jsonError(
-      res,
-      503,
-      `no responsive providers available (preflighted ${probed}, none answered in ${preflightTimeoutMs}ms)`,
-    );
+    return {
+      kind: "error",
+      status: 503,
+      error: `no responsive providers available (preflighted ${probed}, none answered in ${preflightTimeoutMs}ms)`,
+    };
   }
 
+  return { kind: "ok", provider, job };
+}
+
+/** Open the SSE session against `sink` and forward the `inference_request`
+ *  frame to the chosen provider. Transport-agnostic — `sink` is a raw
+ *  `ServerResponse` (raw path) or the Mailbox-backed sink (HttpRouter
+ *  stream path). */
+function dispatch(
+  sink: SseResponse,
+  provider: ProviderEntry,
+  job: ParsedJob["body"],
+  receivedAt: number,
+  ctx: JobsContext,
+): void {
   ctx.sessions.open(
     job.sessionId,
     provider.did,
     provider.machineId,
     job.requesterDid,
-    res,
+    sink,
     receivedAt,
   );
-
-  // Hook so we drop the session if the requester goes away mid-stream.
-  req.on("close", () => {
-    if (ctx.sessions.has(job.sessionId)) {
-      ctx.sessions.close(job.sessionId, "client-disconnected");
-    }
-  });
 
   const inferenceFrame: AdvisorMessage = {
     type: "inference_request",
@@ -350,6 +370,139 @@ export async function handleJobsRequest(
     ctx.sessions.close(job.sessionId, `provider-send-failed: ${(e as Error).message}`);
   }
 }
+
+/** Handle one POST /jobs request against a raw Node `ServerResponse` (success:
+ *  SSE stream owned by SessionManager; failure: JSON status). Kept for the
+ *  raw-`createServer` callers + the integration tests; main.ts serves /jobs
+ *  through {@link jobsRoute} on the HttpRouter instead. */
+export async function handleJobsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: JobsContext,
+): Promise<void> {
+  // Start of the time-to-first-token clock: the moment cocore received
+  // this dispatch. Carried into the session so the first relayed chunk
+  // records received → first-chunk.
+  const receivedAt = Date.now();
+  let raw: unknown;
+  try {
+    raw = await readBody(req);
+  } catch (e) {
+    return jsonError(res, 400, `invalid JSON body: ${(e as Error).message}`);
+  }
+  const sel = await selectProvider(raw, ctx, () => res.writableEnded);
+  if (sel.kind === "aborted") return;
+  if (sel.kind === "error") return jsonError(res, sel.status, sel.error);
+
+  // Hook so we drop the session if the requester goes away mid-stream.
+  req.on("close", () => {
+    if (ctx.sessions.has(sel.job.sessionId)) {
+      ctx.sessions.close(sel.job.sessionId, "client-disconnected");
+    }
+  });
+  dispatch(res, sel.provider, sel.job, receivedAt, ctx);
+}
+
+/** An {@link SseResponse} that writes SSE frames into an Effect `Mailbox`
+ *  (unbounded) instead of a socket. {@link Mailbox.toStream} turns the mailbox
+ *  into the `Stream<Uint8Array>` `HttpServerResponse.stream` serves, so the
+ *  SessionManager drives the response with the exact same frame-writing logic
+ *  it uses for a raw socket. Frames written before the stream is consumed are
+ *  buffered by the mailbox. */
+class MailboxSink implements SseResponse {
+  statusCode = 200;
+  private readonly encoder = new TextEncoder();
+  private ended = false;
+  // NB: explicit field + assignment, not a TS parameter property. The advisor
+  // runs under `node --experimental-strip-types`, which rejects parameter
+  // properties (they emit code) with ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX.
+  private readonly mailbox: Mailbox.Mailbox<Uint8Array>;
+  constructor(mailbox: Mailbox.Mailbox<Uint8Array>) {
+    this.mailbox = mailbox;
+  }
+  setHeader(): void {
+    /* headers are set on the HttpServerResponse, not here */
+  }
+  flushHeaders(): void {
+    /* no-op: the platform flushes when the stream starts */
+  }
+  write(chunk: string): boolean {
+    if (this.ended) return false;
+    return this.mailbox.unsafeOffer(this.encoder.encode(chunk));
+  }
+  end(): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.mailbox.unsafeDone(Exit.void);
+  }
+  get writableEnded(): boolean {
+    return this.ended;
+  }
+}
+
+/** HttpRouter handler for `POST /jobs`. Selects + preflights a provider, then
+ *  returns the dispatch relay as `HttpServerResponse.stream` over a
+ *  Mailbox-backed SSE sink (SSE frame format identical to the raw path). All
+ *  error/status paths are preserved; the dispatch outcome is recorded as a
+ *  metric and the whole route is spanned `advisor.dispatch`. */
+export function jobsRoute(ctx: JobsContext) {
+  return Effect.gen(function* () {
+    const httpReq = yield* HttpServerRequest.HttpServerRequest;
+    const nodeReq = httpReq.source as IncomingMessage;
+    const receivedAt = Date.now();
+
+    const body = yield* Effect.tryPromise({
+      try: () => readBody(nodeReq),
+      catch: (e) => e as Error,
+    }).pipe(Effect.either);
+    if (body._tag === "Left") {
+      yield* recordOutcome("rejected");
+      return err(400, { error: `invalid JSON body: ${body.left.message}` });
+    }
+
+    const sel = yield* Effect.promise(() => selectProvider(body.right, ctx, () => false));
+    if (sel.kind === "aborted") {
+      // The stream path never aborts mid-preflight (isAborted is constant
+      // false; the platform cancels the stream on disconnect instead), but
+      // keep the branch total.
+      yield* recordOutcome("no-capacity");
+      return err(503, { error: "request aborted" });
+    }
+    if (sel.kind === "error") {
+      yield* recordOutcome(sel.status === 503 ? "no-capacity" : "rejected");
+      return err(sel.status, { error: sel.error });
+    }
+
+    yield* recordOutcome("ok");
+    const mailbox = yield* Mailbox.make<Uint8Array>();
+    const sink = new MailboxSink(mailbox);
+    dispatch(sink, sel.provider, sel.job, receivedAt, ctx);
+
+    const sessionId = sel.job.sessionId;
+    const stream = Mailbox.toStream(mailbox).pipe(
+      // Drop the session if the platform tears the stream down (client
+      // disconnect) — mirrors the raw path's `req.on("close")`. A clean
+      // complete already removed the session, so this is then a no-op.
+      Stream.ensuring(
+        Effect.sync(() => {
+          if (ctx.sessions.has(sessionId)) ctx.sessions.close(sessionId, "client-disconnected");
+        }),
+      ),
+    );
+
+    return HttpServerResponse.stream(stream, {
+      contentType: "text/event-stream; charset=utf-8",
+      headers: Headers.fromInput({
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        "x-accel-buffering": "no",
+      }),
+    });
+  }).pipe(Effect.withSpan("advisor.dispatch"));
+}
+
+const recordOutcome = (outcome: "ok" | "no-capacity" | "rejected") =>
+  Metric.increment(dispatchOutcome(outcome));
 
 function jsonError(res: ServerResponse, status: number, error: string): void {
   res.statusCode = status;

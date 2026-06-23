@@ -10,16 +10,16 @@ info:
     served, and bearer-key authed agent status.
 
     To use an OpenAI-compatible client, set its base URL to
-    `https://console.cocore.dev/v1` (the client appends `/chat/completions`,
+    `https://cocore.dev/v1` (the client appends `/chat/completions`,
     `/models`, … exactly as it does for `https://api.openai.com/v1`) and swap
     in a cocore API key. The legacy `/api/v1/*` paths are kept as aliases and
-    behave identically. Pointing a client at `https://console.cocore.dev`
+    behave identically. Pointing a client at `https://cocore.dev`
     alone (no version segment) hits the console web app and returns HTML, not
     the API.
   license:
     name: MIT OR Apache-2.0
 servers:
-  - url: https://console.cocore.dev
+  - url: https://cocore.dev
     description: Production
 tags:
   - name: Inference
@@ -118,6 +118,63 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
         "503":
           description: No friends online (`no_friends_available`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/verified/chat/completions:
+    post:
+      tags: [Inference]
+      operationId: createVerifiedChatCompletion
+      summary: Create a chat completion (verified-tier routing)
+      description: >
+        Identical to `/v1/chat/completions`, but routing is constrained to
+        providers whose attestation is CRYPTOGRAPHICALLY VERIFIED to meet a
+        trust floor — recomputed from the provider's signed, Apple-rooted
+        attestation, never its self-asserted `trustLevel`. Set the optional
+        `min_trust` body field to `hardware-attested` (default — any verified
+        machine) or `confidential` (strict `attested-confidential`: known-good
+        measured build + hardened posture + live code-attestation). Fails closed
+        with `no_verified_providers` (503) when none meet the floor for the
+        model. Also available at the legacy path
+        `/api/v1/verified/chat/completions`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ChatCompletionRequest"
+                - type: object
+                  properties:
+                    min_trust:
+                      type: string
+                      enum: [hardware-attested, confidential]
+                      description: >
+                        Minimum verified trust tier to route to. Defaults to
+                        `hardware-attested`.
+      responses:
+        "200":
+          description: "A completion (or an SSE stream when `stream: true`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatCompletion" }
+            text/event-stream:
+              schema: { type: string }
+        "400":
+          description: Unrecognized `min_trust` value (`invalid_min_trust`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "401":
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "503":
+          description: No verified provider meets the tier for the model (`no_verified_providers`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }

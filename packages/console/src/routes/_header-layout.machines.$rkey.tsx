@@ -20,7 +20,7 @@ export const Route = createFileRoute("/_header-layout/machines/$rkey")({
   },
   component: MachineDetailPage,
   head: ({ loaderData }) => ({
-    meta: [{ title: `${loaderData?.alias ?? "Machine"} · cocore console` }],
+    meta: [{ title: `${loaderData?.alias ?? "Machine"} · co/core console` }],
   }),
 });
 

@@ -1,0 +1,53 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.defs",
+  "defs": {
+    "indexedRecord": {
+      "type": "object",
+      "description": "An AT Protocol record as indexed by the AppView from the firehose. The AppView is a cache; the record on the provider's PDS remains the source of truth. `body` is the raw lexicon record JSON for the record at `uri`.",
+      "required": ["uri", "cid", "collection", "repo", "rkey", "body"],
+      "properties": {
+        "uri": { "type": "string", "format": "at-uri" },
+        "cid": { "type": "string", "format": "cid" },
+        "collection": { "type": "string", "format": "nsid" },
+        "repo": { "type": "string", "format": "did" },
+        "rkey": { "type": "string" },
+        "body": {
+          "type": "unknown",
+          "description": "The lexicon record JSON. Validate it against the NSID in `collection`."
+        },
+        "indexedAt": { "type": "string", "format": "datetime" }
+      }
+    },
+    "verifyFinding": {
+      "type": "object",
+      "description": "A single structural, cryptographic, or hardware-attestation finding produced while verifying a record. A finding with severity `error` means the verification failed.",
+      "required": ["severity", "code", "message"],
+      "properties": {
+        "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "activityStat": {
+      "type": "object",
+      "description": "Request + token counts within a single time window.",
+      "required": ["requests", "tokens"],
+      "properties": {
+        "requests": { "type": "integer" },
+        "tokens": { "type": "integer" }
+      }
+    },
+    "activityWindows": {
+      "type": "object",
+      "description": "Activity rolled up across the four standard windows: last hour, day (24h), week (7d), and month (30d).",
+      "required": ["hour", "day", "week", "month"],
+      "properties": {
+        "hour": { "type": "ref", "ref": "dev.cocore.defs#activityStat" },
+        "day": { "type": "ref", "ref": "dev.cocore.defs#activityStat" },
+        "week": { "type": "ref", "ref": "dev.cocore.defs#activityStat" },
+        "month": { "type": "ref", "ref": "dev.cocore.defs#activityStat" }
+      }
+    }
+  }
+}

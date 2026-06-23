@@ -46,8 +46,11 @@ struct PreferencesView: View {
     /// there's no LaunchAgent plist to edit.
     let supervisor: AgentSupervisor
 
-    @AppStorage("consoleBaseUrl") private var consoleBaseUrl = "https://console.cocore.dev"
-    @AppStorage("advisorUrl") private var advisorUrl = "wss://advisor.cocore.dev/v1/agent"
+    // Defaults to the build-time baked URLs (prod, dev, or this PR's stack)
+    // so a fresh install's Settings → Network already shows the right target;
+    // the owner can still override here. See Endpoints.swift.
+    @AppStorage("consoleBaseUrl") private var consoleBaseUrl = Endpoints.bakedConsole
+    @AppStorage("advisorUrl") private var advisorUrl = Endpoints.bakedAdvisor
     @AppStorage("machineLabel") private var machineName = ""
     @AppStorage("scheduleLimited") private var scheduleLimited = false
     @AppStorage("idleStart") private var idleStart = 22
@@ -71,6 +74,10 @@ struct PreferencesView: View {
                             nameApplied = true
                         }
                     }
+                    // Standard macOS push button: override the pane's bronze
+                    // tint so these primary actions read as normal gray buttons
+                    // with a primary-colored label, not tinted links/pills.
+                    .tint(Color.primary)
                     if nameApplied {
                         Text("Renamed — agent restarted")
                             .font(.footnote)
@@ -92,6 +99,7 @@ struct PreferencesView: View {
                             networkApplied = true
                         }
                     }
+                    .tint(Color.primary)
                     if networkApplied {
                         Text("Applied — agent restarted")
                             .font(.footnote)
@@ -137,6 +145,7 @@ struct PreferencesView: View {
                             scheduleApplied = true
                         }
                     }
+                    .tint(Color.primary)
                     if scheduleApplied {
                         Text("Applied — agent restarted")
                             .font(.footnote)

@@ -1,0 +1,31 @@
+{
+  "lexicon": 1,
+  "id": "dev.cocore.compute.listReceipts",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Indexed `dev.cocore.compute.receipt` records (capped at 200), optionally filtered by provider DID, requester DID, and/or job URI.",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "provider": { "type": "string", "format": "did", "description": "Filter to receipts signed by this provider DID." },
+          "requester": { "type": "string", "format": "did", "description": "Filter to receipts whose `requester` is this DID." },
+          "job": { "type": "string", "format": "at-uri", "description": "Filter to receipts referencing this job record URI." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["receipts"],
+          "properties": {
+            "receipts": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "dev.cocore.defs#indexedRecord" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

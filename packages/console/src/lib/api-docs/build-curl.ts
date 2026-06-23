@@ -38,7 +38,10 @@ export function buildApiDocsCurl(
 ): string {
   const params = options?.params ?? resolveApiDocsExampleParams(entry, fixtures);
   const body = options?.body ?? resolveApiDocsExampleBody(entry, fixtures);
-  const url = new URL(`${baseUrl.replace(/\/$/, "")}/xrpc/${entry.nsid}`);
+  // AppView methods are served at /xrpc/<nsid>; console-hosted methods at
+  // /api/xrpc/<nsid>. `baseUrl` is the host-appropriate origin.
+  const prefix = entry.host === "console" ? "/api/xrpc" : "/xrpc";
+  const url = new URL(`${baseUrl.replace(/\/$/, "")}${prefix}/${entry.nsid}`);
   for (const [key, value] of Object.entries(params)) {
     if (value) url.searchParams.set(key, value);
   }

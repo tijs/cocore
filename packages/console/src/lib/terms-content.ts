@@ -19,24 +19,24 @@ export const termsContent = {
 
 **Effective:** 2026-06-13 · **Version:** v2
 
-cocore is **alpha software**. Read the entire document before using
+co/core is **alpha software**. Read the entire document before using
 it.
 
-## What cocore is
+## What co/core is
 
-cocore is an experimental ATProto-native protocol for decentralized
+co/core is an experimental ATProto-native protocol for decentralized
 compute. Anyone can run the **provider agent** (a Rust binary you
 install on your own Mac) to serve work, or use the **console / API**
 to dispatch jobs to other people's machines.
 
 ## What you accept by installing the provider agent
 
-By installing or running the cocore provider agent on any machine
+By installing or running the co/core provider agent on any machine
 you control, you affirmatively accept that:
 
 1. **The software has not been independently security-audited.** It
    was built rapidly with significant assistance from generative AI
-   tooling. The cocore maintainers have not subjected it to
+   tooling. The co/core maintainers have not subjected it to
    third-party review, fuzzing, or formal verification. There may
    be vulnerabilities — known or unknown — that allow attackers to
    exfiltrate prompts, modify replies, escape the hardened-runtime
@@ -45,7 +45,7 @@ you control, you affirmatively accept that:
 
 2. **You assume the risk.** You alone are responsible for any
    damage, data loss, financial loss, downtime, or other harm that
-   results from running the agent. The cocore maintainers,
+   results from running the agent. The co/core maintainers,
    contributors, and operators of the cocore.dev exchange disclaim
    responsibility for any such harm to the maximum extent permitted
    by applicable law.
@@ -60,7 +60,7 @@ you control, you affirmatively accept that:
 
 ## What you accept by sending work
 
-By submitting a job to any provider through cocore (whether through
+By submitting a job to any provider through co/core (whether through
 the in-app console, the OpenAI-compatible API, or any other
 client), you affirmatively agree that:
 
@@ -72,15 +72,15 @@ client), you affirmatively agree that:
    cryptographic identity are prohibited.
 
 2. **You take responsibility for the prompts you send.** Some
-   providers may log inputs. The cocore-provided console encrypts
+   providers may log inputs. The co/core-provided console encrypts
    prompts to the provider's published key before transit, but
    the provider itself decrypts and processes the plaintext —
    anything you send is potentially observable to the provider.
 
-3. **Compute is priced in tokens, not dollars.** cocore runs a
+3. **Compute is priced in tokens, not dollars.** co/core runs a
    **closed-loop token economy**. There is no card on file, no
    fiat settlement, no Stripe in the middle, and no exchange rate
-   between cocore tokens and any outside currency. The active
+   between co/core tokens and any outside currency. The active
    exchange (operated by whoever publishes the
    \`dev.cocore.compute.exchangePolicy\` you accepted) denominates
    everything in **tokens** (currency code \`CC\`) and publishes
@@ -129,7 +129,7 @@ client), you affirmatively agree that:
 
 ## Generative-AI disclosure
 
-A meaningful fraction of cocore's source code, documentation,
+A meaningful fraction of co/core's source code, documentation,
 deployment scripts, and these terms themselves were drafted with
 the help of large language models, including pair-programming
 sessions with Anthropic's Claude. Human maintainers reviewed each
@@ -152,7 +152,7 @@ SOFTWARE.
 
 Your acceptance of these terms is recorded as a
 \`dev.cocore.compute.termsAcceptance\` record on your ATProto PDS.
-That record is portable: any future cocore-aware client can verify
+That record is portable: any future co/core-aware client can verify
 that you accepted version \`v2\` on a specific date, against a
 specific exchange's policy.
 
@@ -163,7 +163,7 @@ and do not run the provider agent.
 
 **Effective:** 2026-06-13 · **Version:** v2
 
-cocore stores as little personal data as it can while still
+co/core stores as little personal data as it can while still
 functioning as an open, ATProto-native protocol.
 
 ## What we collect
@@ -220,7 +220,7 @@ exchanges are federable and anyone can run their own) collects:
 
 - **Delete everything**: the \`/account\` page has a "Wipe all my
   data" button that deletes every record you own across all
-  cocore collections from your PDS, removes the corresponding
+  co/core collections from your PDS, removes the corresponding
   rows from cocore.dev's AppView, and hard-deletes every API key.
 - **Take your data with you**: every record is on your own PDS in
   open ATProto format. You can export your repo with

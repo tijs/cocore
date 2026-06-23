@@ -20,7 +20,7 @@
 // without a paired test PDS. That's a follow-up.
 //
 // CI runs against `vite preview` (a static build) on port 4173, so
-// the tests don't need network access to console.cocore.dev or any
+// the tests don't need network access to cocore.dev or any
 // upstream services. Anything that hits an external host (bsky
 // firehose, advisor, etc.) is mocked away by the lack of those env
 // vars in CI.

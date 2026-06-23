@@ -27,7 +27,8 @@
 //     InvalidSwap and the operator retries.
 
 import type { OAuthSession } from "@atcute/oauth-node-client";
-import { Effect } from "effect";
+
+import { runTraced } from "@/lib/o11y.server.ts";
 
 import { cocoreConfig } from "@/lib/cocore-config.ts";
 import { consoleDb } from "@/lib/console-db.server.ts";
@@ -166,7 +167,10 @@ async function loadExchangeSession(): Promise<OAuthSession> {
       `cocoreConfig.exchangeDid is not a DID (${exchangeDid})`,
     );
   }
-  const session = await Effect.runPromise(restoreAtprotoSessionEffect(exchangeDid as Did));
+  const session = await runTraced(
+    "auth.restoreSession",
+    restoreAtprotoSessionEffect(exchangeDid as Did),
+  );
   if (!session) {
     throw new ResolveDisputeError(
       "exchange-not-onboarded",

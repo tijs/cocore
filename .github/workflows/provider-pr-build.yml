@@ -1,0 +1,200 @@
+# Build the macOS arm64 `cocore` provider agent on every PR and attach it
+# as a downloadable artifact, so anyone reviewing a PR can grab a binary
+# built from that exact branch and test the agent end-to-end against the
+# backend changes the PR makes — without tagging a release.
+#
+# This mirrors the build half of release.yml (same target, same no-libpython
+# check, same tarball staging + install scripts) but, instead of publishing a
+# GitHub Release, uploads a workflow artifact and posts a sticky PR comment
+# with the direct download link + SHA-256.
+#
+# Deliberately a SEPARATE workflow from ci.yml: it runs on a macOS runner
+# (10x minute cost) independently of the Linux static-analysis job, and gets
+# its own cancel-in-progress concurrency so superseded pushes don't pile up
+# macOS minutes. No path filter — a provider binary is useful for testing
+# backend-only PRs too (the agent talks to the AppView/advisor those PRs
+# change), which is the whole point.
+
+name: provider-pr-build
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # post/update the sticky download comment
+
+jobs:
+  build-mac-arm64:
+    # macos-26 (Tahoe) — NOT macos-14. SwiftUI gates its appearance on the
+    # macOS SDK the app is LINKED against: a binary linked against a pre-26 SDK
+    # renders the legacy grouped-Form / section-footer chrome even when run on
+    # macOS 26. The macos-14 runner's newest SDK is pre-26, so the shipped PR
+    # app looked "old" next to a local Xcode 26 build. macos-26 ships Xcode 26
+    # (macOS 26 SDK), so the PR app matches what developers see locally.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain + SDK (must be macOS 26 SDK)
+        # SwiftUI's modern appearance is keyed to the linked SDK version; assert
+        # it here so a runner-image downgrade fails loudly instead of silently
+        # shipping the legacy look.
+        run: |
+          xcodebuild -version
+          SDK="$(xcrun --sdk macosx --show-sdk-version)"
+          echo "macOS SDK: $SDK"
+          case "$SDK" in
+            26.*) : ;;
+            *) echo "::error::expected macOS 26 SDK (Liquid Glass appearance); got $SDK — bump the runner image"; exit 1 ;;
+          esac
+
+      - name: Short SHA + artifact name
+        id: vars
+        run: |
+          SHA_SHORT="$(git rev-parse --short HEAD)"
+          echo "sha_short=$SHA_SHORT" >> "$GITHUB_OUTPUT"
+          echo "artifact=cocore-mac-arm64-pr${{ github.event.pull_request.number }}-$SHA_SHORT" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            provider/target
+          key: cargo-mac-arm64-${{ hashFiles('provider/Cargo.lock') }}
+          restore-keys: cargo-mac-arm64-
+
+      - name: Resolve this PR's stack URLs
+        id: stack
+        # Railway's per-PR preview environment is named `cocore-pr-<N>` and its
+        # service domains are deterministic: `<slug>-<env>.up.railway.app`.
+        # co/core Railway services: Client, AppView, Advisor → client-/services-/advisor-.
+        if: github.event_name == 'pull_request'
+        run: |
+          ENV="cocore-pr-${{ github.event.pull_request.number }}"
+          echo "console_url=https://client-$ENV.up.railway.app" >> "$GITHUB_OUTPUT"
+          echo "advisor_url=wss://advisor-$ENV.up.railway.app/v1/agent" >> "$GITHUB_OUTPUT"
+          echo "Wiring app to PR stack: client-$ENV / advisor-$ENV"
+
+      - name: Build menu-bar app + CLI (ad-hoc signed)
+        # build-mac-app.sh runs `swift build` for provider-shell, assembles
+        # cocore.app (icon + Info.plist), (re)builds the cocore release CLI
+        # and bundles it + the venv bootstrap INTO the app, then codesigns.
+        # COCORE_SIGN_ID=- forces ad-hoc signing — no Developer ID / notary
+        # secrets in CI, so the app runs locally but Gatekeeper warns on
+        # first open (the PR comment explains how to get past it).
+        # COCORE_CONSOLE_URL / COCORE_ADVISOR_URL bake this PR's stack into the
+        # app's Info.plist (empty on workflow_dispatch → the app defaults to prod).
+        # COCORE_PR_BUILD=1 gives the app a PR-only bundle id so it gets its own
+        # UserDefaults suite — otherwise it inherits a prod install's persisted
+        # console/advisor override and ignores the baked PR URLs (talks to prod).
+        env:
+          COCORE_CONSOLE_URL: ${{ steps.stack.outputs.console_url }}
+          COCORE_ADVISOR_URL: ${{ steps.stack.outputs.advisor_url }}
+          COCORE_PR_BUILD: "1"
+        run: COCORE_SIGN_ID=- bash scripts/build-mac-app.sh
+
+      - name: Verify the CLI has no Python linkage
+        # Same guard as release.yml: the v0.6.0+ agent spawns Python
+        # out-of-process and must not link libpython, or it dyld-aborts on
+        # users without brew python at the build runner's path.
+        run: |
+          BIN="provider/target/release/cocore"
+          otool -L "$BIN"
+          if otool -L "$BIN" | grep -qi 'python'; then
+            echo "::error::provider binary has a libpython load command — must not link libpython. Check for accidental PyO3 re-introduction in provider/Cargo.toml."
+            exit 1
+          fi
+
+      - name: Stage tarball contents
+        # Mirrors `make`'s release staging: the menu-bar app (the default
+        # experience; install.sh drops it in /Applications) plus the bare
+        # CLI + install scripts.
+        run: |
+          STAGE="dist/cocore-mac-arm64"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/bin" "$STAGE/scripts"
+          cp -R provider-shell/build/cocore.app                    "$STAGE/cocore.app"
+          cp provider/target/release/cocore                        "$STAGE/bin/cocore"
+          cp scripts/install-mac-provider.sh                       "$STAGE/scripts/"
+          cp scripts/uninstall-mac-provider.sh                     "$STAGE/scripts/"
+          cp scripts/dev.cocore.provider.plist.template            "$STAGE/scripts/"
+          cp scripts/bootstrap-python-venv.sh                      "$STAGE/scripts/"
+          cp scripts/install-from-tarball.sh                       "$STAGE/install.sh"
+          chmod 755 "$STAGE/install.sh" "$STAGE/scripts/bootstrap-python-venv.sh"
+
+      - name: Tar + SHA-256
+        run: |
+          tar -C dist -czf "dist/${{ steps.vars.outputs.artifact }}.tar.gz" cocore-mac-arm64
+          shasum -a 256 "dist/${{ steps.vars.outputs.artifact }}.tar.gz" | tee "dist/${{ steps.vars.outputs.artifact }}.tar.gz.sha256"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.artifact }}
+          path: |
+            dist/${{ steps.vars.outputs.artifact }}.tar.gz
+            dist/${{ steps.vars.outputs.artifact }}.tar.gz.sha256
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Comment download link on the PR
+        # Skip on forked PRs (read-only token can't comment) and on
+        # workflow_dispatch (no PR to comment on).
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = '${{ steps.vars.outputs.sha_short }}';
+            const url = '${{ steps.upload.outputs.artifact-url }}';
+            const name = '${{ steps.vars.outputs.artifact }}';
+            const consoleUrl = '${{ steps.stack.outputs.console_url }}';
+            const advisorUrl = '${{ steps.stack.outputs.advisor_url }}';
+            const marker = '<!-- provider-pr-build -->';
+            const body = [
+              marker,
+              '### 🛠️ Provider build (macOS arm64) — menu-bar app + CLI',
+              '',
+              `Built from \`${sha}\`. The tarball bundles **cocore.app** (the menu-bar/tray app) plus the bare \`cocore\` CLI.`,
+              '',
+              `🔌 **Pre-wired to this PR's stack** — the app defaults to \`${consoleUrl}\` + \`${advisorUrl}\` (overridable in Settings → Network).`,
+              '',
+              `**[⬇️ ${name}.tar.gz](${url})**`,
+              '',
+              '_(GitHub artifact — requires being signed in to this repo. The zip contains the `.tar.gz` + its `.sha256`.)_',
+              '',
+              '```sh',
+              'tar -xzf cocore-mac-arm64*.tar.gz && cd cocore-mac-arm64',
+              './install.sh   # installs cocore.app to /Applications + the CLI, launches the tray',
+              '```',
+              '',
+              "⚠️ **Ad-hoc signed (not notarized)** — but `install.sh` clears the Gatekeeper quarantine for you, so it launches without the \"unidentified developer\" block. (If you drag the `.app` in by hand instead, run `xattr -dr com.apple.quarantine /Applications/cocore.app` yourself first.)",
+              '',
+              "CLI only? It's wired to this PR's stack too:",
+              '```sh',
+              `./bin/cocore agent pair  --console ${consoleUrl}`,
+              `./bin/cocore agent serve --advisor ${advisorUrl}`,
+              '```',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

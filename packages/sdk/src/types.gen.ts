@@ -35,6 +35,8 @@ export interface TokenRate {
 
 export type TrustLevel = "self-attested" | "hardware-attested";
 
+export type Tier = "attested-confidential" | "best-effort";
+
 export type SettlementStatus = "settled" | "refunded" | "disputed";
 
 export interface FriendRecord {
@@ -82,15 +84,28 @@ export interface AttestationRecord {
   serialNumberHash: string;
   osVersion: string;
   binaryHash: string;
+  cdHash?: string;
+  teamId?: string;
+  hardenedRuntime?: boolean;
+  libraryValidation?: boolean;
+  getTaskAllow?: boolean;
+  metallibHash?: string;
+  engineLibHash?: string;
+  inProcessBackend?: boolean;
+  antiDebug?: boolean;
+  coreDumpsDisabled?: boolean;
+  envScrubbed?: boolean;
   sipEnabled: boolean;
   secureBootEnabled: boolean;
   secureEnclaveAvailable: boolean;
   authenticatedRootEnabled: boolean;
   rdmaDisabled?: boolean;
   mdaCertChain?: string[];
+  appAttest?: { object: string; keyId: string };
   selfSignature: string;
   attestedAt: string;
   expiresAt: string;
+  tier?: Tier;
 }
 
 export interface DisputeRecord {
@@ -175,6 +190,8 @@ export interface ProviderRecord {
   encryptionPubKey: string;
   attestationPubKey: string;
   trustLevel: TrustLevel;
+  tier?: Tier;
+  desiredTier?: Tier;
   acceptedExchanges?: string[];
   contactEndpoint?: string;
   active?: boolean;
@@ -193,6 +210,9 @@ export interface ReceiptRecord {
   inputCommitment: string;
   outputCommitment: string;
   outputCipherCommitment?: string;
+  reasoningCommitment?: string;
+  sessionKeyCommitment?: string;
+  sessionNonce?: string;
   params?: Record<string, unknown>;
   outputCipherURL?: string;
   tokens: { in: number; out: number };
@@ -201,6 +221,7 @@ export interface ReceiptRecord {
   price: Money;
   attestation: StrongRef;
   enclaveSignature: string;
+  tier?: Tier;
 }
 
 export interface SettlementRecord {

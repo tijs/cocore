@@ -7,7 +7,7 @@ import Combine
 
 @MainActor
 final class MenuBarController {
-    private let item: NSStatusItem
+    private var item: NSStatusItem
     private let state: AppState
     private let supervisor: AgentSupervisor
     private let updater: Updater
@@ -39,20 +39,72 @@ final class MenuBarController {
     /// Drives a loud "keeps crashing — send a report" menu row so a flapping
     /// machine doesn't just silently respawn behind a flat ledger.
     private var crashLoopCount = 0
+    /// One-shot recreate at launch when ControlCenter registered the item but
+    /// never composited it (common on Sonoma+ when LSUIElement conflicted with
+    /// a runtime accessory-policy switch).
+    private var didRecreateStatusItem = false
 
     /// Show the green heartbeat for this long after the agent's most
     /// recent served response (it touches `~/.cocore/last-served-at`).
     private static let heartbeatWindow: TimeInterval = 15
 
+    private static let autosaveVersionKey = "statusItemAutosaveVersion"
+
+    /// Stable per-bundle identity so macOS manages the menu-bar slot. Version
+    /// suffix bumps escape ControlCenter position caches on Tahoe when an item
+    /// is parked off-screen (y≈-17) despite being allowed in Menu Bar settings.
+    private static var autosaveName: String {
+        let bundle = Bundle.main.bundleIdentifier ?? "dev.cocore.shell"
+        let version = UserDefaults.standard.integer(forKey: autosaveVersionKey)
+        let v = max(version, 3)
+        return "\(bundle).status.v\(v)"
+    }
+
+    private static func makeStatusItem() -> NSStatusItem {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.autosaveName = autosaveName
+        return item
+    }
+
+    private func configureStatusItem(_ item: NSStatusItem) {
+        item.button?.image = MenuBarController.brandImage()
+        item.button?.toolTip = "co/core"
+        item.isVisible = true
+    }
+
     init(state: AppState, supervisor: AgentSupervisor, updater: Updater) {
         self.state = state
         self.supervisor = supervisor
         self.updater = updater
-        self.item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = MenuBarController.brandImage()
-        item.button?.toolTip = "co/core"
+        let repaired = MenuBarStatusItemDefaultsRepair.repairHiddenVisibilityDefaultsIfNeeded(
+            defaults: UserDefaults.standard)
+        if !repaired.isEmpty {
+            NSLog("cocore: repaired hidden status-item defaults: %@", repaired.joined(separator: ","))
+        }
+        self.item = Self.makeStatusItem()
+        configureStatusItem(item)
+        DockActivation.isTrayComposited = { [weak self] in
+            self?.placementState() == .composited
+        }
         refreshServing()
         rebuildMenu()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.beginVisibilityMonitoring()
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.beginVisibilityMonitoring()
+                if self.placementState() == .composited {
+                    DockActivation.hideDockWhenTrayReady()
+                }
+            }
+        }
 
         // Apply any Pause done on the website while the app was closed.
         Task { @MainActor in await self.reconcileServeSwitch() }
@@ -63,7 +115,7 @@ final class MenuBarController {
         // LaunchAgent's serving state, every 5s. On the nil→signed-in
         // transition, immediately pull live status.
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 let wasSignedIn = self.state.session != nil
                 await self.state.refreshSession()
@@ -77,7 +129,7 @@ final class MenuBarController {
         // Live earnings/balance: fetch once now, then every 30s.
         Task { await state.refreshStatus() }
         earningsTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 await self?.state.refreshStatus()
                 // Apply a Pause / Resume done on the website to the local
                 // agent process (stop / start), keeping both sides in sync.
@@ -152,7 +204,7 @@ final class MenuBarController {
             let bytes = provision?.bytesDownloaded ?? 0
             atAGlance =
                 bytes > 0
-                ? "⏳ Provisioning… downloading model (\(Self.provisionMB(bytes)))"
+                ? "⏳ Provisioning… downloading model (\(Self.humanBytes(bytes)))"
                 : "⏳ Provisioning a model… (not earning yet)"
         } else if provision?.phase == "failed" {
             atAGlance = "⚠ Provisioning failed — not serving"
@@ -213,6 +265,10 @@ final class MenuBarController {
         // up to date, a routine "Check for updates…" (also in the Help tab).
         addUpdateItems(to: menu)
         menu.addItem(.separator())
+        // Secure Mode + Confidential live inside "Open co/core…" → Status now,
+        // not at the tray's top level — they're explained side-by-side there so
+        // the two postures aren't confused. The tray stays short: serving,
+        // updates, open, quit.
         menu.addItem(action(title: "Open co/core…", #selector(openMainWindow)))
         if let err = state.lastError, !err.isEmpty {
             // Catch-all for a surfaced error (e.g. a failed sign-in). Clip it
@@ -362,10 +418,15 @@ final class MenuBarController {
             // a process the console still believes is paused (the resume mirror
             // of the stuck-pause bug below).
             let (status, out) = await ModelManager.run(["agent", "resume"])
-            guard status == 0 else {
-                NSLog("cocore: resume failed (status %d): %@", status, out)
-                presentServeSwitchError(action: "resume", detail: out)
-                return
+            if status != 0 {
+                // First serve: no provider record on PDS yet — `agent serve`
+                // publishes one. Resume only flips `active` on an existing record.
+                let firstStart = out.contains("no provider record")
+                if !firstStart {
+                    NSLog("cocore: resume failed (status %d): %@", status, out)
+                    presentServeSwitchError(action: "resume", detail: out)
+                    return
+                }
             }
             Self.setOwnerPaused(false)
             pausedByOwner = false
@@ -391,6 +452,41 @@ final class MenuBarController {
             await supervisor.stop()
             Self.setOwnerPaused(true)
             pausedByOwner = true
+            refreshServing()
+            rebuildMenu()
+        }
+    }
+
+    /// Opt this machine in/out of the attested-confidential tier from the
+    /// Security section (Open co/core → Status). Writes the owner's
+    /// `desiredTier` via the bundled CLI — the same field the console's
+    /// "Upgrade to confidential" sets — then bounces the agent so the
+    /// supervisor re-selects the right worker (confidential ↔ default). Enabling
+    /// confirms first and warns about the native-engine model constraint.
+    @MainActor
+    func setConfidential(_ on: Bool) {
+        Task { @MainActor in
+            if on {
+                let alert = NSAlert()
+                alert.messageText = "Enable confidential serving?"
+                alert.informativeText =
+                    "Inference will run entirely inside the measured, signed agent, so this machine's operator can't read prompts.\n\nThe confidential engine serves Qwen2 / Llama / Gemma / Phi models — an incompatible model (e.g. a Qwen3 model) will show a fault, so pick a compatible one under Models. The agent will restart to switch over."
+                alert.addButton(withTitle: "Enable")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+            }
+            let args = on ? ["agent", "confidential"] : ["agent", "confidential", "--off"]
+            let (status, out) = await ModelManager.run(args)
+            guard status == 0 else {
+                NSLog("cocore: set confidential (%@) failed (status %d): %@", on ? "on" : "off", status, out)
+                presentServeSwitchError(
+                    action: on ? "enable confidential" : "turn off confidential", detail: out)
+                return
+            }
+            // Bounce so the fresh serve reads the new desiredTier and the
+            // supervisor selects the right worker (same as Restart serving).
+            await supervisor.stop()
+            await supervisor.start()
             refreshServing()
             rebuildMenu()
         }
@@ -473,8 +569,7 @@ final class MenuBarController {
 
     @objc private func openProfile() {
         guard let handle = state.session?.handle else { return }
-        let console = UserDefaults.standard.string(forKey: "consoleBaseUrl")
-            ?? "https://console.cocore.dev"
+        let console = Endpoints.consoleURL
         guard let url = URL(string: "\(console)/u/\(handle)") else { return }
         NSWorkspace.shared.open(url)
     }
@@ -493,12 +588,125 @@ final class MenuBarController {
         onOpenProfile: { [weak self] in self?.openProfile() },
         onOpenSetupGuide: { [weak self] in self?.openWelcome() },
         onSignOut: { [weak self] in self?.signOut() },
+        onEnableSecureMode: { [weak self] in self?.secureModeWizard.show() },
+        onSetConfidential: { [weak self] on in self?.setConfidential(on) },
+        onReauth: { [weak self] in self?.signIn() },
         onSendBugReport: { [weak self] in self?.sendBugReport() },
         onCheckUpdates: { [weak self] in self?.checkUpdates() },
         onInstallUpdate: { [weak self] in self?.installUpdate() },
         onUninstall: { [weak self] in self?.confirmUninstall() }
     )
     @objc private func openMainWindow() { mainWindow.show() }
+
+    /// The guided (manual) Secure Mode hardening wizard — MDM enrollment +
+    /// step-ca attestation chain, then a recommended-models pin. Additive and
+    /// best-effort: nothing here gates serving. Launched from "Open co/core…" →
+    /// Status → Security (via the mainWindow's `onEnableSecureMode` closure),
+    /// no longer a top-level tray item.
+    private lazy var secureModeWizard: SecureModeWizardController = SecureModeWizardController(
+        state: state,
+        updater: updater,
+        onReauth: { [weak self] in self?.signIn() }
+    )
+
+    /// Public entry point so the AppDelegate can surface the main window when
+    /// the app is re-launched (the dock/Finder "reopen" path) — the safety net
+    /// for when the status item never made it onto the menu bar and the tray
+    /// menu (the only other way in) is unreachable.
+    func showMainWindow() { mainWindow.show() }
+
+    /// Tahoe ControlCenter visibility states for the status item.
+    private enum StatusItemPlacement {
+        case composited
+        /// Allowed in Menu Bar settings but parked off-screen (y≈-17) or with
+        /// no screen — recreating the item alone does not fix this; the user
+        /// must toggle OFF→ON in System Settings → Menu Bar.
+        case tahoeBlockedProxy
+        case notMaterialized
+    }
+
+    private func placementState() -> StatusItemPlacement {
+        guard let button = item.button, let win = button.window else {
+            return .notMaterialized
+        }
+        // CodexBar #1440: on Tahoe, a blocked-but-allowed item still has
+        // visible=true, button=true, window=true, but screen=nil and frame
+        // parked at (0, -22, …x22) — off the menu bar.
+        if win.isVisible, win.screen == nil {
+            return .tahoeBlockedProxy
+        }
+        if isComposited(win) {
+            return .composited
+        }
+        if win.isVisible {
+            return .tahoeBlockedProxy
+        }
+        return .notMaterialized
+    }
+
+    private func isComposited(_ win: NSWindow) -> Bool {
+        if !win.isVisible { return false }
+        if !win.occlusionState.contains(.visible) { return false }
+        guard let screen = win.screen ?? NSScreen.main else { return false }
+        let frame = screen.frame
+        return win.frame.maxY >= frame.maxY - 40 && frame.intersects(win.frame)
+    }
+
+    /// Probe after launch and on menu-bar relayout. Recreate once if off-screen;
+    /// open the main window silently if still missing (no modal — Tahoe users
+    /// already have Menu Bar permission ON).
+    private func beginVisibilityMonitoring() {
+        if placementState() == .composited {
+            DockActivation.hideDockWhenTrayReady()
+            return
+        }
+
+        if placementState() == .tahoeBlockedProxy, !didRecreateStatusItem {
+            didRecreateStatusItem = true
+            bumpAutosaveVersion()
+            recreateStatusItem()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self else { return }
+                if self.placementState() == .composited {
+                    DockActivation.hideDockWhenTrayReady()
+                } else {
+                    NSLog(
+                        "cocore: status item still off-screen after recreate (frame=%@)",
+                        NSStringFromRect(self.item.button?.window?.frame ?? .zero)
+                    )
+                    self.showMainWindow()
+                }
+            }
+            return
+        }
+
+        if placementState() == .notMaterialized, !didRecreateStatusItem {
+            didRecreateStatusItem = true
+            bumpAutosaveVersion()
+            recreateStatusItem()
+            return
+        }
+
+        if placementState() != .composited {
+            NSLog("cocore: status item not composited; opening main window")
+            showMainWindow()
+        }
+    }
+
+    private func bumpAutosaveVersion() {
+        let next = UserDefaults.standard.integer(forKey: Self.autosaveVersionKey) + 1
+        UserDefaults.standard.set(max(next, 5), forKey: Self.autosaveVersionKey)
+    }
+
+    private func recreateStatusItem() {
+        NSStatusBar.system.removeStatusItem(item)
+        let newItem = Self.makeStatusItem()
+        configureStatusItem(newItem)
+        item = newItem
+        iconState = .plain
+        rebuildMenu()
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     private lazy var welcomeWindow: WelcomeWindowController = {
         let c = WelcomeWindowController(state: state, supervisor: supervisor)
@@ -543,8 +751,7 @@ final class MenuBarController {
 
         Task {
             await supervisor.stop()
-            let console = UserDefaults.standard.string(forKey: "consoleBaseUrl")
-                ?? "https://console.cocore.dev"
+            let console = Endpoints.consoleURL
             await Uninstaller.run(console: console)
             // Move our own .app to the Trash (the hosted uninstaller wipes
             // the agent, not the GUI bundle), then quit.
@@ -651,7 +858,7 @@ final class MenuBarController {
     /// or pulse phase), so the steady-state cost is a single `stat`.
     private func startHeartbeatTimer() {
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tickHeartbeat() }
+            Task { @MainActor [weak self] in self?.tickHeartbeat() }
         }
     }
 
@@ -773,7 +980,12 @@ final class MenuBarController {
     /// agent can't pin "Provisioning…" on forever.
     struct ProvisionStatus {
         let phase: String  // "provisioning" | "failed"
+        let models: [String]
         let bytesDownloaded: UInt64
+        /// True while provisioning when nothing is actively downloading — the
+        /// weights are on disk and a model is loading into memory. Lets the UI
+        /// show "loading…" instead of a download bar (or a false "complete").
+        let loading: Bool
         let faultMessage: String?
     }
     static func provisionStatus() -> ProvisionStatus? {
@@ -787,13 +999,37 @@ final class MenuBarController {
             let phase = obj["phase"] as? String
         else { return nil }
         let bytes = (obj["bytesDownloaded"] as? NSNumber)?.uint64Value ?? 0
+        let models = (obj["models"] as? [String]) ?? []
+        let loading = (obj["loading"] as? Bool) ?? false
         let fault = (obj["fault"] as? [String: Any])?["message"] as? String
-        return ProvisionStatus(phase: phase, bytesDownloaded: bytes, faultMessage: fault)
+        return ProvisionStatus(
+            phase: phase, models: models, bytesDownloaded: bytes, loading: loading,
+            faultMessage: fault)
     }
 
-    /// Content-safe human download size for the provisioning line.
-    static func provisionMB(_ bytes: UInt64) -> String {
-        String(format: "%.0f MB", Double(bytes) / (1024 * 1024))
+    /// Content-safe adaptive byte size (B/KB/MB/GB/TB) — bytes only, never
+    /// any prompt/token data. Keeps GB/TB to one decimal so a 4.2 GB weight
+    /// download doesn't read as "4301 MB".
+    static func humanBytes(_ bytes: UInt64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var value = Double(bytes)
+        var i = 0
+        while value >= 1024, i < units.count - 1 {
+            value /= 1024
+            i += 1
+        }
+        let decimals = i >= 3 ? 1 : 0  // GB/TB: one decimal; MB and below: whole
+        return String(format: "%.\(decimals)f %@", value, units[i])
+    }
+
+    /// Compact human duration for download ETAs ("45s", "3m 20s", "1h 5m").
+    static func humanDuration(_ seconds: TimeInterval) -> String {
+        let s = max(0, Int(seconds.rounded()))
+        if s < 60 { return "\(s)s" }
+        let m = s / 60, rs = s % 60
+        if m < 60 { return rs == 0 ? "\(m)m" : "\(m)m \(rs)s" }
+        let h = m / 60, rm = m % 60
+        return rm == 0 ? "\(h)h" : "\(h)h \(rm)m"
     }
 
     /// Map the marker's reason to a one-line, operator-facing remediation.

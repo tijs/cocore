@@ -8,7 +8,7 @@
 //!
 //! v0.3.0 swapped the architecture: the agent **does not** call bsky
 //! directly. It POSTs each record to the cocore console's proxy
-//! (`POST /api/xrpc/dev.cocore.proxy.createRecord`) using the API
+//! (`POST /api/pds/createRecord`) using the API
 //! key from its paired session. The console resolves the key to a
 //! DID, restores the user's DPoP-aware OAuth session, and forwards
 //! the create to bsky on the agent's behalf.
@@ -58,6 +58,13 @@ pub struct ProviderRecord {
     pub encryptionPubKey: String,
     pub attestationPubKey: String,
     pub trustLevel: TrustLevel,
+    /// Agent-published ACHIEVED confidentiality tier (`attested-confidential` |
+    /// `best-effort`), derived from the signed attestation's evidence — NEVER
+    /// self-declared. Absent ≡ best-effort. The agent only publishes
+    /// `attested-confidential` once the measured native engine is serving under
+    /// a hardware-attested posture. See `desiredTier` for the owner's intent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub acceptedExchanges: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +103,17 @@ pub struct ProviderRecord {
     /// re-publish, or each serve would clobber the owner's choice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desiredModels: Option<Vec<String>>,
+    /// The confidentiality tier the OWNER opted this machine into (the console /
+    /// tray "Upgrade security" action), `attested-confidential` | `best-effort`.
+    /// Owner-written INTENT, like `desiredModels`/`active`: the agent reconciles
+    /// toward it (switches to the measured native engine, earns the posture) but
+    /// NEVER authors it, so it must PRESERVE whatever it finds on every
+    /// re-publish. Setting it never fakes the achieved `tier`/`trustLevel` —
+    /// those only rise once actually earned; a machine that can't (e.g. a
+    /// non-native build) stays best-effort. Absent / `best-effort` = not opted
+    /// in, serves exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desiredTier: Option<String>,
     /// True while the agent is still loading its inference engine. Set on
     /// the early "provisioning" publish at serve start so the machine
     /// appears on the console immediately; cleared (set false) on the
@@ -191,7 +209,7 @@ struct ListRecordsResponse {
     cursor: Option<String>,
 }
 
-/// HTTP client over the console's `dev.cocore.proxy.createRecord`
+/// HTTP client over the console's `/api/pds/createRecord`
 /// endpoint. One instance per agent lifetime; the API key is
 /// captured at construction and never rotated.
 pub struct PdsClient {
@@ -246,10 +264,7 @@ impl PdsClient {
         record: &R,
         swap_record: Option<&str>,
     ) -> Result<PublishedRecord> {
-        let url = format!(
-            "{}/api/xrpc/dev.cocore.proxy.putRecord",
-            self.api_base.trim_end_matches('/')
-        );
+        let url = format!("{}/api/pds/putRecord", self.api_base.trim_end_matches('/'));
         let body = match swap_record {
             Some(swap) => serde_json::json!({
                 "collection": collection,
@@ -299,7 +314,7 @@ impl PdsClient {
         swap_record: Option<&str>,
     ) -> Result<()> {
         let url = format!(
-            "{}/api/xrpc/dev.cocore.proxy.deleteRecord",
+            "{}/api/pds/deleteRecord",
             self.api_base.trim_end_matches('/')
         );
         let body = match swap_record {
@@ -398,21 +413,24 @@ impl PdsClient {
         rec.value.get("active").and_then(|v| v.as_bool())
     }
 
-    /// Read both owner-set controls — the `active` start/stop switch and the
-    /// `desiredModels` list — from this DID's provider record at `rkey` in
-    /// one list. Defaults: `active` true (serving) when absent, `desired`
-    /// empty when absent. On any read error returns the serving default with
-    /// an empty list so a transient blip never looks like a stop or a model
-    /// change. The agent polls this to honour remote pause + model changes.
-    pub async fn get_provider_control(&self, rkey: &str) -> (bool, Vec<String>) {
+    /// Read the owner-set controls — the `active` start/stop switch, the
+    /// `desiredModels` list, and the `desiredTier` intent — from this DID's
+    /// provider record at `rkey` in one list. Defaults: `active` true
+    /// (serving) when absent, `desired` empty when absent, `desiredTier` None
+    /// when absent. On any read error returns the serving default with an
+    /// empty list and no tier so a transient blip never looks like a stop, a
+    /// model change, or a tier change. The agent polls this to honour remote
+    /// pause + model changes; the serve loop also restarts on a `desiredTier`
+    /// change so the supervisor can re-select the confidential worker binary.
+    pub async fn get_provider_control(&self, rkey: &str) -> (bool, Vec<String>, Option<String>) {
         let Ok(listed) = self.list_my_records("dev.cocore.compute.provider").await else {
-            return (true, Vec::new());
+            return (true, Vec::new(), None);
         };
         let Some(rec) = listed
             .iter()
             .find(|r| r.uri.rsplit('/').next() == Some(rkey))
         else {
-            return (true, Vec::new());
+            return (true, Vec::new(), None);
         };
         let active = rec
             .value
@@ -429,7 +447,12 @@ impl PdsClient {
                     .collect()
             })
             .unwrap_or_default();
-        (active, desired)
+        let desired_tier = rec
+            .value
+            .get("desiredTier")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        (active, desired, desired_tier)
     }
 
     /// Walk the DID PLC directory to find this DID's PDS host. The
@@ -498,7 +521,7 @@ impl PdsClient {
         record: &R,
     ) -> Result<PublishedRecord> {
         let url = format!(
-            "{}/api/xrpc/dev.cocore.proxy.createRecord",
+            "{}/api/pds/createRecord",
             self.api_base.trim_end_matches('/')
         );
         let body = serde_json::json!({
@@ -591,7 +614,7 @@ mod tests {
     async fn publish_returns_uri_and_cid_on_success() {
         let port = run_stub(move |req: String| {
             let path = req.lines().next().unwrap_or("");
-            if !path.contains("dev.cocore.proxy.createRecord") {
+            if !path.contains("/api/pds/createRecord") {
                 return Some((404, "{}".into()));
             }
             // Bearer auth header should carry the API key.

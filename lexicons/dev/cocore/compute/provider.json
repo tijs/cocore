@@ -106,6 +106,16 @@
             "type": "ref",
             "ref": "dev.cocore.compute.defs#trustLevel"
           },
+          "tier": {
+            "type": "ref",
+            "ref": "dev.cocore.compute.defs#tier",
+            "description": "The highest confidentiality tier this machine can serve, advertised so requesters and matchmakers can pre-filter. ADVISORY: a requester demanding `attested-confidential` MUST still verify the per-job attestation + session handshake and fail closed; this field only avoids routing confidential jobs to machines that cannot serve them. A machine earns `attested-confidential` here only when it runs the measured native engine under a hardware-attested posture. This is the AGENT-published ACHIEVED tier, derived from evidence (never self-declared); see `desiredTier` for the owner's intent. Optional / additive; absent equivalent to `best-effort`."
+          },
+          "desiredTier": {
+            "type": "ref",
+            "ref": "dev.cocore.compute.defs#tier",
+            "description": "The confidentiality tier the OWNER has opted this machine into, set from a management UI (the console / tray 'Upgrade security' action). Mirrors `desiredModels`: owner-written INTENT, the agent reconciles toward it (e.g. switches to the measured native engine and earns the hardware-attested posture). Setting `attested-confidential` NEVER fakes the achieved state — the agent only publishes the higher `tier`/`trustLevel` once it actually earns them, and a machine that can't (e.g. not a native build) stays best-effort with a surfaced reason. Absent / `best-effort` means the owner has not opted into confidential and the machine serves exactly as before — opting in is the only thing that changes anything. Owner-written, agent-preserved. Optional / additive; pre-0.9.19 agents ignore it."
+          },
           "acceptedExchanges": {
             "type": "array",
             "maxLength": 64,

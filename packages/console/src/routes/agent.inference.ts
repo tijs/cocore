@@ -1,6 +1,6 @@
 // Backward-compat alias for the old curl-pipe-sh URL:
 //
-//   curl -fsSL https://console.cocore.dev/agent/inference | sh
+//   curl -fsSL https://cocore.dev/agent/inference | sh
 //
 // v0.6.0 collapsed stub vs. inference into a single install path
 // (see the doc-comment at the top of `agent-install.sh` for the

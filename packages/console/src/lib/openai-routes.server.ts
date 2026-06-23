@@ -7,7 +7,7 @@
 //                    older openapi versions; still honored).
 //   * `/v1/*`      — the canonical OpenAI layout. Point any OpenAI
 //                    SDK / LiteLLM / etc. at
-//                    `base_url="https://console.cocore.dev/v1"` and
+//                    `base_url="https://cocore.dev/v1"` and
 //                    it appends `/chat/completions`, `/models`, … the
 //                    way it appends them to `https://api.openai.com/v1`.
 //
@@ -18,9 +18,12 @@
 import type { Did } from "@atcute/lexicons";
 import { isDid } from "@atcute/lexicons/syntax";
 import type { OAuthSession } from "@atcute/oauth-node-client";
-import { Effect } from "effect";
+
+import { runTraced } from "@/lib/o11y.server.ts";
 
 import { restoreAtprotoSessionEffect } from "@/integrations/auth/atproto.server.ts";
+import { appviewBackedSession, appviewSessionInfo } from "@/lib/appview-backed-session.server.ts";
+import { isAppviewForwardConfigured } from "@/lib/appview-pds-forward.server.ts";
 import { type DispatchInputs, runDispatch } from "@/lib/inference-dispatch.server.ts";
 import { listMyFriendDids } from "@/lib/friends.server.ts";
 import {
@@ -34,6 +37,11 @@ import {
 } from "@/lib/openai-chat-completions.server.ts";
 import { resolveBearerKey } from "@/lib/api-keys.server.ts";
 import { buildModelDirectory } from "@/lib/model-directory.server.ts";
+import {
+  parseTrustFloor,
+  resolveVerifiedProviderDids,
+  type TrustFloor,
+} from "@/lib/verified-standing.server.ts";
 
 // priceCeiling shape (currency + amount) flows into BOTH the job
 // record and the paymentAuthorization record. The exchange's
@@ -67,10 +75,31 @@ async function authenticate(
     return jsonError(500, "Stored DID is malformed", "server_error");
   }
 
+  // Single-owner cutover: when forwarding is configured the AppView owns and
+  // solely refreshes this DID's session. Restoring locally here would
+  // refresh in parallel and cannibalize the single-use refresh token, so
+  // hand back an AppView-backed session (every PDS call + service-auth mint
+  // is replayed by the AppView). Only a DEFINITIVE "session absent" 401s;
+  // a transient AppView blip doesn't (the session likely still exists).
+  if (isAppviewForwardConfigured()) {
+    const info = await appviewSessionInfo(resolved.did);
+    if (info.checked && !info.present) {
+      return jsonError(
+        401,
+        "API key's underlying ATProto session is no longer valid; mint a new key after re-authenticating",
+        "authentication_error",
+      );
+    }
+    return { did: resolved.did, oauthSession: appviewBackedSession(resolved.did as Did) };
+  }
+
   // Restore the OAuth session for this DID. The session store is
   // SQLite-backed and persists across deploys, so as long as the user
   // hasn't explicitly revoked the chain, this resolves.
-  const oauthSession = await Effect.runPromise(restoreAtprotoSessionEffect(resolved.did as Did));
+  const oauthSession = await runTraced(
+    "auth.restoreSession",
+    restoreAtprotoSessionEffect(resolved.did as Did),
+  );
   if (!oauthSession) {
     return jsonError(
       401,
@@ -165,6 +194,83 @@ export async function handlePrivateChatCompletions(request: Request): Promise<Re
   return await bufferedResponse(id, parsed.model, runDispatch(inputs));
 }
 
+/** POST /v1/verified/chat/completions — route ONLY to providers whose
+ *  attestation is cryptographically verified to meet a trust floor. Identical
+ *  wire format to `/v1/chat/completions` plus an optional `min_trust` body
+ *  field: `"hardware-attested"` (default — accept any verified machine) or
+ *  `"confidential"` (strict `attested-confidential`). Fails CLOSED with a 503
+ *  when no verified provider serves the model, so a privacy/integrity request
+ *  never silently downgrades. The allow-set is proof-backed (see
+ *  verified-standing.server.ts): a self-asserted `trustLevel` can't get a
+ *  provider routed here — only a verified Apple-rooted attestation can. */
+export async function handleVerifiedChatCompletions(request: Request): Promise<Response> {
+  const auth = await authenticate(request);
+  if (auth instanceof Response) return auth;
+
+  let raw: OpenAiChatRequest & { min_trust?: unknown };
+  try {
+    raw = (await request.json()) as typeof raw;
+  } catch {
+    return jsonError(400, "Body must be JSON");
+  }
+  const parsed = parseRequest(raw);
+  if (typeof parsed === "string") return jsonError(400, parsed);
+
+  // Floor defaults to hardware-attested ("any verified machine"). An explicit
+  // unrecognized value is a 400, never a silent downgrade.
+  let floor: TrustFloor = "hardware-attested";
+  if (raw.min_trust !== undefined) {
+    const f = parseTrustFloor(raw.min_trust);
+    if (!f) {
+      return jsonError(
+        400,
+        'min_trust must be "hardware-attested" or "confidential"',
+        "invalid_request_error",
+        "invalid_min_trust",
+      );
+    }
+    floor = f;
+  }
+
+  let allowedProviderDids: Set<string>;
+  try {
+    allowedProviderDids = await resolveVerifiedProviderDids(floor, parsed.model);
+  } catch (e) {
+    return jsonError(
+      502,
+      `failed to resolve verified providers: ${(e as Error).message}`,
+      "server_error",
+      "verified_lookup_failed",
+    );
+  }
+  if (allowedProviderDids.size === 0) {
+    return jsonError(
+      503,
+      `no provider is currently verified at the '${floor}' tier for model ${parsed.model}`,
+      "service_unavailable_error",
+      "no_verified_providers",
+    );
+  }
+
+  const id = `chatcmpl-${crypto.randomUUID().replace(/-/g, "")}`;
+  const inputs: DispatchInputs = {
+    did: auth.did,
+    oauthSession: auth.oauthSession,
+    model: parsed.model,
+    prompt: flattenMessages(parsed.messages),
+    maxTokensOut: parsed.maxTokens,
+    priceCeiling: DEFAULT_PRICE_CEILING,
+    // Same mechanism as the friends path, but the set is the proof-backed
+    // verified-provider list rather than the caller's friends.
+    allowedProviderDids,
+  };
+
+  if (parsed.stream) {
+    return streamingResponse(id, parsed.model, runDispatch(inputs));
+  }
+  return await bufferedResponse(id, parsed.model, runDispatch(inputs));
+}
+
 function jsonResponse(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
     headers: {
@@ -201,6 +307,7 @@ export async function handleModelsDirectory(request: Request): Promise<Response>
         inputPricePerMTok: m.inputPricePerMTok,
         outputPricePerMTok: m.outputPricePerMTok,
         currency: m.currency,
+        recommended: m.recommended,
       })),
       generatedAt: directory.generatedAt,
       appviewUnreachable: directory.appviewUnreachable,

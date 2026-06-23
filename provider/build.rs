@@ -19,6 +19,15 @@ fn main() {
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-env-changed=COCORE_GIT_SHA");
 
+    // WS-ENGINE: build + link the native MLX-Swift engine dylib when the
+    // `native_mlx` feature is on (macOS only — it's an Apple-silicon Metal
+    // engine). The Rust agent links one libCoCoreMLX.dylib (which statically
+    // contains MLX + the Swift code); enforced library validation + a pinned
+    // dylib/metallib hash keep the owner from swapping it.
+    if std::env::var("CARGO_FEATURE_NATIVE_MLX").is_ok() && cfg!(target_os = "macos") {
+        build_and_link_mlx_engine();
+    }
+
     let sha = std::env::var("COCORE_GIT_SHA").ok().or_else(|| {
         Command::new("git")
             .args(["rev-parse", "--short=12", "HEAD"])
@@ -46,4 +55,42 @@ fn main() {
 
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=COCORE_BUILD_PROFILE={profile}");
+}
+
+/// Build `provider/mlx-engine` (SwiftPM) and emit the link directives so the
+/// Rust agent links `libCoCoreMLX.dylib`. Panics on failure — if `native_mlx`
+/// is requested, a missing engine is a hard error, not a silent best-effort.
+fn build_and_link_mlx_engine() {
+    use std::path::Path;
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let pkg = format!("{manifest}/mlx-engine");
+    println!("cargo:rerun-if-changed={pkg}/Sources");
+    println!("cargo:rerun-if-changed={pkg}/Package.swift");
+
+    // Release config for the shipped engine (debug is far slower at inference).
+    let config = if std::env::var("PROFILE").as_deref() == Ok("release") {
+        "release"
+    } else {
+        "debug"
+    };
+    let status = Command::new("swift")
+        .args(["build", "-c", config, "--product", "CoCoreMLX"])
+        .current_dir(&pkg)
+        .status()
+        .expect("failed to run `swift build` for the MLX engine");
+    assert!(status.success(), "swift build (CoCoreMLX) failed");
+
+    // SwiftPM places the dylib under .build/<triple>/<config>/; the
+    // .build/<config> symlink points there.
+    let libdir = format!("{pkg}/.build/{config}");
+    assert!(
+        Path::new(&format!("{libdir}/libCoCoreMLX.dylib")).exists(),
+        "libCoCoreMLX.dylib not found in {libdir}"
+    );
+    println!("cargo:rustc-link-search=native={libdir}");
+    println!("cargo:rustc-link-lib=dylib=CoCoreMLX");
+    // Find the dylib at runtime: next to the binary (release bundle) and the
+    // dev build dir (so `cargo run`/tests work without an install step).
+    println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{libdir}");
 }
