@@ -9,6 +9,7 @@ import {
   useLocation,
 } from "@tanstack/react-router";
 
+import { enforceCanonicalConsoleHost } from "@/lib/legacy-host-redirect.ts";
 import { listMyMachinesQueryOptions } from "@/components/machines/machines.functions.ts";
 import { NavbarAuth } from "@/components/NavbarAuth.tsx";
 import { NavbarDiscoverMenu } from "@/components/NavbarDiscoverMenu.tsx";
@@ -75,6 +76,7 @@ const FooterRouterLink = createLink(DSLink);
 
 export const Route = createFileRoute("/_header-layout")({
   beforeLoad: async ({ context, location }) => {
+    await enforceCanonicalConsoleHost();
     await context.queryClient.ensureQueryData(getSessionQueryOptions);
     const session = context.queryClient.getQueryData(getSessionQueryOptions.queryKey);
     const skipTermsStateQuery =
