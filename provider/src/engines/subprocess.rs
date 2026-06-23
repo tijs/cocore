@@ -413,17 +413,18 @@ impl SubprocessEngine {
         );
 
         let mut cmd = Command::new(&self.venv_python);
+        // No `--vision` flag: vllm-mlx's `load_model` auto-detects MLLM vs LLM
+        // from the model's own config, and a vision model loads through the
+        // multimodal path on its own (the same /v1/chat/completions endpoint
+        // then accepts image_url parts). Forcing MLLM from the model id was
+        // brittle — a merge whose id contains "vl" but whose config carries no
+        // (or an incomplete) vision_config would be force-loaded as multimodal
+        // and crash in mlx_vlm, when auto-detect would have loaded it as text.
         cmd.arg(&wrapper)
             .arg("--model")
             .arg(&self.model_id)
             .arg("--uds")
-            .arg(&self.socket_path);
-        // Vision models load through vllm-mlx's multimodal path (force_mllm).
-        // The same /v1/chat/completions endpoint then accepts image_url parts.
-        if crate::engines::is_vision_model(&self.model_id) {
-            cmd.arg("--vision");
-        }
-        cmd
+            .arg(&self.socket_path)
             // Capture stdout + stderr into a bounded ring buffer
             // (see ENGINE_RING_BUFFER_CAP). We deliberately do NOT
             // pipe child output into tracing: vllm-mlx logs prompt

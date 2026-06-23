@@ -132,10 +132,11 @@ def main() -> None:
         "--vision",
         action="store_true",
         help=(
-            "Load as a vision/multimodal model (force_mllm). The agent passes "
-            "this for vision model ids so vllm-mlx loads the multimodal stack; "
-            "the same /v1/chat/completions endpoint then accepts image_url "
-            "content parts."
+            "Force the multimodal (MLLM) load path (vllm-mlx force_mllm). Not "
+            "normally needed: load_model auto-detects MLLM vs LLM from the "
+            "model's config, so a real vision model loads multimodal on its own "
+            "and the /v1/chat/completions endpoint accepts image_url parts. This "
+            "is a manual override for a VLM that auto-detection misses."
         ),
     )
     args = ap.parse_args()
