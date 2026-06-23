@@ -825,6 +825,10 @@ async fn prepare_native_confidential_model() {
         "provisioning",
         std::slice::from_ref(&model),
         model_download_bytes(std::slice::from_ref(&model)),
+        // We're entering the download phase, so show a download bar, not the
+        // "loading into memory…" state (loading=false). The serve loop's own
+        // monitor recomputes this from `.incomplete` probes once engines build.
+        false,
         None,
     );
 
