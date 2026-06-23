@@ -285,6 +285,16 @@ async function main(): Promise<void> {
             cdHash: p.cdHash,
             challengeVerifiedSip: p.challengeVerifiedSip,
             codeAttested: p.codeAttested,
+            // The four legs of `confidentialEligible`, broken out so the
+            // console can tell the operator WHICH one is blocking a machine
+            // they asked to be confidential (vs. a bare "not eligible"). The
+            // AND of these is `confidentialEligible` above.
+            confidentialLegs: {
+              selfTierConfidential: p.selfTier === "attested-confidential",
+              cdHashKnownGood: p.cdHashKnownGood,
+              challengeVerifiedSip: p.challengeVerifiedSip,
+              codeAttested: p.codeAttested,
+            },
           })),
         ),
       ).pipe(Effect.withSpan("advisor.providers")),

@@ -40,34 +40,75 @@ function jsonError(status: number, message: string): Response {
   });
 }
 
-/** The advisor's VERIFIED confidential standing for this machine — its
- *  cdHash is known-good AND its challenge-verified posture holds. This is
- *  the same signal the console model directory badges with, and it's the
- *  honest one to show the operator (vs the provider record's self-asserted
- *  trustLevel). Degrades to false when the advisor is unreachable. */
-async function fetchConfidentialEligible(did: string): Promise<boolean> {
+interface ConfidentialLegs {
+  selfTierConfidential?: boolean;
+  cdHashKnownGood?: boolean;
+  challengeVerifiedSip?: boolean;
+  codeAttested?: boolean;
+}
+
+interface ConfidentialStanding {
+  /** The advisor verified this machine confidential (all four legs hold). */
+  verified: boolean;
+  /** When the owner asked for confidential but it isn't verified yet, the
+   *  single most-actionable blocking leg, phrased for the operator. Null when
+   *  verified, or when we can't reach the advisor to know. */
+  blockedReason: string | null;
+}
+
+/** Map the advisor's per-leg breakdown to ONE operator-facing reason, in
+ *  most-actionable-first order. Returns null when every leg holds (verified).
+ *  Mirrors the AND in the advisor's `recomputeConfidential`. */
+function blockingLegReason(legs: ConfidentialLegs): string | null {
+  if (legs.selfTierConfidential === false)
+    return "The agent hasn't come up on the confidential worker yet — it's still starting or restarting.";
+  if (legs.cdHashKnownGood === false)
+    return "This build isn't recognized yet (its code hash isn't in the known-good set). Update to the latest secure build.";
+  if (legs.challengeVerifiedSip === false)
+    return "System Integrity Protection looks disabled on this Mac — confidential serving needs SIP on.";
+  if (legs.codeAttested === false)
+    return "Waiting for this Mac to answer the hardware code-identity challenge. This can take a moment after the agent (re)starts.";
+  return null;
+}
+
+/** The advisor's VERIFIED confidential standing for this machine plus, when
+ *  the owner wants confidential but it isn't verified, WHY. A DID can hold
+ *  MULTIPLE advisor rows (one per connected machine, plus stale ghosts): the
+ *  live attested row wins, so we treat the DID as verified when ANY row is,
+ *  and otherwise report the blocking leg from the row that's furthest along
+ *  (the one claiming the confidential tier). Degrades to
+ *  `{verified:false, blockedReason:null}` when the advisor is unreachable —
+ *  "can't tell", distinct from a known leg failure. */
+async function fetchConfidentialStanding(did: string): Promise<ConfidentialStanding> {
   try {
     const base = cocoreConfig().advisorUrl.replace(/\/$/, "");
     const r = await fetch(`${base}/providers`);
-    if (!r.ok) return false;
+    if (!r.ok) return { verified: false, blockedReason: null };
     const list = (await r.json()) as Array<{
       did: string;
       confidentialEligible?: boolean;
       trustTier?: string;
+      confidentialLegs?: ConfidentialLegs;
     }>;
-    // A DID can hold MULTIPLE advisor rows: one per connected machine, plus
-    // stale ghost registrations that haven't aged out yet. The old `.find`
-    // returned the FIRST matching row, which was frequently the stale
-    // best-effort ghost — so the menu showed "not confidential" even though
-    // the live worker was attested. Treat the DID as confidential-eligible
-    // when ANY of its rows is: the live attested row wins over a stale ghost.
-    return list.some(
-      (p) =>
-        p.did === did &&
-        (p.confidentialEligible === true || p.trustTier === "attested-confidential"),
+    const mine = list.filter((p) => p.did === did);
+    const verified = mine.some(
+      (p) => p.confidentialEligible === true || p.trustTier === "attested-confidential",
     );
+    if (verified) return { verified: true, blockedReason: null };
+    // Not verified on any row. Prefer the row that's claiming the confidential
+    // tier (furthest along) for the most relevant blocking leg; fall back to
+    // any row. With no rows at all the machine isn't connected to the advisor.
+    const best = mine.find((p) => p.confidentialLegs?.selfTierConfidential) ?? mine[0];
+    if (!best) {
+      return {
+        verified: false,
+        blockedReason:
+          "This Mac isn't connected to the co/core network yet — confidential can't be verified until it is.",
+      };
+    }
+    return { verified: false, blockedReason: blockingLegReason(best.confidentialLegs ?? {}) };
   } catch {
-    return false;
+    return { verified: false, blockedReason: null };
   }
 }
 
@@ -94,19 +135,34 @@ export const Route = createFileRoute("/api/agent/status")({
 
         // All three degrade gracefully so a single backend hiccup yields
         // partial data the menu can still render, not a 500.
-        const [balance, events, providers, confidential] = await Promise.all([
+        const [balance, events, providers, standing] = await Promise.all([
           getBalance(did).catch(() => null),
           listEvents(did, EVENT_LIMIT).catch(() => ({ events: [] })),
           runTraced("appview.listProviders", appviewListProvidersEffect).catch(() => ({
             providers: [],
           })),
-          fetchConfidentialEligible(did),
+          fetchConfidentialStanding(did),
         ]);
 
         const earned24h = sumReceiptInSince(events.events, since);
 
         const mine = providers.providers.find((p) => p.repo === did);
-        const body = (mine?.body ?? {}) as { trustLevel?: string; binaryVersion?: string };
+        const body = (mine?.body ?? {}) as {
+          trustLevel?: string;
+          binaryVersion?: string;
+          desiredTier?: string;
+        };
+
+        // The owner's DURABLE intent (written by `agent confidential`), distinct
+        // from the advisor's verified standing. The app needs both: intent that
+        // survives restarts, plus what's actually verified, so it can render an
+        // honest "Applying… / Active / Best-effort" instead of a single boolean
+        // that looks like the setting was forgotten during the verify window.
+        const confidentialDesired = body.desiredTier === "attested-confidential";
+        // Only surface a blocking reason when the owner actually wants
+        // confidential — a best-effort machine isn't "blocked", it's off.
+        const confidentialBlockedReason =
+          confidentialDesired && !standing.verified ? standing.blockedReason : null;
 
         return new Response(
           JSON.stringify({
@@ -115,7 +171,12 @@ export const Route = createFileRoute("/api/agent/status")({
             balance: balance?.balance ?? null,
             earned24h,
             trustLevel: body.trustLevel ?? null,
-            confidential,
+            // `confidential` stays = verified for back-compat with older app
+            // builds; new builds read confidentialVerified/Desired/BlockedReason.
+            confidential: standing.verified,
+            confidentialVerified: standing.verified,
+            confidentialDesired,
+            confidentialBlockedReason,
             agentVersion: body.binaryVersion ?? null,
             needsReauth,
           }),

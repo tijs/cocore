@@ -39,6 +39,18 @@ final class MenuBarController {
     /// Drives a loud "keeps crashing — send a report" menu row so a flapping
     /// machine doesn't just silently respawn behind a flat ledger.
     private var crashLoopCount = 0
+    /// Bounded to ONE auto-bounce per "stuck" window so we never loop-restart
+    /// the agent — see `reconcileConfidential`. Reset whenever confidential
+    /// becomes verified or is turned off.
+    private var didAutoBounceConfidential = false
+    /// When we last (re)started the agent for a confidential reason (enable,
+    /// auto-retry, or explicit Retry). The reconciler waits out a grace window
+    /// after this before its single auto-retry, so it never cuts the fresh
+    /// worker's first code-identity challenge short.
+    private var lastConfidentialActionAt: Date?
+    /// How long to let a freshly-(re)started confidential worker finish
+    /// verifying before the reconciler's one auto-retry kicks in.
+    private static let confidentialVerifyGrace: TimeInterval = 120
     /// One-shot recreate at launch when ControlCenter registered the item but
     /// never composited it (common on Sonoma+ when LSUIElement conflicted with
     /// a runtime accessory-policy switch).
@@ -134,6 +146,12 @@ final class MenuBarController {
                 // Apply a Pause / Resume done on the website to the local
                 // agent process (stop / start), keeping both sides in sync.
                 await self?.reconcileServeSwitch()
+                // Drive the durable security postures toward their desired
+                // state (re-attest / re-bounce confidential) and surface where
+                // they're stuck — the same converge-and-surface discipline as
+                // the serve switch above.
+                await self?.reconcileConfidential()
+                self?.reconcileSecurePosture()
             }
         }
 
@@ -483,8 +501,58 @@ final class MenuBarController {
                     action: on ? "enable confidential" : "turn off confidential", detail: out)
                 return
             }
+            NSLog("cocore: confidential intent written: desiredTier=%@", on ? "attested-confidential" : "best-effort")
+            // Reflect the durable intent immediately so the toggle + "Applying…"
+            // state are correct before the next status poll lands — and cache it
+            // so a relaunch shows it instantly. The advisor-verified `confidential`
+            // flips later, on its own cadence.
+            state.confidentialDesired = on
+            UserDefaults.standard.set(on, forKey: "cachedConfidentialDesired")
+            if !on { state.confidentialBlockedReason = nil }
+            // Fresh intent → allow exactly one auto-bounce again if it gets
+            // stuck, and start the grace clock from this apply-bounce.
+            didAutoBounceConfidential = false
+            lastConfidentialActionAt = on ? Date() : nil
             // Bounce so the fresh serve reads the new desiredTier and the
             // supervisor selects the right worker (same as Restart serving).
+            await supervisor.stop()
+            await supervisor.start()
+            refreshServing()
+            rebuildMenu()
+        }
+    }
+
+    /// Clear the durable Secure Mode intent so the reconciler stops re-driving
+    /// attestation. The MDM enrollment itself lives in macOS and can only be
+    /// removed by the user in System Settings — so we make that explicit rather
+    /// than pretend a click here fully un-enrolls the Mac.
+    @MainActor
+    func turnOffSecureMode() {
+        Self.setSecureModeDesired(false)
+        state.secureModeDesired = false
+        rebuildMenu()
+        let alert = NSAlert()
+        alert.messageText = "Secure Mode turned off"
+        alert.informativeText =
+            "co/core will stop re-attesting this Mac. The management profile stays installed until you remove it: System Settings ▸ General ▸ Device Management ▸ select the co/core profile ▸ remove."
+        alert.addButton(withTitle: "OK")
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preferences.configurationprofiles") {
+            alert.addButton(withTitle: "Open Device Management")
+            if alert.runModal() == .alertSecondButtonReturn { NSWorkspace.shared.open(url) }
+        } else {
+            alert.runModal()
+        }
+    }
+
+    /// Explicit "Retry now" for a confidential machine stuck in Applying… —
+    /// re-bounce immediately to re-register and re-trigger the advisor's
+    /// code-identity challenge, instead of waiting for the periodic reconciler.
+    @MainActor
+    func retryConfidential() {
+        Task { @MainActor in
+            NSLog("cocore: user retried confidential — bouncing agent to re-verify")
+            didAutoBounceConfidential = false
+            lastConfidentialActionAt = Date()
             await supervisor.stop()
             await supervisor.start()
             refreshServing()
@@ -551,6 +619,111 @@ final class MenuBarController {
         }
     }
 
+    // MARK: durable Secure Mode intent (local marker)
+
+    /// Path to the `~/.cocore/secure-mode-desired` marker — the durable record
+    /// that the owner asked this machine to be hardware-attested. Mirrors the
+    /// `serving-paused` marker pattern: a file's existence IS the boolean.
+    private static var secureModeDesiredMarker: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cocore/secure-mode-desired")
+    }
+
+    /// True when the owner has asked this machine to be in Secure Mode and
+    /// hasn't explicitly turned it off — independent of whether attestation
+    /// has actually landed yet. The reconciler + Status UI use this to keep
+    /// re-driving / surfacing Secure Mode across restarts.
+    static func secureModeDesired() -> Bool {
+        FileManager.default.fileExists(atPath: secureModeDesiredMarker.path)
+    }
+
+    /// Record (or clear) the owner's Secure Mode intent. Set when they commit
+    /// to the wizard; cleared only by an explicit "Turn off Secure Mode" — so
+    /// a restart, a lapsed attestation, or a transient failure never silently
+    /// drops the machine back to self-attested.
+    static func setSecureModeDesired(_ desired: Bool) {
+        let path = secureModeDesiredMarker
+        if desired {
+            try? FileManager.default.createDirectory(
+                at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data().write(to: path)
+            NSLog("cocore: secure-mode intent SET (desired)")
+        } else {
+            try? FileManager.default.removeItem(at: path)
+            NSLog("cocore: secure-mode intent CLEARED (off)")
+        }
+    }
+
+    // MARK: posture reconcilers
+
+    /// Converge the running agent toward the owner's DURABLE confidential intent
+    /// and, crucially, make the outcome observable. When confidential is desired
+    /// but the advisor hasn't verified it, the common transient cause is that the
+    /// freshly-(re)started worker hasn't answered the advisor's APNs code-identity
+    /// challenge yet — a fresh register re-triggers it. We perform at most ONE
+    /// automatic bounce per stuck window (never a restart loop); past that we
+    /// leave it for the user's explicit Retry and let the Status UI show exactly
+    /// which leg is pending. Verified or off resets the latch.
+    @MainActor
+    private func reconcileConfidential() async {
+        guard state.confidentialDesired else {
+            didAutoBounceConfidential = false
+            return
+        }
+        if state.confidential {
+            // Landed — clear the latch so a future drop can auto-recover once.
+            if didAutoBounceConfidential {
+                NSLog("cocore: confidential VERIFIED — clearing auto-bounce latch")
+            }
+            didAutoBounceConfidential = false
+            return
+        }
+        // Desired but not verified. If the build can't do confidential at all
+        // (no nested worker bundle), no amount of bouncing helps — say so and
+        // don't churn the process.
+        guard AgentSupervisor.hasConfidentialWorker() else {
+            NSLog(
+                "cocore: confidential desired but this build has no confidential worker bundle — cannot activate")
+            return
+        }
+        let reason = state.confidentialBlockedReason ?? "(advisor standing not yet verified)"
+        NSLog("cocore: confidential desired, not yet verified — blocker: %@", reason)
+        // One bounce to re-register and re-trigger the code-identity challenge —
+        // but only after a grace window, so we don't interrupt the fresh
+        // worker's first challenge (which IS how verification normally lands).
+        guard !didAutoBounceConfidential, supervisor.isServing() else { return }
+        if let last = lastConfidentialActionAt,
+            Date().timeIntervalSince(last) < Self.confidentialVerifyGrace {
+            return  // still inside the grace window — give it time
+        }
+        didAutoBounceConfidential = true
+        lastConfidentialActionAt = Date()
+        NSLog("cocore: auto-bouncing agent once to re-trigger confidential verification")
+        await supervisor.stop()
+        await supervisor.start()
+        refreshServing()
+        rebuildMenu()
+    }
+
+    /// Keep the Secure Mode intent mirror fresh and re-drive it. The agent
+    /// re-attests on its own at boot when still MDM-enrolled (mda_loader); this
+    /// reconciler's job is to surface the posture (Securing… / needs action)
+    /// and rebuild the menu when it changes, so a desired-but-not-yet-attested
+    /// machine never looks simply "off".
+    @MainActor
+    private func reconcileSecurePosture() {
+        let desired = Self.secureModeDesired()
+        if state.secureModeDesired != desired {
+            state.secureModeDesired = desired
+            rebuildMenu()
+        }
+        if desired, state.trustLevel != .hardwareAttested {
+            NSLog(
+                "cocore: secure-mode desired but not attested (enrolled=%@) — surfacing Securing…",
+                EnrollmentProbe.isEnrolled() ? "yes" : "no")
+        }
+    }
+
     /// Bounce the agent after the advisor flagged this machine unresponsive.
     /// A clean re-register clears the bad-standing marker (the agent does
     /// this on connect), so the red ping + this row drop away once it
@@ -590,6 +763,8 @@ final class MenuBarController {
         onSignOut: { [weak self] in self?.signOut() },
         onEnableSecureMode: { [weak self] in self?.secureModeWizard.show() },
         onSetConfidential: { [weak self] on in self?.setConfidential(on) },
+        onTurnOffSecureMode: { [weak self] in self?.turnOffSecureMode() },
+        onRetryConfidential: { [weak self] in self?.retryConfidential() },
         onReauth: { [weak self] in self?.signIn() },
         onSendBugReport: { [weak self] in self?.sendBugReport() },
         onCheckUpdates: { [weak self] in self?.checkUpdates() },

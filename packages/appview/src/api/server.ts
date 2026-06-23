@@ -229,6 +229,7 @@ function buildAppviewRouters(
       accounts: opts.accountStore,
       store,
       bridgeUrl: opts.bridgeUrl,
+      advisorUrl: opts.advisorUrl,
     });
     const agentBugReport = buildAgentBugReportRouter({ accounts: opts.accountStore });
     routers.push(
