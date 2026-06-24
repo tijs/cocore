@@ -703,10 +703,7 @@ final class AgentSupervisor {
     /// default binary when the worker bundle isn't present (a non-apns build).
     nonisolated static func serveBinary(tier: String) -> URL? {
         if tier == "attested-confidential" {
-            let worker = Bundle.main.bundleURL
-                .appendingPathComponent(
-                    "Contents/CoCoreProvider.app/Contents/MacOS/cocore-provider")
-            if FileManager.default.isExecutableFile(atPath: worker.path) {
+            if let worker = confidentialWorkerBinary() {
                 NSLog("cocore: confidential tier — spawning nested worker %@", worker.path)
                 return worker
             }
@@ -715,5 +712,23 @@ final class AgentSupervisor {
             )
         }
         return locateBinary()
+    }
+
+    /// The nested, measured push-receiver binary used for the attested-confidential
+    /// tier, or nil when this build doesn't ship it (a non-apns build). Factored
+    /// out so callers can ask "can this build even do confidential?" without
+    /// triggering a spawn.
+    nonisolated static func confidentialWorkerBinary() -> URL? {
+        let worker = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/CoCoreProvider.app/Contents/MacOS/cocore-provider")
+        return FileManager.default.isExecutableFile(atPath: worker.path) ? worker : nil
+    }
+
+    /// True when this build ships the confidential worker bundle — i.e.
+    /// confidential CAN activate here. When false, asking for confidential will
+    /// silently fall back to the default binary, so the UI/reconciler should
+    /// surface that rather than spin waiting for a verification that can't come.
+    nonisolated static func hasConfidentialWorker() -> Bool {
+        confidentialWorkerBinary() != nil
     }
 }

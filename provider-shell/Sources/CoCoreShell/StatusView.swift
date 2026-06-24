@@ -22,6 +22,16 @@ struct StatusRows: View {
     /// (true = enable). Left `nil` to hide the control (read-only contexts).
     var onSetConfidential: ((Bool) -> Void)? = nil
 
+    /// When provided, an explicit "Turn off Secure Mode" action — clears the
+    /// durable intent so the reconciler stops re-driving attestation. Left
+    /// `nil` in read-only contexts (button hidden).
+    var onTurnOffSecureMode: (() -> Void)? = nil
+
+    /// When provided, a "Retry now" action shown while confidential is
+    /// Applying… — re-bounces the agent to re-trigger verification without
+    /// waiting for the periodic reconciler. Left `nil` to hide it.
+    var onRetryConfidential: (() -> Void)? = nil
+
     /// When provided, a "Sign in again" action shown while the agent's publish
     /// session is dead (`state.needsReauth`). Routes to the sign-in flow. Left
     /// `nil` in read-only contexts (the banner still warns, just no button).
@@ -75,49 +85,105 @@ struct StatusRows: View {
         //   • Secure Mode (attestation) — proves this is genuine Apple hardware.
         //   • Confidential — seals inference so the operator can't read prompts.
         Section("Security") {
+            // ----- Secure Mode (attestation) -----
             LabeledContent("Secure Mode") {
-                Text(state.trustLevel == .hardwareAttested
-                    ? "On — hardware-attested"
-                    : "Off — self-attested (software)")
-                    .foregroundStyle(state.trustLevel == .hardwareAttested ? .green : .secondary)
+                switch state.secureModePhase {
+                case .on:
+                    Text("On — hardware-attested").foregroundStyle(.green)
+                case .securing:
+                    Text("Securing…").foregroundStyle(.orange)
+                case .off:
+                    Text("Off — self-attested (software)").foregroundStyle(.secondary)
+                }
             }
-            Text(state.trustLevel == .hardwareAttested
-                ? "This Mac is enrolled and proven to be genuine Apple hardware (SIP verified)."
-                : "Proves this is genuine, untampered Apple hardware (SIP verified). Optional.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            switch state.secureModePhase {
+            case .on:
+                secureCaption(
+                    "This Mac is enrolled and proven to be genuine Apple hardware (SIP verified).",
+                    .secondary)
+            case .securing(let reason):
+                // The interstitial: tell the operator it's mid-flight and what,
+                // if anything, they need to do — instead of looking simply off.
+                secureCaption(reason, .orange)
+            case .off:
+                secureCaption(
+                    "Proves this is genuine, untampered Apple hardware (SIP verified). Optional.",
+                    .secondary)
+            }
             if let exp = state.attestationExpiresAt {
                 LabeledContent("Attestation expires", value: exp.formatted(.dateTime))
             }
-            // Gated on a paired session: the wizard's MDM coordinator calls
-            // need this agent's bearer key (session.apiKey/apiBase), so there's
-            // nothing to enable until pairing completes. Mirrors the Identity
-            // section's signed-in / "Not signed in" split above.
-            // Don't offer to enable Secure Mode while the publish session is
-            // dead: the wizard would attest, then fail to publish the result
-            // (exactly the silent dead-end this guard exists to prevent). The
-            // re-auth banner above is the actionable step until it clears.
-            if state.trustLevel != .hardwareAttested, state.session != nil, !state.needsReauth,
-                let enable = onEnableSecureMode {
-                Button("Enable Secure Mode…", action: enable)
+            // Gated on a paired, live session: the wizard's MDM coordinator calls
+            // need this agent's bearer key, and attesting while the publish
+            // session is dead is a silent dead-end (the re-auth banner above is
+            // the actionable step until it clears).
+            if state.session != nil, !state.needsReauth {
+                switch state.secureModePhase {
+                case .on:
+                    if let off = onTurnOffSecureMode {
+                        Button("Turn off Secure Mode", action: off)
+                    }
+                case .securing:
+                    // Needs the user to finish enrollment → re-open the wizard;
+                    // otherwise it's re-attesting on its own and they can bail out.
+                    if !EnrollmentProbe.isEnrolled(), let enable = onEnableSecureMode {
+                        Button("Finish Secure Mode setup…", action: enable)
+                    }
+                    if let off = onTurnOffSecureMode {
+                        Button("Turn off Secure Mode", action: off)
+                    }
+                case .off:
+                    if let enable = onEnableSecureMode {
+                        Button("Enable Secure Mode…", action: enable)
+                    }
+                }
             }
 
+            // ----- Confidential (sealed inference) -----
             LabeledContent("Confidential tier") {
-                Text(state.confidential ? "🔒 Confidential" : "Best-effort")
-                    .foregroundStyle(state.confidential ? .green : .secondary)
+                switch state.confidentialPhase {
+                case .active:
+                    Text("🔒 Confidential").foregroundStyle(.green)
+                case .applying:
+                    Text("Applying…").foregroundStyle(.orange)
+                case .off:
+                    Text("Best-effort").foregroundStyle(.secondary)
+                }
             }
             // Whose data, and from whom: confidential seals the REQUESTOR's
-            // prompts against YOU (this Mac's operator) — not the other way
-            // round. Written from the operator's seat so "operator" isn't
-            // mistaken for some third party.
-            Text(state.confidential
-                ? "Requests run sealed inside the measured, signed agent, so not even you — this Mac's operator — can read what requestors send or receive. That unreadable-by-the-operator guarantee is what requestors get."
-                : "Requests run in a local helper process that you, this Mac's operator, could read — fine for non-sensitive work. Enable confidential to seal them so requestors get a no-snooping guarantee. The confidential engine serves Qwen2 / Qwen3 / Llama / Gemma / Phi-class models.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            // prompts against YOU (this Mac's operator) — not the other way round.
+            switch state.confidentialPhase {
+            case .active:
+                secureCaption(
+                    "Requests run sealed inside the measured, signed agent, so not even you — this Mac's operator — can read what requestors send or receive. That unreadable-by-the-operator guarantee is what requestors get.",
+                    .secondary)
+            case .applying(let reason):
+                // The interstitial that fixes "I have to toggle until it takes":
+                // say exactly what's still pending instead of falling silent.
+                secureCaption(
+                    reason
+                        ?? "Turning on confidential — finishing verification with the network. This can take a moment.",
+                    .orange)
+            case .off:
+                secureCaption(
+                    "Requests run in a local helper process that you, this Mac's operator, could read — fine for non-sensitive work. Enable confidential to seal them so requestors get a no-snooping guarantee. The confidential engine serves Qwen2 / Qwen3 / Llama / Gemma / Phi-class models.",
+                    .secondary)
+            }
             if let setConfidential = onSetConfidential {
-                Button(state.confidential ? "Turn off confidential" : "Enable confidential…") {
-                    setConfidential(!state.confidential)
+                // Drive the action by the DURABLE intent (desired), not the
+                // advisor-verified flag: while Applying… the action is "Turn
+                // off", never "Enable" again (the old verified-driven label
+                // re-fired Enable and re-bounced — part of the finickiness).
+                switch state.confidentialPhase {
+                case .off:
+                    Button("Enable confidential…") { setConfidential(true) }
+                case .applying:
+                    Button("Turn off confidential") { setConfidential(false) }
+                    if let retry = onRetryConfidential {
+                        Button("Retry now", action: retry)
+                    }
+                case .active:
+                    Button("Turn off confidential") { setConfidential(false) }
                 }
             }
             if let url = URL(string: "\(Endpoints.consoleURL)/docs/security") {
@@ -137,6 +203,17 @@ struct StatusRows: View {
                 LabeledContent("Agent", value: v)
             }
         }
+    }
+
+    /// A wrapping caption line (description / interstitial reason). Factored so
+    /// the Secure Mode + Confidential rows render their multi-state captions
+    /// identically.
+    @ViewBuilder
+    private func secureCaption(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(color)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// Human-readable serving state, schedule-aware to match the menu's

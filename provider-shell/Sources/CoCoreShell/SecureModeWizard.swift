@@ -208,7 +208,22 @@ struct SecureModeWizardView: View {
         }
         .frame(width: 540, height: 600)
         .brandStyled()
+        .onAppear { fastPathIfAlreadyEnrolled() }
         .onDisappear { pollTask?.cancel() }
+    }
+
+    /// When the wizard opens on a Mac that's ALREADY MDM-enrolled (the owner
+    /// re-running Secure Mode), jump past intro/update/enroll straight to
+    /// re-attesting — never re-issue an enrollment profile. This is the primary
+    /// guard against re-adding a pending enrollment; `startEnrollStep` is the
+    /// backstop if the user navigates there another way.
+    private func fastPathIfAlreadyEnrolled() {
+        guard step == .intro, EnrollmentProbe.isEnrolled() else { return }
+        NSLog("cocore: Secure Mode wizard opened on an already-enrolled Mac — re-attesting only")
+        MenuBarController.setSecureModeDesired(true)
+        state.secureModeDesired = true
+        advance(to: .attesting)
+        startAttestingStep()
     }
 
     // MARK: header / footer
@@ -417,6 +432,24 @@ struct SecureModeWizardView: View {
 
     private func startEnrollStep() {
         stepError = nil
+        // The owner has committed to Secure Mode — record the durable intent
+        // now so a restart, a lapsed attestation, or a transient failure keeps
+        // re-driving it instead of silently dropping back to self-attested.
+        MenuBarController.setSecureModeDesired(true)
+        state.secureModeDesired = true
+        // Already enrolled (re-running the wizard on a Mac that's been secured
+        // before): do NOT fetch a fresh enrollment profile — that mints a brand
+        // -new pending enrollment macOS prompts to install AGAIN, which is the
+        // "keeps re-adding the pending enrollment" bug. Skip straight to
+        // (re)attesting against the existing enrollment.
+        if EnrollmentProbe.isEnrolled() {
+            NSLog("cocore: Secure Mode wizard — already MDM-enrolled, skipping re-enrollment")
+            working = false
+            progress = nil
+            advance(to: .attesting)
+            startAttestingStep()
+            return
+        }
         working = true
         progress = "Requesting your enrollment profile…"
         Task {
@@ -577,6 +610,11 @@ struct SecureModeWizardView: View {
                     hasChain(data) {
                     working = false
                     progress = nil
+                    // Attestation landed — make sure the durable intent is set
+                    // so the posture survives restarts (intro fast-path may have
+                    // skipped startEnrollStep where it's normally written).
+                    MenuBarController.setSecureModeDesired(true)
+                    state.secureModeDesired = true
                     advance(to: .done)
                     return
                 }

@@ -33,6 +33,8 @@ final class MainWindowController {
     private let onSignOut: () -> Void
     private let onEnableSecureMode: () -> Void
     private let onSetConfidential: (Bool) -> Void
+    private let onTurnOffSecureMode: () -> Void
+    private let onRetryConfidential: () -> Void
     private let onReauth: () -> Void
     private let onSendBugReport: () -> Void
     private let onCheckUpdates: () -> Void
@@ -49,6 +51,8 @@ final class MainWindowController {
         onSignOut: @escaping () -> Void,
         onEnableSecureMode: @escaping () -> Void,
         onSetConfidential: @escaping (Bool) -> Void,
+        onTurnOffSecureMode: @escaping () -> Void,
+        onRetryConfidential: @escaping () -> Void,
         onReauth: @escaping () -> Void,
         onSendBugReport: @escaping () -> Void,
         onCheckUpdates: @escaping () -> Void,
@@ -64,6 +68,8 @@ final class MainWindowController {
         self.onSignOut = onSignOut
         self.onEnableSecureMode = onEnableSecureMode
         self.onSetConfidential = onSetConfidential
+        self.onTurnOffSecureMode = onTurnOffSecureMode
+        self.onRetryConfidential = onRetryConfidential
         self.onReauth = onReauth
         self.onSendBugReport = onSendBugReport
         self.onCheckUpdates = onCheckUpdates
@@ -83,6 +89,8 @@ final class MainWindowController {
                         onSignOut: onSignOut,
                         onEnableSecureMode: onEnableSecureMode,
                         onSetConfidential: onSetConfidential,
+                        onTurnOffSecureMode: onTurnOffSecureMode,
+                        onRetryConfidential: onRetryConfidential,
                         onReauth: onReauth)),
                 tab("Models", "cpu", ModelsView(manager: modelManager)),
                 tab("Settings", "gearshape", PreferencesView(supervisor: supervisor)),
@@ -153,6 +161,8 @@ private struct StatusTab: View {
     let onSignOut: () -> Void
     let onEnableSecureMode: () -> Void
     let onSetConfidential: (Bool) -> Void
+    let onTurnOffSecureMode: () -> Void
+    let onRetryConfidential: () -> Void
     let onReauth: () -> Void
     @EnvironmentObject private var state: AppState
 
@@ -161,6 +171,8 @@ private struct StatusTab: View {
             StatusRows(
                 onEnableSecureMode: onEnableSecureMode,
                 onSetConfidential: onSetConfidential,
+                onTurnOffSecureMode: onTurnOffSecureMode,
+                onRetryConfidential: onRetryConfidential,
                 onReauth: onReauth)
             Section {
                 Button("View my profile on console", action: onOpenProfile)

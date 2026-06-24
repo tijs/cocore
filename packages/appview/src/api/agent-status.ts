@@ -26,6 +26,69 @@ export interface AgentStatusContext {
   /** Bridge base URL — the exchange ledger lives on the bridge in this same
    *  process. When unset, balance/earnings degrade to null/0. */
   bridgeUrl?: string;
+  /** Advisor HTTP base — used to read this machine's VERIFIED confidential
+   *  standing (and, when the owner wants confidential, the blocking leg). When
+   *  unset, confidential degrades to not-verified / no-reason. */
+  advisorUrl?: string;
+}
+
+interface ConfidentialLegs {
+  selfTierConfidential?: boolean;
+  cdHashKnownGood?: boolean;
+  challengeVerifiedSip?: boolean;
+  codeAttested?: boolean;
+}
+
+/** Map the advisor's per-leg breakdown to ONE operator-facing reason, in
+ *  most-actionable-first order. Returns null when every leg holds. Kept in
+ *  sync with the console route of the same name. */
+function blockingLegReason(legs: ConfidentialLegs): string | null {
+  if (legs.selfTierConfidential === false)
+    return "The agent hasn't come up on the confidential worker yet — it's still starting or restarting.";
+  if (legs.cdHashKnownGood === false)
+    return "This build isn't recognized yet (its code hash isn't in the known-good set). Update to the latest secure build.";
+  if (legs.challengeVerifiedSip === false)
+    return "System Integrity Protection looks disabled on this Mac — confidential serving needs SIP on.";
+  if (legs.codeAttested === false)
+    return "Waiting for this Mac to answer the hardware code-identity challenge. This can take a moment after the agent (re)starts.";
+  return null;
+}
+
+/** This machine's VERIFIED confidential standing from the advisor, plus the
+ *  blocking leg when not verified. Mirrors the console's fetchConfidentialStanding;
+ *  degrades to not-verified / no-reason when no advisor is configured or it's
+ *  unreachable ("can't tell", distinct from a known leg failure). */
+async function fetchConfidentialStanding(
+  advisorUrl: string | undefined,
+  did: string,
+): Promise<{ verified: boolean; blockedReason: string | null }> {
+  if (!advisorUrl) return { verified: false, blockedReason: null };
+  try {
+    const base = advisorUrl.replace(/\/$/, "");
+    const r = await fetch(`${base}/providers`);
+    if (!r.ok) return { verified: false, blockedReason: null };
+    const list = (await r.json()) as Array<{
+      did: string;
+      confidentialEligible?: boolean;
+      trustTier?: string;
+      confidentialLegs?: ConfidentialLegs;
+    }>;
+    const mine = list.filter((p) => p.did === did);
+    const verified = mine.some(
+      (p) => p.confidentialEligible === true || p.trustTier === "attested-confidential",
+    );
+    if (verified) return { verified: true, blockedReason: null };
+    const best = mine.find((p) => p.confidentialLegs?.selfTierConfidential) ?? mine[0];
+    if (!best)
+      return {
+        verified: false,
+        blockedReason:
+          "This Mac isn't connected to the co/core network yet — confidential can't be verified until it is.",
+      };
+    return { verified: false, blockedReason: blockingLegReason(best.confidentialLegs ?? {}) };
+  } catch {
+    return { verified: false, blockedReason: null };
+  }
 }
 
 interface LedgerEvent {
@@ -79,7 +142,20 @@ async function buildStatus(ctx: AgentStatusContext, did: string) {
 
   const providers = ctx.store.listByCollection("dev.cocore.compute.provider", 100);
   const mine = providers.find((p) => p.repo === did);
-  const body = (mine?.body ?? {}) as { trustLevel?: string; binaryVersion?: string };
+  const body = (mine?.body ?? {}) as {
+    trustLevel?: string;
+    binaryVersion?: string;
+    desiredTier?: string;
+  };
+
+  const standing = await fetchConfidentialStanding(ctx.advisorUrl, did);
+  // The owner's DURABLE intent (written by `agent confidential`), distinct from
+  // the advisor's verified standing — the app needs both to render an honest
+  // "Applying… / Active / Best-effort" instead of a boolean that looks forgotten
+  // during the verify window.
+  const confidentialDesired = body.desiredTier === "attested-confidential";
+  const confidentialBlockedReason =
+    confidentialDesired && !standing.verified ? standing.blockedReason : null;
 
   return {
     did,
@@ -88,6 +164,12 @@ async function buildStatus(ctx: AgentStatusContext, did: string) {
     earned24h,
     trustLevel: body.trustLevel ?? null,
     agentVersion: body.binaryVersion ?? null,
+    // `confidential` stays = verified for back-compat; new app builds read
+    // confidentialVerified/Desired/BlockedReason.
+    confidential: standing.verified,
+    confidentialVerified: standing.verified,
+    confidentialDesired,
+    confidentialBlockedReason,
   };
 }
 

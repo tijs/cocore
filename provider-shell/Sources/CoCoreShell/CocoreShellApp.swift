@@ -90,6 +90,23 @@ final class AppState: ObservableObject {
     /// known-good + challenge-verified posture). Distinct from `trustLevel`,
     /// which is the provider record's self-asserted value.
     @Published var confidential: Bool = false
+    /// The owner's DURABLE intent to run confidential (the provider record's
+    /// `desiredTier`, written by `agent confidential`). Survives restarts, so a
+    /// fresh launch can show "Applying…" during the advisor verify window
+    /// instead of "Best-effort" — which read as "the setting was forgotten".
+    /// This, not `confidential`, drives the toggle's label + action.
+    @Published var confidentialDesired: Bool = false
+    /// When confidential is DESIRED but not yet VERIFIED, the single most
+    /// actionable blocking leg, phrased for the operator (from the advisor's
+    /// per-leg breakdown). Nil when verified, off, or the advisor can't be
+    /// reached to know.
+    @Published var confidentialBlockedReason: String?
+    /// The owner's DURABLE intent to run Secure Mode (hardware attestation),
+    /// persisted as a local marker (`~/.cocore/secure-mode-desired`). Lets a
+    /// fresh launch re-drive / surface "Securing…" until it's attested, rather
+    /// than silently dropping back to self-attested. Refreshed from the marker
+    /// on each status poll.
+    @Published var secureModeDesired: Bool = false
     @Published var attestationExpiresAt: Date?
     @Published var creditsLast24h: Int = 0
     @Published var balanceCredits: Int?
@@ -107,6 +124,7 @@ final class AppState: ObservableObject {
         static let credits24h = "cachedCredits24h"
         static let balance = "cachedBalanceCredits"
         static let agentVersion = "cachedAgentVersion"
+        static let confidentialDesired = "cachedConfidentialDesired"
     }
 
     init() {
@@ -114,6 +132,44 @@ final class AppState: ObservableObject {
         if let c = d.object(forKey: CacheKey.credits24h) as? Int { creditsLast24h = c }
         if let b = d.object(forKey: CacheKey.balance) as? Int { balanceCredits = b }
         if let v = d.string(forKey: CacheKey.agentVersion) { agentVersion = v }
+        // Show the desired posture instantly on launch (the toggle label +
+        // "Applying…" state) without waiting for the first status round-trip,
+        // so a relaunch never momentarily reads as "Best-effort / off".
+        confidentialDesired = d.bool(forKey: CacheKey.confidentialDesired)
+        secureModeDesired = MenuBarController.secureModeDesired()
+    }
+
+    /// The honest, three-way confidential posture the UI renders — desired vs.
+    /// verified collapsed into one state machine so the view never shows a bare
+    /// boolean that looks like the setting was forgotten mid-verify.
+    enum ConfidentialPhase: Equatable {
+        case off                       // not desired
+        case applying(reason: String?) // desired, not yet verified (+ blocker)
+        case active                    // desired and advisor-verified
+    }
+    var confidentialPhase: ConfidentialPhase {
+        if confidential { return .active }
+        if confidentialDesired { return .applying(reason: confidentialBlockedReason) }
+        return .off
+    }
+
+    /// The honest Secure Mode posture: attested wins; otherwise desired-but-not
+    /// -attested is "Securing…"; otherwise off. The reason distinguishes
+    /// "needs you to finish enrollment" from "re-attesting in the background".
+    enum SecureModePhase: Equatable {
+        case off
+        case securing(reason: String)
+        case on
+    }
+    var secureModePhase: SecureModePhase {
+        if trustLevel == .hardwareAttested { return .on }
+        if secureModeDesired {
+            return .securing(
+                reason: EnrollmentProbe.isEnrolled()
+                    ? "Re-attesting this Mac in the background…"
+                    : "Finish enrollment in System Settings ▸ Device Management to complete Secure Mode.")
+        }
+        return .off
     }
 
     func refreshSession() async {
@@ -128,7 +184,15 @@ final class AppState: ObservableObject {
         let earned24h: Int?
         let balance: Int?
         let trustLevel: String?
+        // `confidential` (legacy) == `confidentialVerified`; both carry the
+        // advisor's VERIFIED standing. `confidentialDesired` is the owner's
+        // durable intent; `confidentialBlockedReason` names the failing leg
+        // while desired-but-not-verified. New fields are optional so an older
+        // service that only sends `confidential` still decodes.
         let confidential: Bool?
+        let confidentialVerified: Bool?
+        let confidentialDesired: Bool?
+        let confidentialBlockedReason: String?
         let agentVersion: String?
         let needsReauth: Bool?
     }
@@ -159,7 +223,19 @@ final class AppState: ObservableObject {
             self.balanceCredits = e.balance
             if let bal = e.balance { d.set(bal, forKey: CacheKey.balance) }
             if let raw = e.trustLevel, let t = TrustLevel(rawValue: raw) { self.trustLevel = t }
-            self.confidential = e.confidential ?? false
+            // Prefer the explicit verified field; fall back to the legacy
+            // `confidential` so older services still light the badge.
+            self.confidential = e.confidentialVerified ?? e.confidential ?? false
+            // Only overwrite desired from the server when it actually reports
+            // it (older builds omit it) — otherwise keep the cached intent so a
+            // transient old-service response can't wipe the "Applying…" state.
+            if let desired = e.confidentialDesired {
+                self.confidentialDesired = desired
+                d.set(desired, forKey: CacheKey.confidentialDesired)
+            }
+            self.confidentialBlockedReason = e.confidentialBlockedReason
+            // Keep the Secure Mode intent mirror fresh from the local marker.
+            self.secureModeDesired = MenuBarController.secureModeDesired()
             self.needsReauth = e.needsReauth ?? false
             if let v = e.agentVersion {
                 self.agentVersion = v

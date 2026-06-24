@@ -84,6 +84,24 @@ describe("ProviderRegistry confidential eligibility (WS-COORDINATOR)", () => {
     r.setKnownGood(new KnownGoodSet([GOOD_CD]));
     expect(r.get(DID, MID)?.confidentialEligible).toBe(true);
   });
+
+  it("exposes cdHashKnownGood as a standalone leg so callers can name the blocker", () => {
+    // Unknown build: the cdHash leg is the one that's false, even after the
+    // other legs are earned. This is what lets the status API tell the operator
+    // "update to the latest secure build" instead of a bare "not eligible".
+    const r = new ProviderRegistry(new KnownGoodSet(["a-different-known-hash"]));
+    r.upsert(confReg, noop, noopSend, noopPing, 1000);
+    r.markCodeAttested(DID, MID);
+    r.recordChallengeSip(DID, MID, true);
+    const e = r.get(DID, MID);
+    expect(e?.confidentialEligible).toBe(false);
+    expect(e?.cdHashKnownGood).toBe(false);
+    // Bless the build → the leg (and overall eligibility) flips, in lockstep.
+    r.setKnownGood(new KnownGoodSet([GOOD_CD]));
+    const e2 = r.get(DID, MID);
+    expect(e2?.cdHashKnownGood).toBe(true);
+    expect(e2?.confidentialEligible).toBe(true);
+  });
 });
 
 describe("ProviderRegistry", () => {
