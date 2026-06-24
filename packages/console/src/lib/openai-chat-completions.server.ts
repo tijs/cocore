@@ -215,7 +215,7 @@ function messageText(content: NormalizedContent): string {
 /** Flatten OpenAI `messages` into a single prompt string (legacy text
  *  path). Images are ignored here; a request carrying images takes the
  *  envelope path (`buildJobInput`) instead. */
-export function flattenMessages(messages: ChatMessage[]): string {
+function flattenMessages(messages: ChatMessage[]): string {
   return messages.map((m) => `${m.role}: ${messageText(m.content)}`).join("\n");
 }
 
@@ -229,7 +229,7 @@ export function requestHasImages(messages: ChatMessage[]): boolean {
  *  the whole input can be sealed as one self-contained envelope. Enforces
  *  the same total image budget as inline data URIs. Returns the canonical
  *  `EnvelopeMessage[]` or throws on a fetch/size failure. */
-export async function resolveImages(messages: ChatMessage[]): Promise<EnvelopeMessage[]> {
+async function resolveImages(messages: ChatMessage[]): Promise<EnvelopeMessage[]> {
   let imageBytes = 0;
   const out: EnvelopeMessage[] = [];
   for (const m of messages) {
