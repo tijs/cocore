@@ -46,11 +46,11 @@ export function InferenceApiReferencePage({ baseUrl }: { baseUrl: string }) {
               <h2 {...stylex.props(docsStyles.h2)}>{section.title}</h2>
               <p {...stylex.props(docsStyles.endpointDesc)}>{section.description}</p>
               <p {...stylex.props(docsStyles.prose)}>
-                Any <code {...stylex.props(docsStyles.codeInline)}>chat/completions</code> route (open,{" "}
-                <code {...stylex.props(docsStyles.codeInline)}>private</code>, and{" "}
+                Any <code {...stylex.props(docsStyles.codeInline)}>chat/completions</code> route
+                (open, <code {...stylex.props(docsStyles.codeInline)}>private</code>, and{" "}
                 <code {...stylex.props(docsStyles.codeInline)}>verified</code>) accepts the OpenAI
-                array-of-parts <code {...stylex.props(docsStyles.codeInline)}>content</code> shape. A
-                message is either a plain string (text only) or an ordered list of{" "}
+                array-of-parts <code {...stylex.props(docsStyles.codeInline)}>content</code> shape.
+                A message is either a plain string (text only) or an ordered list of{" "}
                 <code {...stylex.props(docsStyles.codeInline)}>text</code> and{" "}
                 <code {...stylex.props(docsStyles.codeInline)}>image_url</code> parts. There is no
                 separate upload endpoint — images travel inside the request body.
@@ -76,8 +76,8 @@ export function InferenceApiReferencePage({ baseUrl }: { baseUrl: string }) {
 }`}
               />
               <p {...stylex.props(docsStyles.prose)}>
-                The <code {...stylex.props(docsStyles.codeInline)}>image_url.url</code> field takes one
-                of two forms:
+                The <code {...stylex.props(docsStyles.codeInline)}>image_url.url</code> field takes
+                one of two forms:
               </p>
               <ul {...stylex.props(inferenceDocsSharedStyles.list)}>
                 <li {...stylex.props(inferenceDocsSharedStyles.bullet)}>
@@ -85,8 +85,9 @@ export function InferenceApiReferencePage({ baseUrl }: { baseUrl: string }) {
                   <code {...stylex.props(docsStyles.codeInline)}>
                     data:&lt;mime&gt;;base64,&lt;payload&gt;
                   </code>
-                  . The MIME type must be <code {...stylex.props(docsStyles.codeInline)}>image/*</code>{" "}
-                  (e.g. <code {...stylex.props(docsStyles.codeInline)}>image/png</code>,{" "}
+                  . The MIME type must be{" "}
+                  <code {...stylex.props(docsStyles.codeInline)}>image/*</code> (e.g.{" "}
+                  <code {...stylex.props(docsStyles.codeInline)}>image/png</code>,{" "}
                   <code {...stylex.props(docsStyles.codeInline)}>image/jpeg</code>). The bytes are
                   sealed directly into the signed job, so the receipt verifies offline with no extra
                   fetch.
@@ -110,7 +111,8 @@ export function InferenceApiReferencePage({ baseUrl }: { baseUrl: string }) {
                 </li>
                 <li {...stylex.props(inferenceDocsSharedStyles.bullet)}>
                   <strong>Images only.</strong> Non-image MIME types and arbitrary file attachments
-                  (PDFs, documents, audio) are rejected — there is no general file-upload part today.
+                  (PDFs, documents, audio) are rejected — there is no general file-upload part
+                  today.
                 </li>
               </ul>
               <h3 {...stylex.props(docsStyles.h2)}>Model support</h3>
@@ -124,7 +126,8 @@ export function InferenceApiReferencePage({ baseUrl }: { baseUrl: string }) {
                 </InferenceApiDocLink>{" "}
                 flags vision-capable models). A bad or unparseable{" "}
                 <code {...stylex.props(docsStyles.codeInline)}>image_url</code> with no accompanying
-                text returns <code {...stylex.props(docsStyles.codeInline)}>400 invalid_request_error</code>.
+                text returns{" "}
+                <code {...stylex.props(docsStyles.codeInline)}>400 invalid_request_error</code>.
               </p>
             </div>
           </div>
