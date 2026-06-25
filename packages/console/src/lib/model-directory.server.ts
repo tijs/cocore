@@ -50,6 +50,9 @@ interface ProviderRecordView {
   priceList?: PriceEntry[];
   attestationPubKey?: string;
   createdAt?: string;
+  /** Coarse, opt-in ISO 3166-1 alpha-2 country the provider published.
+   *  Advisory self-claim; absent when location sharing is off. */
+  region?: string;
 }
 
 interface ProfileRecordView {
@@ -77,6 +80,10 @@ interface ModelMachine {
   ramGB: number | null;
   attestationPubKey: string | null;
   lastSeen: string | null;
+  /** Coarse, opt-in country (ISO 3166-1 alpha-2) the machine published on
+   *  its provider record, or null when it isn't sharing location. Advisory
+   *  self-claim — surfaced so the directory can show/filter by country. */
+  region: string | null;
   /** True when the machine's VERIFIED tier is `attested-confidential`.
    *  Kept for back-compat; prefer `verifiedTier`. */
   confidential: boolean;
@@ -507,6 +514,7 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
           ramGB: safeNumber(body.ramGB),
           attestationPubKey,
           lastSeen: seen,
+          region: safeString(body.region),
           confidential: (onlineInfo?.verifiedTier ?? "best-effort") === "attested-confidential",
           verifiedTier: onlineInfo?.verifiedTier ?? "best-effort",
           host: hostFor(did),

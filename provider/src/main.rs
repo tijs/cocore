@@ -1492,6 +1492,10 @@ async fn cmd_serve(
         engine_fault: provider_record.engineFault.clone(),
         cd_hash: register_cd_hash,
         tier: register_tier,
+        // Echo the coarse, opt-in country from the provider record so the
+        // advisor can route by country without a PDS read. `None` when the
+        // owner hasn't opted into location sharing.
+        region: provider_record.region.clone(),
         // The measured agent's APNs device token, when the push host registered
         // one (confidential build + logged-in GUI session). Lets the advisor
         // send the code-identity challenge that proves this exact binary is

@@ -140,6 +140,7 @@ export async function handleChatCompletions(request: Request): Promise<Response>
     inputFormat: payload.inputFormat,
     maxTokensOut: parsed.maxTokens,
     priceCeiling: DEFAULT_PRICE_CEILING,
+    country: parsed.country,
   };
 
   if (parsed.stream) {
@@ -202,6 +203,7 @@ export async function handlePrivateChatCompletions(request: Request): Promise<Re
     // pickProvider surfaces NoFriendsAvailableError and the buffered/
     // streaming responders map that to a 503 (no_friends_available).
     allowedProviderDids,
+    country: parsed.country,
   };
 
   if (parsed.stream) {
@@ -287,6 +289,7 @@ export async function handleVerifiedChatCompletions(request: Request): Promise<R
     // Same mechanism as the friends path, but the set is the proof-backed
     // verified-provider list rather than the caller's friends.
     allowedProviderDids,
+    country: parsed.country,
   };
 
   if (parsed.stream) {

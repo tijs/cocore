@@ -64,6 +64,8 @@ interface DispatchBody {
   maxTokensOut?: unknown;
   priceCeiling?: unknown;
   targetProviderDid?: unknown;
+  /** Optional ISO 3166-1 alpha-2 country to route by (advisory). */
+  country?: unknown;
 }
 
 type ParsedDispatch = Omit<DispatchInputs, "did">;
@@ -92,6 +94,13 @@ function parseDispatch(body: DispatchBody): ParsedDispatch | string {
   if (body.targetProviderDid !== undefined && typeof body.targetProviderDid !== "string") {
     return "targetProviderDid must be a string when provided";
   }
+  let country: string | undefined;
+  if (body.country !== undefined) {
+    if (typeof body.country !== "string" || !/^[A-Za-z]{2}$/.test(body.country.trim())) {
+      return "country must be a 2-letter ISO 3166-1 alpha-2 code";
+    }
+    country = body.country.trim().toUpperCase();
+  }
   // Build the messages-v1 envelope when the client sent images.
   let envelope: Pick<DispatchInputs, "payloadBytes" | "inputFormat"> = {};
   if (body.messages !== undefined) {
@@ -110,6 +119,7 @@ function parseDispatch(body: DispatchBody): ParsedDispatch | string {
     ...(typeof body.targetProviderDid === "string"
       ? { targetProviderDid: body.targetProviderDid }
       : {}),
+    ...(country ? { country } : {}),
   };
 }
 

@@ -10,10 +10,12 @@ import { describe, test } from "vitest";
 import {
   classifyDispatchError,
   filterByAllowedDids,
+  filterByCountry,
   filterByPayoutsEligibility,
   NoFriendsAvailableError,
   NoFriendsForModelError,
   NoProvidersConnectedError,
+  NoProvidersForCountryError,
   NoProvidersForModelError,
   ProviderPayoutsNotEligibleError,
   TargetProviderNotConnectedError,
@@ -142,5 +144,36 @@ describe("structured error messages carry operational context", () => {
     assert.match(e.message, /gemma-3/);
     assert.match(e.message, /2 connected friends/);
     assert.match(e.message, /5 friends total/);
+  });
+
+  test("NoProvidersForCountryError mentions the model, country, and model-fit count", () => {
+    const e = new NoProvidersForCountryError("gemma-3", "US", 4);
+    assert.match(e.message, /gemma-3/);
+    assert.match(e.message, /US/);
+    assert.match(e.message, /4 serve the model/);
+    assert.equal(classifyDispatchError(e), "no-providers-for-country");
+  });
+});
+
+describe("filterByCountry — country routing", () => {
+  const US = { did: "did:plc:alice", region: "US" };
+  const DE = { did: "did:plc:bob", region: "DE" };
+  const noRegion: { did: string; region?: string } = { did: "did:plc:carol" };
+
+  test("undefined country passes the list through verbatim", () => {
+    assert.deepEqual(filterByCountry([US, DE, noRegion], undefined), [US, DE, noRegion]);
+  });
+
+  test("keeps only candidates whose region matches", () => {
+    assert.deepEqual(filterByCountry([US, DE, noRegion], "US"), [US]);
+    assert.deepEqual(filterByCountry([US, DE, noRegion], "DE"), [DE]);
+  });
+
+  test("a provider with no region is never matched by a country filter", () => {
+    assert.deepEqual(filterByCountry([noRegion], "US"), []);
+  });
+
+  test("no provider in the requested country yields an empty list", () => {
+    assert.deepEqual(filterByCountry([US, DE], "FR"), []);
   });
 });

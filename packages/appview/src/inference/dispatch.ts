@@ -56,6 +56,11 @@ export interface DispatchInputs {
   maxTokensOut: number;
   priceCeiling: { amount: number; currency: string };
   targetProviderDid?: string;
+  /** Optional ISO 3166-1 alpha-2 country filter (uppercased). When set,
+   *  pickProvider keeps only candidates whose advertised `region` matches,
+   *  after the model filter. Advisory routing (region is a provider
+   *  self-claim); not applied to an explicit `targetProviderDid`. */
+  country?: string;
 }
 
 /** The slice of a provider's indexed profile the credit line needs.
@@ -125,11 +130,27 @@ export class ProviderPayoutsNotEligibleError extends Error {
   }
 }
 
+export class NoProvidersForCountryError extends Error {
+  readonly model: string;
+  readonly country: string;
+  readonly modelFitCount: number;
+  constructor(model: string, country: string, modelFitCount: number) {
+    super(
+      `no connected provider serving model '${model}' advertises country '${country}' (${modelFitCount} serve the model in other / unknown regions)`,
+    );
+    this.name = "NoProvidersForCountryError";
+    this.model = model;
+    this.country = country;
+    this.modelFitCount = modelFitCount;
+  }
+}
+
 /** Stable codes for the error event. The route translates these to SSE
  *  `error` frames; clients switch on them. */
 export type DispatchErrorCode =
   | "no-providers-connected"
   | "no-providers-for-model"
+  | "no-providers-for-country"
   | "target-provider-not-connected"
   | "provider-payouts-not-eligible"
   | "pds-publish-failed"
@@ -227,6 +248,11 @@ interface AdvisorProviderRow {
   machineId?: string;
   /** Human-readable label for this machine. Optional for legacy agents. */
   machineLabel?: string;
+  /** Coarse, opt-in ISO 3166-1 alpha-2 country the provider advertises
+   *  (echoed from its provider record via the advisor). Advisory self-claim;
+   *  absent when the provider isn't sharing location. Used for `country`
+   *  routing. */
+  region?: string;
 }
 
 interface PickProviderOptions {
@@ -276,6 +302,9 @@ async function pickProvider(
   requesterDid: string,
   targetDid: string | undefined,
   options: PickProviderOptions,
+  /** Optional ISO 3166-1 alpha-2 country filter (uppercased). Applied after
+   *  the model filter; not applied to an explicit `targetDid`. */
+  country: string | undefined,
   /** Providers already tried this dispatch (a prior attempt's `/jobs`
    *  failed because they'd flapped out). Excluded from re-selection so
    *  failover lands on a DIFFERENT machine. Never applied to an explicit
@@ -306,7 +335,9 @@ async function pickProvider(
     (p) => p.supportedModels.length === 0 || p.supportedModels.includes(model),
   );
   if (fits.length === 0) throw new NoProvidersForModelError(model, attested.length);
-  const eligible = filterByPayoutsEligibility(fits, options);
+  const inCountry = country ? fits.filter((p) => p.region === country) : fits;
+  if (inCountry.length === 0) throw new NoProvidersForCountryError(model, country!, fits.length);
+  const eligible = filterByPayoutsEligibility(inCountry, options);
   if (eligible.length === 0) {
     throw new ProviderPayoutsNotEligibleError(fits[0]!.did);
   }
@@ -363,6 +394,7 @@ interface SseEvent {
 export function classifyDispatchError(e: unknown): DispatchErrorCode {
   if (e instanceof NoProvidersConnectedError) return "no-providers-connected";
   if (e instanceof NoProvidersForModelError) return "no-providers-for-model";
+  if (e instanceof NoProvidersForCountryError) return "no-providers-for-country";
   if (e instanceof TargetProviderNotConnectedError) return "target-provider-not-connected";
   if (e instanceof ProviderPayoutsNotEligibleError) return "provider-payouts-not-eligible";
   return "advisor-transport";
@@ -460,6 +492,8 @@ export async function* runDispatch(
         input.did,
         input.targetProviderDid,
         { payoutsEligibleDids: null, selfLoopExempt: null },
+        // No country filter on an explicit pin — the user chose that machine.
+        input.targetProviderDid ? undefined : input.country,
         excludeDids,
       );
     } catch (e) {
