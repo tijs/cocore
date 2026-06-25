@@ -31,7 +31,9 @@ import { Kbd } from "@/design-system/kbd";
 import { ListBoxSeparator } from "@/design-system/listbox";
 import { Menu, MenuItem } from "@/design-system/menu";
 import { SegmentedControl, SegmentedControlItem } from "@/design-system/segmented-control";
+import { Switch } from "@/design-system/switch";
 import { Tag, TagGroup } from "@/design-system/tag-group";
+import { TextArea } from "@/design-system/text-area";
 import { TextField } from "@/design-system/text-field";
 import {
   Table,
@@ -1374,6 +1376,132 @@ export function RenameMachineDialogContent({
             onPress={() => onSave(trimmed)}
           >
             {isPending ? "Saving…" : "Save"}
+          </Button>
+        </Flex>
+      </DialogFooter>
+    </>
+  );
+}
+
+/** Pro-bono policy as the proBono mutation expects it (`null` ≡ off). */
+type ProBonoPolicy = { mode: "any" | "direct"; dids?: string[] } | null;
+
+/** Split a free-text DID list (newline / comma / whitespace separated) into
+ *  trimmed, de-duped, non-empty entries — what the `direct` allowlist wants. */
+function parseDidList(raw: string): string[] {
+  const out: string[] = [];
+  for (const part of raw.split(/[\s,]+/)) {
+    const t = part.trim();
+    if (t.length > 0 && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+export function AdvancedSettingsDialogContent({
+  machine,
+  isSharePending,
+  isProBonoPending,
+  onShareLocation,
+  onSaveProBono,
+  onClose,
+}: {
+  machine: Machine;
+  isSharePending: boolean;
+  isProBonoPending: boolean;
+  onShareLocation: (share: boolean) => void;
+  onSaveProBono: (policy: ProBonoPolicy) => void;
+  onClose: () => void;
+}) {
+  // Three-way pro-bono state seeded from the record. Off = no policy; `any`
+  // serves everyone free; `direct` serves only the listed DIDs free.
+  type ProBonoMode = "off" | "any" | "direct";
+  const initialMode: ProBonoMode = machine.proBonoMode ?? "off";
+  const [mode, setMode] = useState<ProBonoMode>(initialMode);
+  const [didDraft, setDidDraft] = useState<string>((machine.proBonoDids ?? []).join("\n"));
+
+  const dids = parseDidList(didDraft);
+  const nextPolicy: ProBonoPolicy =
+    mode === "off" ? null : mode === "any" ? { mode: "any" } : { mode: "direct", dids };
+
+  // Has the owner changed the pro-bono policy versus what's on the record?
+  const initialDids = machine.proBonoDids ?? [];
+  const proBonoDirty =
+    mode !== initialMode ||
+    (mode === "direct" &&
+      (dids.length !== initialDids.length || dids.some((d, i) => d !== initialDids[i])));
+
+  return (
+    <>
+      <DialogHeader>Advanced settings — {machine.alias}</DialogHeader>
+      <DialogDescription>
+        Optional per-machine controls. Both are written to this machine's provider record; the agent
+        picks them up the next time it serves.
+      </DialogDescription>
+      <DialogBody>
+        <Flex direction="column" gap="2xl">
+          <Flex direction="column" gap="md">
+            <Switch
+              isSelected={machine.shareLocation === true}
+              isDisabled={isSharePending}
+              onChange={onShareLocation}
+            >
+              Share country
+            </Switch>
+            <SmallBody variant="secondary">
+              Publishes only a coarse, advisory country derived from this machine's IP — a VPN moves
+              it and it isn't verified. It's refreshed each time the machine serves; turning it off
+              removes the country on the next serve.
+            </SmallBody>
+            {machine.shareLocation && machine.region ? (
+              <LabelText variant="secondary">
+                Currently sharing: <InlineCode>{machine.region}</InlineCode>
+              </LabelText>
+            ) : null}
+          </Flex>
+
+          <Flex direction="column" gap="md">
+            <LabelText variant="secondary">Pro bono</LabelText>
+            <SegmentedControl
+              size="sm"
+              selectedKeys={new Set([mode])}
+              onSelectionChange={(keys) => {
+                const k = [...keys][0] as ProBonoMode | undefined;
+                if (k) setMode(k);
+              }}
+            >
+              <SegmentedControlItem id="off">Off</SegmentedControlItem>
+              <SegmentedControlItem id="any">Anyone</SegmentedControlItem>
+              <SegmentedControlItem id="direct">Specific people</SegmentedControlItem>
+            </SegmentedControl>
+            <SmallBody variant="secondary">
+              Pro-bono jobs are served free and unmetered, with no exchange cut. “Anyone” serves
+              every requester free; “Specific people” serves only the listed DIDs free — everyone
+              else is still a normal paid job. “Off” bills every job.
+            </SmallBody>
+            {mode === "direct" ? (
+              <TextArea
+                label="Requester DIDs served free"
+                value={didDraft}
+                onChange={setDidDraft}
+                placeholder={"did:plc:abc…\ndid:web:example.com"}
+                description="One per line (commas and spaces also work). Blanks are dropped on save."
+              />
+            ) : null}
+          </Flex>
+        </Flex>
+      </DialogBody>
+      <DialogFooter>
+        <Flex direction="row" gap="md">
+          <Button variant="secondary" size="sm" onPress={onClose}>
+            Close
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            isDisabled={isProBonoPending || !proBonoDirty}
+            onPress={() => onSaveProBono(nextPolicy)}
+          >
+            {isProBonoPending ? "Saving…" : "Save pro bono"}
           </Button>
         </Flex>
       </DialogFooter>

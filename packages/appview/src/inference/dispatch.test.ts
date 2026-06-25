@@ -8,6 +8,7 @@ import {
   ProviderPayoutsNotEligibleError,
   TargetProviderNotConnectedError,
   classifyDispatchError,
+  filterByAllowedDids,
   filterByPayoutsEligibility,
   openFromProvider,
   sealToProvider,
@@ -67,6 +68,36 @@ describe("filterByPayoutsEligibility", () => {
       selfLoopExempt: "did:plc:a",
     });
     expect(out.map((r) => r.did).sort()).toEqual(["did:plc:a", "did:plc:b"]);
+  });
+});
+
+describe("filterByAllowedDids", () => {
+  const rows = [{ did: "did:plc:a" }, { did: "did:plc:b" }, { did: "did:plc:c" }];
+
+  it("passes through verbatim when no allow-set", () => {
+    expect(filterByAllowedDids(rows, undefined)).toEqual(rows);
+  });
+
+  it("keeps only DIDs in the allow-set (pro-bono / friends / verified)", () => {
+    const out = filterByAllowedDids(rows, new Set(["did:plc:a", "did:plc:c"]));
+    expect(out.map((r) => r.did)).toEqual(["did:plc:a", "did:plc:c"]);
+  });
+
+  it("an empty allow-set filters everything out", () => {
+    expect(filterByAllowedDids(rows, new Set())).toEqual([]);
+  });
+
+  it("a `did:machineId` composite matches only that machine (pro-bono granularity)", () => {
+    // Same owner, two machines — a composite key must not widen to the other.
+    const m1 = { did: "did:plc:a", machineId: "rkeyA" };
+    const m2 = { did: "did:plc:a", machineId: "rkeyB" };
+    expect(filterByAllowedDids([m1, m2], new Set(["did:plc:a:rkeyA"]))).toEqual([m1]);
+  });
+
+  it("a bare DID still matches every machine of that owner (friends/verified)", () => {
+    const m1 = { did: "did:plc:a", machineId: "rkeyA" };
+    const m2 = { did: "did:plc:a", machineId: "rkeyB" };
+    expect(filterByAllowedDids([m1, m2], new Set(["did:plc:a"]))).toEqual([m1, m2]);
   });
 });
 

@@ -61,6 +61,13 @@ export interface DispatchInputs {
    *  after the model filter. Advisory routing (region is a provider
    *  self-claim); not applied to an explicit `targetProviderDid`. */
   country?: string;
+  /** Restrict provider selection to this allow-set, resolved by the console
+   *  (friends / verified / pro-bono) and forwarded here so the AppView core
+   *  only has to filter. Each entry is either a bare DID (owner-granular:
+   *  friends / verified) or a `${did}:${machineId}` composite (machine-granular:
+   *  pro-bono, per provider record). {@link filterByAllowedDids} matches either.
+   *  Ignored on an explicit `targetProviderDid`. Absent ≡ no constraint. */
+  allowedProviderDids?: Set<string>;
 }
 
 /** The slice of a provider's indexed profile the credit line needs.
@@ -272,6 +279,24 @@ export function filterByPayoutsEligibility<T extends { did: string }>(
   });
 }
 
+/** Pure filter for an allow-set (friends / verified / pro-bono). `undefined`
+ *  passes the list through verbatim; otherwise keeps only candidates whose DID
+ *  is in `allowedDids`. The console computes the set and forwards it. */
+export function filterByAllowedDids<T extends { did: string; machineId?: string }>(
+  candidates: T[],
+  allowedDids: Set<string> | undefined,
+): T[] {
+  if (!allowedDids) return candidates;
+  // An entry is either a bare DID — owner-granular (friends / verified) — or a
+  // `${did}:${machineId}` composite — machine-granular (pro-bono, where the
+  // election is per provider record). Match either, so a pro-bono allow-set
+  // never widens to an owner's other, billed machines.
+  return candidates.filter(
+    (c) =>
+      allowedDids.has(c.did) || (c.machineId != null && allowedDids.has(`${c.did}:${c.machineId}`)),
+  );
+}
+
 /** GET the advisor's provider registry. Runs on the module o11y runtime
  *  behind a span so the public async API stays a plain Promise. On a
  *  non-2xx response it rejects with `new Error(`advisor /providers
@@ -305,6 +330,10 @@ async function pickProvider(
   /** Optional ISO 3166-1 alpha-2 country filter (uppercased). Applied after
    *  the model filter; not applied to an explicit `targetDid`. */
   country: string | undefined,
+  /** Optional DID allow-set (friends / verified / pro-bono), computed by the
+   *  console and forwarded. Applied before the model filter; not applied to an
+   *  explicit `targetDid`. */
+  allowedDids: Set<string> | undefined,
   /** Providers already tried this dispatch (a prior attempt's `/jobs`
    *  failed because they'd flapped out). Excluded from re-selection so
    *  failover lands on a DIFFERENT machine. Never applied to an explicit
@@ -326,10 +355,14 @@ async function pickProvider(
   const own = ownMachineCandidates(attested, requesterDid, model, excludeDids ?? new Set());
   if (own.length > 0) return own[0]!;
 
-  const pool =
+  const excluded =
     excludeDids && excludeDids.size > 0
       ? attested.filter((p) => !excludeDids.has(p.did))
       : attested;
+  // Constrain to the forwarded allow-set (pro-bono / friends / verified) before
+  // the model filter, so "no provider for model X" still reads naturally within
+  // the constrained pool.
+  const pool = filterByAllowedDids(excluded, allowedDids);
 
   const fits = pool.filter(
     (p) => p.supportedModels.length === 0 || p.supportedModels.includes(model),
@@ -494,8 +527,10 @@ export async function* runDispatch(
         input.did,
         input.targetProviderDid,
         { payoutsEligibleDids: null, selfLoopExempt: null },
-        // No country filter on an explicit pin — the user chose that machine.
+        // No country / allow-set filter on an explicit pin — the user chose
+        // that machine.
         input.targetProviderDid ? undefined : input.country,
+        input.targetProviderDid ? undefined : input.allowedProviderDids,
         excludeDids,
       );
     } catch (e) {

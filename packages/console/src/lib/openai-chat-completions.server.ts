@@ -208,7 +208,9 @@ export function parseRequest(raw: OpenAiChatRequest): ParsedRequest | string {
   }
   const stream = typeof raw.stream === "boolean" ? raw.stream : false;
   let country: string | undefined;
-  if (raw.country !== undefined) {
+  // `null` (an explicit "no country") is treated the same as absent, so a
+  // client that sends `country: null` isn't rejected with a misleading 400.
+  if (raw.country !== undefined && raw.country !== null) {
     if (typeof raw.country !== "string" || !/^[A-Za-z]{2}$/.test(raw.country.trim())) {
       return "country must be a 2-letter ISO 3166-1 alpha-2 code";
     }

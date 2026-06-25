@@ -122,6 +122,15 @@ pub struct ProviderRecord {
     /// off (every job is metered and billed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proBono: Option<ProBonoPolicy>,
+    /// The owner's opt-in to publishing this machine's coarse country. Owner-
+    /// written INTENT, like `desiredModels`/`active`/`desiredTier`/`proBono`:
+    /// the agent reconciles toward it (when true it geolocates the public IP at
+    /// serve start and stamps `region`/`regionSource`/`regionObservedAt`) but
+    /// NEVER authors it, so it must PRESERVE whatever it finds on every
+    /// re-publish. Absent ≡ not sharing; the agent then omits the region
+    /// fields so opting out clears any previously-shared value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shareLocation: Option<bool>,
     /// True while the agent is still loading its inference engine. Set on
     /// the early "provisioning" publish at serve start so the machine
     /// appears on the console immediately; cleared (set false) on the
@@ -146,10 +155,11 @@ pub struct ProviderRecord {
     /// best-effort IP→country lookup at serve start, NOT a proof of location
     /// (a VPN moves it; verifiers MUST NOT trust it — same posture as
     /// `tier`). Set fresh on every serve when the owner has opted in via the
-    /// tray's location-sharing toggle (`~/.cocore/share-location`); `None`
-    /// when sharing is off, so a re-publish drops any previously-shared value
-    /// (opt-out clears the data). Unlike the console-authored switches it is
-    /// NOT carried through `preserve_console_fields` — the agent owns it.
+    /// console's `shareLocation` switch on this record; `None` when sharing is
+    /// off, so a re-publish drops any previously-shared value (opt-out clears
+    /// the data). Unlike the console-authored switches it is NOT carried
+    /// through `preserve_console_fields` — the agent re-derives it each serve
+    /// from `shareLocation`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
     /// How `region` was derived (e.g. `ip-geo`). Present iff `region` is.
