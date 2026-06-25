@@ -814,15 +814,17 @@ struct SecureModeWizardView: View {
     /// store error); a 200 leaves `chainHTTP` nil (clean poll, just no chain
     /// yet) and pulls status/detail from the JSON body when present.
     private func recordChainResponse(_ data: Data, http: Int) {
-        // Keep only the LAST poll's HTTP outcome: a transient non-200 blip
-        // mid-window must not stick and misclassify an otherwise-pending
-        // timeout as a store error — clear it the moment a poll returns 200.
+        // Reflect ONLY the last poll's signals so a transient blip never
+        // sticks: a mid-window non-200 (or its JSON `status:"error"` body)
+        // must not survive into a later clean-but-pending poll and misclassify
+        // the timeout as a store error. We therefore overwrite all three
+        // fields every call — including to nil when a 200 body is empty or
+        // unparseable (no status this poll), rather than early-returning and
+        // leaving a stale status behind.
         chainHTTP = http == 200 ? nil : http
-        guard
-            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return }
-        chainStatus = obj["status"] as? String
-        chainDetail = obj["detail"] as? String
+        let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        chainStatus = obj?["status"] as? String
+        chainDetail = obj?["detail"] as? String
     }
 
     /// A response carries a usable chain when it's a non-empty array, or an
