@@ -133,6 +133,24 @@ pub struct ProviderRecord {
     /// stale failure. See `build_engines`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engineFault: Option<EngineFault>,
+    /// Coarse, opt-in country of this machine, ISO 3166-1 alpha-2 (e.g.
+    /// "US"). AGENT-authored and ADVISORY: a self-asserted claim from a
+    /// best-effort IP→country lookup at serve start, NOT a proof of location
+    /// (a VPN moves it; verifiers MUST NOT trust it — same posture as
+    /// `tier`). Set fresh on every serve when the owner has opted in via the
+    /// tray's location-sharing toggle (`~/.cocore/share-location`); `None`
+    /// when sharing is off, so a re-publish drops any previously-shared value
+    /// (opt-out clears the data). Unlike the console-authored switches it is
+    /// NOT carried through `preserve_console_fields` — the agent owns it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// How `region` was derived (e.g. `ip-geo`). Present iff `region` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regionSource: Option<String>,
+    /// When `region` was observed this serve. Present iff `region` is; lets
+    /// consumers judge the freshness of the refresh-on-serve stamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regionObservedAt: Option<chrono::DateTime<chrono::Utc>>,
     pub createdAt: chrono::DateTime<chrono::Utc>,
 }
 

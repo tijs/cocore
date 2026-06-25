@@ -177,6 +177,22 @@
               }
             }
           },
+          "region": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 2,
+            "description": "Coarse, opt-in country of this machine as an ISO 3166-1 alpha-2 code (e.g. 'US'). AGENT-published and ADVISORY: a self-asserted claim derived from a best-effort public-IP geolocation at serve start, NOT a proof of location — a VPN or proxy moves it, and Apple exposes no signed-location primitive — so a verifier MUST treat it as unverified and MUST NOT gate anything security-relevant on it (same trust posture as `tier`). Present only when the machine's owner has opted into location sharing from the tray; the agent re-resolves it on every serve (refresh-on-serve) and OMITS it when sharing is off, so opting out drops the value on the next re-publish. Optional / additive; absent ≡ location not shared. A future revision may add finer fields (e.g. integer-rounded lat/lon) additively if needed."
+          },
+          "regionSource": {
+            "type": "string",
+            "maxLength": 32,
+            "description": "How `region` was derived, e.g. 'ip-geo' (public-IP geolocation). Surfaces the provenance — and thus the trust ceiling — of the coarse location to consumers. Present iff `region` is present. Optional / additive."
+          },
+          "regionObservedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When `region` was observed during the current serve (RFC3339, UTC). Because the agent re-stamps on every serve, this doubles as a freshness signal for the coarse location. Present iff `region` is present. Optional / additive."
+          },
           "createdAt": { "type": "string", "format": "datetime" }
         }
       }

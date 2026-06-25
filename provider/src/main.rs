@@ -673,6 +673,23 @@ fn clear_serving_paused() {
     }
 }
 
+/// `~/.cocore/share-location` — present while the owner has opted this
+/// machine into coarse location sharing (the tray's "Share this machine's
+/// country" toggle, which mirrors the `secure-mode-desired` marker: a file's
+/// existence IS the boolean). The agent reads it at serve start and, when
+/// present, stamps the provider record's `region` from a best-effort
+/// IP→country lookup; when absent it omits the field, so the next re-publish
+/// drops any value shared on a prior serve (opt-out clears the data). The
+/// agent never writes this file — it's purely owner intent set by the tray.
+fn share_location_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".cocore").join("share-location"))
+}
+
+/// Whether the owner has opted this machine into coarse location sharing.
+fn location_sharing_enabled() -> bool {
+    share_location_path().map(|p| p.exists()).unwrap_or(false)
+}
+
 /// Block until the owner's `active` switch on our provider record is true,
 /// polling every 20s. Returns immediately when active (or when we have no
 /// rkey to check). While stopped, writes the `serving-paused` marker so the
@@ -1040,6 +1057,12 @@ async fn cmd_serve(
             // real record below flips this to true once engines are up.
             serving: Some(false),
             engineFault: None,
+            // Coarse location is resolved (best-effort, network) and stamped
+            // only on the real record below — never worth delaying the
+            // "machine is visible" provisioning publish on an IP lookup.
+            region: None,
+            regionSource: None,
+            regionObservedAt: None,
             createdAt: chrono::Utc::now(),
         };
         match dedup_and_publish_provider(&pds, &attestation_pub_key, &provisioning_record).await {
@@ -1295,6 +1318,34 @@ async fn cmd_serve(
         Err(_) => (TrustLevel::SelfAttested, None),
     };
 
+    // Coarse, opt-in location (refresh-on-serve). Only when the owner flipped
+    // the tray's location-sharing toggle do we resolve this machine's country
+    // from its public IP and stamp it onto the record. ADVISORY/self-asserted
+    // (a VPN moves it) — published to the provider's OWN PDS, never trusted as
+    // proof. A failed lookup leaves it unset for this serve; sharing-off omits
+    // it entirely so the next re-publish drops any prior value.
+    let (region, region_source, region_observed_at) = if location_sharing_enabled() {
+        let http = reqwest::Client::new();
+        match cocore_provider::geoip::resolve_country(&http).await {
+            Some(cc) => {
+                tracing::info!(country = %cc, "location sharing on — stamping provider record region");
+                (
+                    Some(cc),
+                    Some(cocore_provider::geoip::REGION_SOURCE_IP_GEO.to_string()),
+                    Some(chrono::Utc::now()),
+                )
+            }
+            None => {
+                tracing::warn!(
+                    "location sharing on but country lookup failed — leaving region unset this serve"
+                );
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
     let provider_record = ProviderRecord {
         machineLabel: profile.machine_label,
         chip: profile.chip,
@@ -1342,6 +1393,12 @@ async fn cmd_serve(
         // clears any stale fault from a prior failed serve; `Some(..)`
         // tells the console this machine is up but only serving `stub`.
         engineFault: engine_fault,
+        // Coarse, opt-in location resolved above (refresh-on-serve). Absent
+        // when sharing is off or the lookup failed. Agent-authored, so it is
+        // deliberately NOT in `preserve_console_fields`.
+        region,
+        regionSource: region_source,
+        regionObservedAt: region_observed_at,
         createdAt: chrono::Utc::now(),
     };
     // Dedup-then-upsert: every machine has exactly one provider record
@@ -2456,6 +2513,9 @@ mod offline_marker_tests {
             provisioning: Some(false),
             serving: Some(true),
             engineFault: None,
+            region: None,
+            regionSource: None,
+            regionObservedAt: None,
             createdAt: chrono::Utc::now(),
         }
     }
