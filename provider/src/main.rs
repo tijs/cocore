@@ -2776,8 +2776,8 @@ fn is_socket_path_too_long(last_err: Option<&str>) -> bool {
 fn is_multimodal_weight_map_failure(last_err: Option<&str>) -> bool {
     let Some(e) = last_err else { return false };
     e.contains("language_model.")
-        || e.contains("Missing key")
-        || (e.contains("KeyError") && e.contains("model."))
+        || (e.contains("Missing key") && e.contains("language_model."))
+        || (e.contains("KeyError") && e.contains("language_model."))
 }
 
 /// Try to start one model's inference subprocess, retrying transient
