@@ -182,6 +182,28 @@
               }
             }
           },
+          "attestationFault": {
+            "type": "object",
+            "description": "Present when the agent could not build or publish its `dev.cocore.compute.attestation` record. The machine still appears and may still answer inference, but it will NOT produce verifiable receipts (a receipt strong-refs an attestation; without a published one there is nothing to reference), so it stays effectively self-attested even when the hardware would support more. Consumers SHOULD surface this to the operator as a fault with remediation guidance — without it, a publish failure is invisible and the machine merely looks idle. Absence means the attestation published cleanly (the agent clears this field on every successful (re-)attestation). Additive / optional — pre-2026-06 readers ignore it.",
+            "required": ["code", "message", "at"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "maxLength": 64,
+                "description": "Machine-readable fault class: `attestation-publish-failed` (the record could not be written to the PDS) or `attestation-build-failed` (the signed record could not be assembled)."
+              },
+              "message": {
+                "type": "string",
+                "maxLength": 600,
+                "description": "Human-readable, content-safe summary with remediation guidance. Never contains prompt or completion bytes."
+              },
+              "at": {
+                "type": "string",
+                "format": "datetime",
+                "description": "When the agent recorded the fault."
+              }
+            }
+          },
           "shareLocation": {
             "type": "boolean",
             "description": "The owner's opt-in to publishing this machine's coarse country. Owner-written INTENT, set from a management UI (the console's per-machine settings), like `desiredModels`/`desiredTier`/`active`: the agent reconciles toward it but NEVER authors it, so it must PRESERVE whatever it finds on every re-publish. When `true`, the agent resolves this machine's country from a best-effort public-IP geolocation at serve start and stamps `region`/`regionSource`/`regionObservedAt`; when absent/`false` it omits those fields, so turning sharing off drops any previously-shared value on the next re-publish (opt-out clears the data). Absent ≡ not sharing. Optional / additive; pre-2026-06 agents ignore it."
