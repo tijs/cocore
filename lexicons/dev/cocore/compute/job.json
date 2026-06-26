@@ -129,6 +129,11 @@
             "type": "string",
             "knownValues": ["auto", "none", "required"],
             "description": "Optional tool choice strategy. 'auto' (default) lets the model decide whether to call a tool; 'none' disables tool calling; 'required' forces at least one tool call. Additive — absent means 'auto'."
+          },
+          "toolChoiceFunction": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "When toolChoice is 'required', optionally force the model to call this specific function (by name). Maps to the OpenAI tool_choice object form { type: 'function', function: { name } }. Additive — absent means any tool may be called."
           }
         }
       }

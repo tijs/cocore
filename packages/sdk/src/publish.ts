@@ -160,6 +160,8 @@ export interface PublishJobInputs {
   }[];
   /** How the model should choose tools. Absent ≡ "auto". */
   toolChoice?: "auto" | "none" | "required";
+  /** When toolChoice is "required", optionally force a specific function. */
+  toolChoiceFunction?: string;
 }
 
 /** Build + publish a `dev.cocore.compute.paymentAuthorization` to the
@@ -217,6 +219,7 @@ export async function publishJob(args: {
     ...(args.inputs.outputSchema ? { outputSchema: args.inputs.outputSchema } : {}),
     ...(args.inputs.tools ? { tools: args.inputs.tools } : {}),
     ...(args.inputs.toolChoice ? { toolChoice: args.inputs.toolChoice } : {}),
+    ...(args.inputs.toolChoiceFunction ? { toolChoiceFunction: args.inputs.toolChoiceFunction } : {}),
   };
   const out = await args.transport.publish({
     repo: args.requesterDid,
@@ -263,6 +266,8 @@ export interface SubmitJobInputs {
   }[];
   /** How the model should choose tools. Absent ≡ "auto". */
   toolChoice?: "auto" | "none" | "required";
+  /** When toolChoice is "required", optionally force a specific function. */
+  toolChoiceFunction?: string;
 }
 
 export interface SubmittedJob {
@@ -306,6 +311,7 @@ export async function submitJob(args: {
       ...(args.inputs.outputSchema ? { outputSchema: args.inputs.outputSchema } : {}),
       ...(args.inputs.tools ? { tools: args.inputs.tools } : {}),
       ...(args.inputs.toolChoice ? { toolChoice: args.inputs.toolChoice } : {}),
+      ...(args.inputs.toolChoiceFunction ? { toolChoiceFunction: args.inputs.toolChoiceFunction } : {}),
     },
   });
   return { authorization, job };

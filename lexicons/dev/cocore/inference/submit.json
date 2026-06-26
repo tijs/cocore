@@ -57,6 +57,11 @@
               "type": "string",
               "knownValues": ["auto", "none", "required"],
               "description": "Optional tool choice strategy. 'auto' (default), 'none', or 'required'. Additive."
+            },
+            "toolChoiceFunction": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "When toolChoice is 'required', force the model to call this specific function. Maps to OpenAI tool_choice object form. Additive."
             }
           }
         }

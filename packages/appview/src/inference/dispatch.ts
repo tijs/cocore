@@ -82,6 +82,8 @@ export interface DispatchInputs {
   }>;
   /** Optional tool choice strategy. */
   toolChoice?: "auto" | "none" | "required";
+  /** When toolChoice is "required", optionally force a specific function. */
+  toolChoiceFunction?: string;
 }
 
 /** The slice of a provider's indexed profile the credit line needs.
@@ -481,6 +483,7 @@ export async function* runDispatch(
         ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
         ...(input.tools ? { tools: input.tools } : {}),
         ...(input.toolChoice ? { toolChoice: input.toolChoice } : {}),
+        ...(input.toolChoiceFunction ? { toolChoiceFunction: input.toolChoiceFunction } : {}),
       },
     });
   } catch (e) {
@@ -574,6 +577,7 @@ export async function* runDispatch(
         ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
         ...(input.tools ? { tools: input.tools } : {}),
         ...(input.toolChoice ? { toolChoice: input.toolChoice } : {}),
+        ...(input.toolChoiceFunction ? { toolChoiceFunction: input.toolChoiceFunction } : {}),
         sessionId,
         targetProviderDid: candidate.did,
         // Pin the exact machine we sealed the prompt to, the only one that can unseal.

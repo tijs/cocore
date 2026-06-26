@@ -99,6 +99,8 @@ export interface DispatchInputs {
   }>;
   /** Optional tool choice strategy. */
   toolChoice?: "auto" | "none" | "required";
+  /** When toolChoice is "required", optionally force a specific function. */
+  toolChoiceFunction?: string;
 }
 
 /** Distinct error types so the route layer can translate them into
@@ -639,6 +641,7 @@ export async function* runDispatch(input: DispatchInputs): AsyncGenerator<Dispat
         ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
         ...(input.tools ? { tools: input.tools } : {}),
         ...(input.toolChoice ? { toolChoice: input.toolChoice } : {}),
+        ...(input.toolChoiceFunction ? { toolChoiceFunction: input.toolChoiceFunction } : {}),
       },
     });
   } catch (e) {
@@ -757,6 +760,7 @@ export async function* runDispatch(input: DispatchInputs): AsyncGenerator<Dispat
         ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
         ...(input.tools ? { tools: input.tools } : {}),
         ...(input.toolChoice ? { toolChoice: input.toolChoice } : {}),
+        ...(input.toolChoiceFunction ? { toolChoiceFunction: input.toolChoiceFunction } : {}),
         sessionId,
         targetProviderDid: candidate.did,
         // Pin the exact machine we sealed the prompt to, the only one that can unseal.

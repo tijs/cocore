@@ -201,6 +201,7 @@ export async function handleChatCompletions(request: Request): Promise<Response>
     ...(parsed.outputSchema ? { outputSchema: parsed.outputSchema } : {}),
     ...(parsed.tools ? { tools: parsed.tools } : {}),
     ...(parsed.toolChoice ? { toolChoice: parsed.toolChoice } : {}),
+    ...(parsed.toolChoiceFunction ? { toolChoiceFunction: parsed.toolChoiceFunction } : {}),
   };
 
   if (parsed.stream) {
@@ -276,6 +277,7 @@ export async function handlePrivateChatCompletions(request: Request): Promise<Re
     ...(parsed.outputSchema ? { outputSchema: parsed.outputSchema } : {}),
     ...(parsed.tools ? { tools: parsed.tools } : {}),
     ...(parsed.toolChoice ? { toolChoice: parsed.toolChoice } : {}),
+    ...(parsed.toolChoiceFunction ? { toolChoiceFunction: parsed.toolChoiceFunction } : {}),
   };
 
   if (parsed.stream) {
@@ -365,6 +367,7 @@ export async function handleVerifiedChatCompletions(request: Request): Promise<R
     ...(parsed.outputSchema ? { outputSchema: parsed.outputSchema } : {}),
     ...(parsed.tools ? { tools: parsed.tools } : {}),
     ...(parsed.toolChoice ? { toolChoice: parsed.toolChoice } : {}),
+    ...(parsed.toolChoiceFunction ? { toolChoiceFunction: parsed.toolChoiceFunction } : {}),
   };
 
   if (parsed.stream) {

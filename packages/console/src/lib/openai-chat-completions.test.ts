@@ -498,6 +498,44 @@ describe("parseRequest with tools", () => {
     assert.equal(parsed.toolChoice, "auto");
   });
 
+  test("parses tool_choice object form into required + toolChoiceFunction", () => {
+    const parsed = parseRequest({
+      model: "stub",
+      messages: [{ role: "user", content: "What's the weather?" }],
+      tools: [
+        {
+          type: "function",
+          function: { name: "get_weather", description: "Get weather" },
+        },
+      ],
+      tool_choice: { type: "function", function: { name: "get_weather" } },
+    });
+    assert.notEqual(typeof parsed, "string");
+    if (typeof parsed === "string") return;
+    assert.equal(parsed.toolChoice, "required");
+    assert.equal(parsed.toolChoiceFunction, "get_weather");
+  });
+
+  test("rejects tool_choice object with wrong type", () => {
+    const parsed = parseRequest({
+      model: "stub",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: { type: "code", function: { name: "foo" } },
+    });
+    assert.equal(typeof parsed, "string");
+    assert.match(parsed as string, /type must be 'function'/);
+  });
+
+  test("rejects tool_choice object missing function.name", () => {
+    const parsed = parseRequest({
+      model: "stub",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: { type: "function", function: {} },
+    });
+    assert.equal(typeof parsed, "string");
+    assert.match(parsed as string, /function\.name/);
+  });
+
   test("passes through tool_calls and tool_call_id on messages", () => {
     const parsed = parseRequest({
       model: "stub",

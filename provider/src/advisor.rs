@@ -969,7 +969,20 @@ async fn handle_inference_request_inner(
         top_p: None,
         guided_json: req.output_schema.clone(),
         tools: req.tools.clone(),
-        tool_choice: req.tool_choice.clone(),
+        tool_choice: match (&req.tool_choice, &req.tool_choice_function) {
+            // When tool_choice is "required" and a function name is specified,
+            // reconstruct the OpenAI object form { type: "function", function: { name } }.
+            (Some(choice), Some(func_name))
+                if choice.as_str() == Some("required") =>
+            {
+                Some(serde_json::json!({
+                    "type": "function",
+                    "function": { "name": func_name }
+                }))
+            }
+            // Otherwise pass through tool_choice as-is.
+            _ => req.tool_choice.clone(),
+        },
     };
 
     // Look up the engine for the requested model. A miss means the
@@ -2057,6 +2070,7 @@ mod tests {
             output_schema: None,
             tools: None,
             tool_choice: None,
+            tool_choice_function: None,
         };
         let replies = handle_inference_request(req, &cx).await;
         let chunks: Vec<&InferenceChunk> = replies
@@ -2114,6 +2128,7 @@ mod tests {
             output_schema: None,
             tools: None,
             tool_choice: None,
+            tool_choice_function: None,
         };
         let replies = handle_inference_request(req, &cx).await;
         assert!(replies.is_empty());
@@ -2154,6 +2169,7 @@ mod tests {
             output_schema: None,
             tools: None,
             tool_choice: None,
+            tool_choice_function: None,
         };
         let replies = handle_inference_request(req, &cx).await;
         match replies.last() {

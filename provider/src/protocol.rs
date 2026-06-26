@@ -263,6 +263,12 @@ pub struct InferenceRequest {
     /// OpenAI-compatible `tool_choice`. Additive — absent means "auto".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
+    /// When tool_choice is "required", optionally force a specific
+    /// function by name. The provider reconstructs the OpenAI object
+    /// form `{ type: "function", function: { name } }` from this.
+    /// Additive — absent means any tool may be called.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice_function: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

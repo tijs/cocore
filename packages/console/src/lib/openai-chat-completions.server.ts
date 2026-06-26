@@ -99,6 +99,8 @@ export interface ParsedRequest {
   }>;
   /** Optional tool choice strategy. */
   toolChoice?: "auto" | "none" | "required";
+  /** When toolChoice is "required", optionally force a specific function. */
+  toolChoiceFunction?: string;
 }
 
 const DEFAULT_MAX_TOKENS = 1024;
@@ -305,16 +307,30 @@ export function parseRequest(raw: OpenAiChatRequest): ParsedRequest | string {
   }
   // Parse tool_choice.
   let toolChoice: ParsedRequest["toolChoice"];
+  let toolChoiceFunction: ParsedRequest["toolChoiceFunction"];
   if (raw.tool_choice !== undefined) {
     if (typeof raw.tool_choice === "string") {
       if (!["auto", "none", "required"].includes(raw.tool_choice)) {
         return "tool_choice must be 'auto', 'none', or 'required'";
       }
       toolChoice = raw.tool_choice as ParsedRequest["toolChoice"];
+    } else if (typeof raw.tool_choice === "object" && raw.tool_choice !== null) {
+      // Object form { type: "function", function: { name } } — force a
+      // specific function. We convert to toolChoice: "required" +
+      // toolChoiceFunction: name for the lexicon (which only supports
+      // string toolChoice with knownValues).
+      const tc = raw.tool_choice as Record<string, unknown>;
+      if (tc.type !== "function") {
+        return "tool_choice object type must be 'function'";
+      }
+      const fn = tc.function as Record<string, unknown> | undefined;
+      if (!fn || typeof fn.name !== "string") {
+        return "tool_choice object must have function.name";
+      }
+      toolChoice = "required";
+      toolChoiceFunction = fn.name;
     } else {
-      // Object form { type: "function", function: { name } } — not
-      // supported yet via the lexicon's knownValues, so reject.
-      return "tool_choice object form is not yet supported; use 'auto', 'none', or 'required'";
+      return "tool_choice must be a string or an object";
     }
   }
   return {
@@ -326,6 +342,7 @@ export function parseRequest(raw: OpenAiChatRequest): ParsedRequest | string {
     ...(outputSchema ? { outputSchema } : {}),
     ...(tools ? { tools } : {}),
     ...(toolChoice ? { toolChoice } : {}),
+    ...(toolChoiceFunction ? { toolChoiceFunction } : {}),
   };
 }
 
