@@ -771,3 +771,87 @@ describe("streamingResponse with tool calls", () => {
     assert.ok(toolCallChunks.length > 0, "at least one tool_call chunk");
   });
 });
+
+describe("parseRequest with response_format", () => {
+  test("parses response_format json_schema into outputSchema", () => {
+    const parsed = parseRequest({
+      model: "stub",
+      messages: [{ role: "user", content: "List 3 fruits as JSON." }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "fruit_list",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: {
+              fruits: { type: "array", items: { type: "string" } },
+            },
+            required: ["fruits"],
+          },
+        },
+      },
+    });
+    assert.notEqual(typeof parsed, "string");
+    if (typeof parsed === "string") return;
+    assert.ok(parsed.outputSchema, "outputSchema should be present");
+    assert.equal(parsed.outputSchema!.name, "fruit_list");
+    assert.equal(parsed.outputSchema!.strict, true);
+    assert.ok(parsed.outputSchema!.schema.properties, "schema should have properties");
+  });
+
+  test("parses response_format without strict field", () => {
+    const parsed = parseRequest({
+      model: "stub",
+      messages: [{ role: "user", content: "Return JSON." }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "simple",
+          schema: { type: "object" },
+        },
+      },
+    });
+    assert.notEqual(typeof parsed, "string");
+    if (typeof parsed === "string") return;
+    assert.ok(parsed.outputSchema);
+    assert.equal(parsed.outputSchema!.name, "simple");
+    assert.equal(parsed.outputSchema!.strict, undefined);
+  });
+
+  test("rejects response_format with wrong type", () => {
+    const parsed = parseRequest({
+      model: "stub",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: { type: "text" },
+    });
+    assert.equal(typeof parsed, "string");
+    assert.match(parsed as string, /json_schema/);
+  });
+
+  test("rejects response_format missing json_schema.name", () => {
+    const parsed = parseRequest({
+      model: "stub",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: { schema: { type: "object" } },
+      },
+    });
+    assert.equal(typeof parsed, "string");
+    assert.match(parsed as string, /name/);
+  });
+
+  test("rejects response_format missing json_schema.schema", () => {
+    const parsed = parseRequest({
+      model: "stub",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: { name: "test" },
+      },
+    });
+    assert.equal(typeof parsed, "string");
+    assert.match(parsed as string, /schema/);
+  });
+});
