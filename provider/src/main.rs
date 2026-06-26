@@ -2210,6 +2210,34 @@ fn build_engines(
             models: all_unserved,
             at: chrono::Utc::now(),
         }
+    } else if !failed.is_empty() && is_socket_path_too_long(last_err.as_deref()) {
+        // The engine couldn't open its local Unix-domain socket because the
+        // assembled path overflowed the OS `sun_path` limit (a long $HOME +
+        // a long model id). The generic "not in MLX format" message below
+        // would be actively wrong — the weights are fine; the socket path is
+        // the problem. Current builds budget the path under the limit
+        // (engines/subprocess.rs `socket_filename`), so this only bites
+        // stragglers on an older binary.
+        tracing::warn!(
+            models = ?failed,
+            last_error = %last_err.as_deref().unwrap_or("(none captured)"),
+            "engine socket path exceeded the OS limit; serving stub only"
+        );
+        EngineFault {
+            code: "engine-socket-path".to_string(),
+            message: format!(
+                "The inference engine for [{}] couldn't open its local socket: the \
+                 socket path under your home directory is too long for the operating \
+                 system (the `sun_path` limit). The weights are fine — this is a path \
+                 length problem, not a model problem. The machine is online but only \
+                 serving the no-op `stub` engine. Fix: update to the latest co/core \
+                 build (which shortens the socket path) — \
+                 `curl -fsSL https://cocore.dev/agent | sh` — then start serving again.",
+                failed.join(", "),
+            ),
+            models: all_unserved,
+            at: chrono::Utc::now(),
+        }
     } else if !failed.is_empty() && is_vision_config_failure(last_err.as_deref()) {
         // A vision/multimodal model whose config the multimodal runtime
         // (mlx_vlm) couldn't parse — the "not in MLX format" message below would
@@ -2233,6 +2261,35 @@ fn build_engines(
                  no-op `stub` engine. Fix: pick a standard MLX vision model — e.g. \
                  `mlx-community/Qwen2.5-VL-7B-Instruct-4bit` or \
                  `mlx-community/Qwen2.5-VL-3B-Instruct-4bit` — then start serving again.",
+                failed.join(", "),
+            ),
+            models: all_unserved,
+            at: chrono::Utc::now(),
+        }
+    } else if !failed.is_empty() && is_multimodal_weight_map_failure(last_err.as_deref()) {
+        // A merged / multimodal checkpoint whose weights are nested under
+        // `language_model.*` (e.g. some Gemma multimodal exports) that the
+        // runtime can't key-map onto its module tree. Distinct from the
+        // vision_config failure above: there the image config was rejected;
+        // here the weight NAMES don't line up. Either way "not in MLX format"
+        // would be wrong — the weights ARE MLX, just laid out for a
+        // multimodal model the text runtime can't load.
+        tracing::warn!(
+            models = ?failed,
+            last_error = %last_err.as_deref().unwrap_or("(none captured)"),
+            "multimodal checkpoint weights could not be mapped; serving stub only"
+        );
+        EngineFault {
+            code: "model-multimodal-incompatible".to_string(),
+            message: format!(
+                "The model(s) [{}] couldn't load: this looks like a merged or \
+                 multimodal checkpoint whose weights are nested (e.g. under \
+                 `language_model.*`), which the runtime can't map onto a text model. \
+                 The weights are MLX, but they're laid out for a multimodal model that \
+                 can't be served as plain text. The machine is online but only serving \
+                 the no-op `stub` engine. Fix: pick a standard MLX text model — e.g. \
+                 `mlx-community/Qwen2.5-7B-Instruct-4bit` — or a standard MLX vision \
+                 model, then start serving again.",
                 failed.join(", "),
             ),
             models: all_unserved,
@@ -2325,6 +2382,32 @@ fn is_vision_config_failure(last_err: Option<&str>) -> bool {
     // the config key it failed to build. Either is a strong, content-safe
     // signal (the ring buffer carries only library tracebacks at startup).
     e.contains("VisionConfig") || e.contains("vision_config")
+}
+
+/// Whether an engine-start error is the "the local socket path is too long"
+/// failure — the OS rejecting an AF_UNIX `bind()` whose path exceeds the
+/// `sun_path` limit. Current builds budget the path so this can't happen
+/// (engines/subprocess.rs `socket_filename`), but an older binary on a long
+/// $HOME still hits it; classifying it gives a precise message instead of the
+/// wrong "not in MLX format" one. Content-safe (OS error text only).
+fn is_socket_path_too_long(last_err: Option<&str>) -> bool {
+    let Some(e) = last_err else { return false };
+    e.contains("ENAMETOOLONG")
+        || e.contains("path too long")
+        || (e.contains("AF_UNIX") && e.contains("too long"))
+}
+
+/// Whether an engine-start error is the "multimodal checkpoint weights can't be
+/// mapped" failure — a merged/multimodal export whose tensors are nested under
+/// `language_model.*` (or similar) that the text runtime can't key onto its
+/// module tree. Distinct from [`is_vision_config_failure`]: here the weight
+/// NAMES don't line up rather than the image config being rejected.
+/// Content-safe (library traceback text only).
+fn is_multimodal_weight_map_failure(last_err: Option<&str>) -> bool {
+    let Some(e) = last_err else { return false };
+    e.contains("language_model.")
+        || e.contains("Missing key")
+        || (e.contains("KeyError") && e.contains("model."))
 }
 
 /// Try to start one model's inference subprocess, retrying transient
@@ -2501,6 +2584,44 @@ mod vision_fault_tests {
             "ModuleNotFoundError: vllm_mlx"
         )));
         assert!(!is_vision_config_failure(None));
+    }
+
+    use super::{is_multimodal_weight_map_failure, is_socket_path_too_long};
+
+    #[test]
+    fn detects_socket_path_too_long() {
+        assert!(is_socket_path_too_long(Some(
+            "OSError: AF_UNIX path too long"
+        )));
+        assert!(is_socket_path_too_long(Some(
+            "[stderr] bind: [Errno 63] ENAMETOOLONG"
+        )));
+        assert!(!is_socket_path_too_long(Some("KeyError: 'vision_config'")));
+        assert!(!is_socket_path_too_long(None));
+    }
+
+    #[test]
+    fn detects_multimodal_weight_map_failure() {
+        assert!(is_multimodal_weight_map_failure(Some(
+            "ValueError: could not map weights: language_model.layers.0.self_attn.q_proj"
+        )));
+        assert!(is_multimodal_weight_map_failure(Some(
+            "Missing key in checkpoint"
+        )));
+        assert!(!is_multimodal_weight_map_failure(Some(
+            "OSError: out of memory loading weights"
+        )));
+        assert!(!is_multimodal_weight_map_failure(None));
+    }
+
+    /// A vision_config failure must be classified by the vision branch, not
+    /// the multimodal-weight-map one — the fault chain checks vision first,
+    /// and these stderrs don't overlap.
+    #[test]
+    fn vision_config_not_misread_as_weight_map() {
+        let err = "TypeError: VisionConfig.__init__() missing 6 required positional arguments";
+        assert!(is_vision_config_failure(Some(err)));
+        assert!(!is_multimodal_weight_map_failure(Some(err)));
     }
 }
 
