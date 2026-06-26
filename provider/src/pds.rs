@@ -150,6 +150,15 @@ pub struct ProviderRecord {
     /// stale failure. See `build_engines`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engineFault: Option<EngineFault>,
+    /// Set when `serve` could not build or publish this machine's
+    /// `dev.cocore.compute.attestation` record. Without a published
+    /// attestation the machine cannot produce verifiable receipts (every
+    /// receipt strong-refs one), so it stays effectively self-attested and
+    /// silently completes no billable work. The agent clears this (writes
+    /// `None`) on every successful (re-)attestation, so its presence reflects
+    /// the current state, not a stale failure. See `build_and_publish_attestation`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestationFault: Option<AttestationFault>,
     /// Coarse, opt-in country of this machine, ISO 3166-1 alpha-2 (e.g.
     /// "US"). AGENT-authored and ADVISORY: a self-asserted claim from a
     /// best-effort IP→country lookup at serve start, NOT a proof of location
@@ -229,6 +238,25 @@ pub struct EngineFault {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A content-safe description of why the attestation could not be built or
+/// published. Published on the provider record (mirroring [`EngineFault`]) so
+/// the console can show the operator that receipts are disabled and why,
+/// instead of a machine that looks healthy but completes no billable jobs.
+/// Cleared on every successful (re-)attestation. No prompt/completion bytes
+/// ever reach it (attestation runs before any job).
+#[allow(non_snake_case)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttestationFault {
+    /// Machine-readable fault class: `attestation-publish-failed` (the record
+    /// could not be written to the PDS) or `attestation-build-failed` (the
+    /// signed record could not be assembled).
+    pub code: String,
+    /// Human-readable summary with remediation guidance.
+    pub message: String,
+    /// When the agent recorded the fault.
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
 #[allow(non_snake_case)]
 #[derive(Debug, Serialize, Clone)]
 pub struct ModelPrice {
@@ -284,6 +312,7 @@ struct ListRecordsResponse {
 /// HTTP client over the console's `/api/pds/createRecord`
 /// endpoint. One instance per agent lifetime; the API key is
 /// captured at construction and never rotated.
+#[derive(Clone)]
 pub struct PdsClient {
     did: String,
     api_base: String,

@@ -3,12 +3,17 @@ use clap::{Parser, Subcommand};
 use cocore_provider::{
     advisor::AdvisorClient,
     attestation, oauth,
-    pds::{EngineFault, ModelPrice, PdsClient, ProBonoPolicy, ProviderRecord, TrustLevel},
+    pds::{
+        AttestationFault, EngineFault, ModelPrice, PdsClient, ProBonoPolicy, ProviderRecord,
+        TrustLevel,
+    },
     pricing,
     protocol::Register,
     receipt::StrongRef,
     secure_enclave, security, system_profile,
 };
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 mod doctor;
 mod models_cli;
@@ -980,7 +985,10 @@ async fn cmd_serve(
     // against that key, so leaving it empty (as the M1 walking
     // skeleton did) makes the very first AttestationChallenge round
     // close the connection with `attestation-bad-signature`.
-    let signer = secure_enclave::load_or_create_identity()?;
+    // Held as an `Arc` so the background re-attestation task can share the same
+    // signing identity as the serve loop (the trait is `Send + Sync`).
+    let signer: Arc<dyn secure_enclave::SigningIdentity> =
+        secure_enclave::load_or_create_identity()?.into();
 
     // X25519 encryption keypair for sealed prompts. M2 will persist
     // this alongside the session; for now we generate fresh on every
@@ -1057,6 +1065,7 @@ async fn cmd_serve(
             // real record below flips this to true once engines are up.
             serving: Some(false),
             engineFault: None,
+            attestationFault: None,
             // Coarse location is resolved (best-effort, network) and stamped
             // only on the real record below — never worth delaying the
             // "machine is visible" provisioning publish on an IP lookup.
@@ -1276,62 +1285,24 @@ async fn cmd_serve(
     // bound to this machine's signing key; `tier` is the attestation's own
     // evidence-gated computation, which stays best-effort until the measured
     // native engine serves under a hardened-attested posture.
-    let mut attestation_inputs =
-        attestation::build_stub_inputs(&session.did, &enc.public_key_b64());
-    // MDA option-B (the live macOS hardware-attested path). Two ways in:
-    //   * EXPLICIT: an operator pinned COCORE_MDA_* env (chain path/url, request
-    //     url + serial + udid) — honored verbatim.
-    //   * AUTO (production default): no explicit env — the agent derives its own
-    //     serial + Hardware UUID + the coordinator URLs from the session console
-    //     base, and only when this Mac is MDM-enrolled loads the captured chain,
-    //     requesting a fresh key-bound DeviceInformation attestation
-    //     (DeviceAttestationNonce = sha256(pubkey)) if none exists yet. The chain
-    //     binds to the signing key via the leaf freshness OID; `build` re-verifies
-    //     + only embeds it if it binds. All fail-soft; Apple-rate-limited so we
-    //     only request when we don't already hold a bound chain.
-    let pubkey_b64 = signer.public_key_b64();
-    cocore_provider::mda_loader::request_attestation(&pubkey_b64);
-    let mut mda_cert_chain = cocore_provider::mda_loader::try_load();
-    if mda_cert_chain.is_empty() && !cocore_provider::mda_loader::any_explicit_mda_env() {
-        mda_cert_chain = cocore_provider::mda_loader::acquire_auto(
-            &session.api_base,
-            &session.api_key,
-            &pubkey_b64,
-        );
-    }
-    attestation_inputs.mda_cert_chain = mda_cert_chain;
-    // App Attest evidence — bound to this signing key; `build` re-verifies + only
-    // embeds it if it binds. NB: App Attest is iOS-only (non-functional on macOS,
-    // DCAppAttestService.isSupported=false); this stays a no-op on the Mac and is
-    // retained for a future iOS companion. macOS binds via the MDA chain above.
-    attestation_inputs.app_attest =
-        cocore_provider::mda_loader::load_appattest(&signer.public_key_b64());
-    attestation_inputs.in_process_backend = engines.entries().iter().any(|(_, e)| e.in_process());
-    attestation_inputs.metallib_hash = engines
-        .entries()
-        .iter()
-        .find_map(|(_, e)| e.metallib_hash());
-    attestation_inputs.engine_lib_hash = engines
-        .entries()
-        .iter()
-        .find_map(|(_, e)| e.engine_lib_hash());
-    let built_attestation = attestation::build(attestation_inputs, &*signer);
-    let (achieved_trust_level, achieved_tier) = match &built_attestation {
-        Ok(rec) => (
-            // Derive from what the attestation ACTUALLY embedded, not from what
-            // was loaded: `build` drops any MDA chain / App Attest object that
-            // doesn't verify Apple-rooted AND bind to our signing key. Either a
-            // bound MDA chain or bound App Attest earns hardware-attested.
-            if !rec.mdaCertChain.is_empty() || rec.appAttest.is_some() {
-                TrustLevel::HardwareAttested
-            } else {
-                TrustLevel::SelfAttested
-            },
-            Some(rec.tier.clone()),
-        ),
-        // Build failed → fall back to the honest floor; the publish below logs it.
-        Err(_) => (TrustLevel::SelfAttested, None),
-    };
+    // Snapshot the engine-derived attestation inputs once: the loaded engine
+    // set is fixed for this serve, so the refresh task can carry this instead
+    // of borrowing the (later-moved) engine registry.
+    let engine_facts = EngineAttestationFacts::from_registry(&engines);
+    // Build + publish the attestation now. This is the SAME path the refresh
+    // task below re-runs every ~23h (attestations expire after 24h); doing it
+    // here gives the provider record its ACHIEVED trustLevel/tier and the
+    // Register frame its attestation URI / cdHash / tier.
+    let boot_attestation = build_and_publish_attestation(
+        &session,
+        &*signer,
+        &enc.public_key_b64(),
+        &engine_facts,
+        &pds,
+    )
+    .await;
+    let achieved_trust_level = boot_attestation.trust_level;
+    let achieved_tier = boot_attestation.tier.clone();
 
     // Coarse, opt-in location (refresh-on-serve). Only when the owner opted in
     // via the console's `shareLocation` switch (read off our record above) do we
@@ -1415,6 +1386,10 @@ async fn cmd_serve(
         // clears any stale fault from a prior failed serve; `Some(..)`
         // tells the console this machine is up but only serving `stub`.
         engineFault: engine_fault,
+        // Surface an attestation build/publish failure so the console shows the
+        // machine can't produce receipts (and why) instead of a healthy-looking
+        // idle machine. `None` clears any stale fault on a clean (re-)attestation.
+        attestationFault: boot_attestation.fault.clone(),
         // Coarse, opt-in location resolved above (refresh-on-serve). Absent
         // when sharing is off or the lookup failed. Agent-authored, so it is
         // deliberately NOT in `preserve_console_fields`.
@@ -1455,38 +1430,21 @@ async fn cmd_serve(
         }
     };
 
-    // Publish the attestation we built above (its evidence already set the
-    // provider record's trustLevel/tier). On PDS publish failure (network,
-    // auth, schema) continue with no attestation: the InferenceRequest stub
-    // still answers; receipts just won't be published. Echo the measured
-    // identity + tier on the Register frame so the advisor can compute
-    // confidential eligibility (accelerator only — the PDS attestation stays
-    // authoritative for client verification).
-    let mut register_cd_hash: Option<String> = None;
-    let mut register_tier: Option<String> = None;
-    let attestation_ref: Option<StrongRef> = match built_attestation {
-        Ok(record) => {
-            register_cd_hash = record.cdHash.clone();
-            register_tier = Some(record.tier.clone());
-            match pds.publish_attestation(&record).await {
-                Ok(published) => {
-                    tracing::info!(uri = %published.uri, "published attestation");
-                    Some(StrongRef {
-                        uri: published.uri,
-                        cid: published.cid,
-                    })
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to publish attestation; receipts disabled");
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to build attestation; receipts disabled");
-            None
-        }
-    };
+    // The attestation was built + published by `build_and_publish_attestation`
+    // above (its evidence already set the provider record's trustLevel/tier).
+    // On build/publish failure the strong-ref is `None`: the InferenceRequest
+    // stub still answers, receipts just aren't published, and the
+    // `attestationFault` on the record above tells the console why. Echo the
+    // measured identity + tier on the Register frame so the advisor can compute
+    // confidential eligibility (the PDS attestation stays authoritative for
+    // client verification).
+    let register_cd_hash = boot_attestation.cd_hash.clone();
+    let register_tier = boot_attestation.register_tier.clone();
+    // The live, refreshable attestation cell. The refresh task swaps a fresh
+    // strong-ref in here ~1h before the current one expires; the receipt path
+    // reads it per job, so receipts always reference the current attestation.
+    let attestation: Arc<RwLock<Option<StrongRef>>> =
+        Arc::new(RwLock::new(boot_attestation.strong_ref.clone()));
 
     // The Register frame echoes the same telemetry the PDS record
     // carries so the advisor's /providers list matches what's on
@@ -1504,7 +1462,8 @@ async fn cmd_serve(
         supported_models: provider_record.supportedModels.clone(),
         encryption_pub_key: enc.public_key_b64(),
         attestation_pub_key: signer.public_key_b64(),
-        attestation_uri: attestation_ref
+        attestation_uri: boot_attestation
+            .strong_ref
             .as_ref()
             .map(|r| r.uri.clone())
             .unwrap_or_default(),
@@ -1527,7 +1486,62 @@ async fn cmd_serve(
         #[cfg(not(all(target_os = "macos", feature = "apns")))]
         apns_device_token: None,
     };
-    let attestation = attestation_ref.as_ref();
+
+    // Periodic re-attestation. Attestations expire after 24h; without this the
+    // attestation built at boot lapses, every receipt that strong-refs it
+    // becomes invalid, and the machine silently drops out of its attested
+    // posture (the "confidential mode flips on/off / can't re-attest" failure).
+    // The task rebuilds + republishes on a fixed cadence (default ~23h, env
+    // override for testing), re-running the MDA auto-acquire so a key-bound
+    // chain that landed after boot is picked up, and swaps the fresh strong-ref
+    // into the shared cell the receipt path reads. On failure it keeps the
+    // previous ref until the next cycle and records an `attestationFault` on the
+    // provider record so the console surfaces the degraded state.
+    let refresh_handle = {
+        let attestation = attestation.clone();
+        let pds = pds.clone();
+        let session = session.clone();
+        let signer = signer.clone();
+        let enc_pub = enc.public_key_b64();
+        let engine_facts = engine_facts.clone();
+        let attestation_pub_key = attestation_pub_key.clone();
+        let base_record = provider_record.clone();
+        tokio::spawn(async move {
+            let interval = attestation_refresh_interval();
+            loop {
+                tokio::time::sleep(interval).await;
+                let outcome = build_and_publish_attestation(
+                    &session,
+                    &*signer,
+                    &enc_pub,
+                    &engine_facts,
+                    &pds,
+                )
+                .await;
+                match &outcome.strong_ref {
+                    Some(r) => {
+                        *attestation.write().await = Some(r.clone());
+                        tracing::info!(uri = %r.uri, "attestation refreshed");
+                    }
+                    None => {
+                        tracing::warn!(
+                            "attestation refresh failed; keeping previous ref until next cycle"
+                        );
+                    }
+                }
+                // Reflect the refresh outcome on the provider record so the
+                // console clears or surfaces the fault. Best-effort: a failed
+                // re-publish here doesn't affect the live attestation cell.
+                republish_attestation_fault(
+                    &pds,
+                    &attestation_pub_key,
+                    &base_record,
+                    outcome.fault.clone(),
+                )
+                .await;
+            }
+        })
+    };
 
     // The serve future below loops forever. Race it against a graceful
     // shutdown signal (SIGTERM from launchd / the macOS app supervisor on
@@ -1568,7 +1582,7 @@ async fn cmd_serve(
                             &*signer,
                             &enc,
                             &pds,
-                            attestation,
+                            attestation.clone(),
                             &engines,
                             provider_rkey.as_deref(),
                             &desired_at_start,
@@ -1636,7 +1650,7 @@ async fn cmd_serve(
                         );
                         let client = AdvisorClient::new(advisor_url);
                         tokio::select! {
-                            res = client.run(register.clone(), &*signer, &enc, &pds, attestation, &eng, provider_rkey.as_deref(), &desired_at_start, desired_tier_at_start.as_deref(), &model_schedules, &configured_models, push_rx.as_mut(), &pro_bono_at_start) => {
+                            res = client.run(register.clone(), &*signer, &enc, &pds, attestation.clone(), &eng, provider_rkey.as_deref(), &desired_at_start, desired_tier_at_start.as_deref(), &model_schedules, &configured_models, push_rx.as_mut(), &pro_bono_at_start) => {
                                 if let Err(e) = res {
                                     tracing::warn!(error = %e, "advisor run ended; reconnecting within window in 5s");
                                 }
@@ -1715,7 +1729,225 @@ async fn cmd_serve(
             }
         }
     }
+    // Stop the background re-attestation task on the way out (shutdown only —
+    // `serve` itself never returns).
+    refresh_handle.abort();
     Ok(())
+}
+
+/// Engine-derived attestation inputs, snapshotted once at serve start. The
+/// loaded engine set is fixed for a serve lifetime, so the re-attestation task
+/// carries this owned snapshot instead of borrowing the engine registry (which
+/// the serve loop may move into its schedule branch).
+#[derive(Clone, Default)]
+struct EngineAttestationFacts {
+    in_process_backend: bool,
+    metallib_hash: Option<String>,
+    engine_lib_hash: Option<String>,
+}
+
+impl EngineAttestationFacts {
+    fn from_registry(engines: &cocore_provider::engines::EngineRegistry) -> Self {
+        Self {
+            in_process_backend: engines.entries().iter().any(|(_, e)| e.in_process()),
+            metallib_hash: engines
+                .entries()
+                .iter()
+                .find_map(|(_, e)| e.metallib_hash()),
+            engine_lib_hash: engines
+                .entries()
+                .iter()
+                .find_map(|(_, e)| e.engine_lib_hash()),
+        }
+    }
+}
+
+/// The result of building + publishing one attestation.
+struct AttestationOutcome {
+    /// Strong-ref to the published attestation record; `None` when build or
+    /// publish failed (receipts skip publishing in that mode).
+    strong_ref: Option<StrongRef>,
+    /// ACHIEVED trust level, derived from what the attestation actually
+    /// embedded — a bound MDA chain or App Attest object earns
+    /// hardware-attested; otherwise self-attested.
+    trust_level: TrustLevel,
+    /// The attestation's evidence-gated tier, when built.
+    tier: Option<String>,
+    /// Measured cdHash to echo on the Register frame.
+    cd_hash: Option<String>,
+    /// Tier to echo on the Register frame.
+    register_tier: Option<String>,
+    /// Set when build or publish failed, for the provider record + console.
+    fault: Option<AttestationFault>,
+}
+
+/// Assemble the attestation inputs from the current machine + key state, build
+/// the signed record, and publish it to the provider's PDS. Used both at serve
+/// start and by the periodic refresh task (attestations expire after 24h; see
+/// `attestation.rs`). Re-runs the MDA auto-acquire so a key-bound chain that was
+/// requested on an earlier cycle but landed later is picked up on refresh.
+/// Fail-soft: any build/publish error returns `strong_ref: None` plus a
+/// content-safe `fault`, never panics.
+async fn build_and_publish_attestation(
+    session: &oauth::Session,
+    signer: &dyn secure_enclave::SigningIdentity,
+    encryption_pub_key_b64: &str,
+    engine_facts: &EngineAttestationFacts,
+    pds: &PdsClient,
+) -> AttestationOutcome {
+    let mut attestation_inputs =
+        attestation::build_stub_inputs(&session.did, encryption_pub_key_b64);
+    // MDA option-B (the live macOS hardware-attested path). EXPLICIT env wins;
+    // otherwise AUTO derives serial + Hardware UUID + coordinator URLs from the
+    // session console base and, only when this Mac is MDM-enrolled, loads the
+    // captured chain — requesting a fresh key-bound attestation if none is held
+    // yet (it lands on a later refresh, which is exactly what this task drives).
+    let pubkey_b64 = signer.public_key_b64();
+    cocore_provider::mda_loader::request_attestation(&pubkey_b64);
+    let mut mda_cert_chain = cocore_provider::mda_loader::try_load();
+    if mda_cert_chain.is_empty() && !cocore_provider::mda_loader::any_explicit_mda_env() {
+        mda_cert_chain = cocore_provider::mda_loader::acquire_auto(
+            &session.api_base,
+            &session.api_key,
+            &pubkey_b64,
+        );
+    }
+    attestation_inputs.mda_cert_chain = mda_cert_chain;
+    // App Attest evidence — bound to this signing key; `build` re-verifies + only
+    // embeds it if it binds. A no-op on macOS (iOS-only), retained for a future
+    // iOS companion.
+    attestation_inputs.app_attest =
+        cocore_provider::mda_loader::load_appattest(&signer.public_key_b64());
+    attestation_inputs.in_process_backend = engine_facts.in_process_backend;
+    attestation_inputs.metallib_hash = engine_facts.metallib_hash.clone();
+    attestation_inputs.engine_lib_hash = engine_facts.engine_lib_hash.clone();
+
+    let built = attestation::build(attestation_inputs, signer);
+    // Derive trust/tier from what the attestation ACTUALLY embedded, not from
+    // what was loaded: `build` drops any MDA chain / App Attest that doesn't
+    // verify Apple-rooted AND bind to our signing key.
+    let (trust_level, tier) = match &built {
+        Ok(rec) => (
+            if !rec.mdaCertChain.is_empty() || rec.appAttest.is_some() {
+                TrustLevel::HardwareAttested
+            } else {
+                TrustLevel::SelfAttested
+            },
+            Some(rec.tier.clone()),
+        ),
+        Err(_) => (TrustLevel::SelfAttested, None),
+    };
+
+    match built {
+        Ok(record) => {
+            let cd_hash = record.cdHash.clone();
+            let register_tier = Some(record.tier.clone());
+            match pds.publish_attestation(&record).await {
+                Ok(published) => {
+                    tracing::info!(uri = %published.uri, "published attestation");
+                    AttestationOutcome {
+                        strong_ref: Some(StrongRef {
+                            uri: published.uri,
+                            cid: published.cid,
+                        }),
+                        trust_level,
+                        tier,
+                        cd_hash,
+                        register_tier,
+                        fault: None,
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to publish attestation; receipts disabled");
+                    AttestationOutcome {
+                        strong_ref: None,
+                        trust_level,
+                        tier,
+                        cd_hash,
+                        register_tier,
+                        fault: Some(AttestationFault {
+                            code: "attestation-publish-failed".to_string(),
+                            message: "This machine could not publish its attestation record \
+                                to its PDS, so it cannot produce verifiable receipts and will \
+                                complete no billable jobs. The machine is otherwise online. \
+                                Fix: check this machine's network connection to its PDS and \
+                                that the session is still valid (re-pair with \
+                                `cocore agent pair` if needed); it retries automatically on \
+                                the next attestation refresh."
+                                .to_string(),
+                            at: chrono::Utc::now(),
+                        }),
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build attestation; receipts disabled");
+            AttestationOutcome {
+                strong_ref: None,
+                trust_level,
+                tier,
+                cd_hash: None,
+                register_tier: None,
+                fault: Some(AttestationFault {
+                    code: "attestation-build-failed".to_string(),
+                    message: "This machine could not assemble its signed attestation, so it \
+                        cannot produce verifiable receipts and will complete no billable jobs. \
+                        This usually means the signing identity or a measured-binary input is \
+                        unavailable. Fix: update to the latest co/core build and restart \
+                        serving; if it persists, re-pair with `cocore agent pair`."
+                        .to_string(),
+                    at: chrono::Utc::now(),
+                }),
+            }
+        }
+    }
+}
+
+/// How long the re-attestation task waits between refreshes. Default ~23h (one
+/// hour before the 24h expiry); `COCORE_ATTESTATION_REFRESH_SECS` overrides it
+/// for testing (a positive integer number of seconds).
+fn attestation_refresh_interval() -> std::time::Duration {
+    std::env::var("COCORE_ATTESTATION_REFRESH_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| std::time::Duration::from_secs(23 * 3600))
+}
+
+/// Re-publish this machine's provider record to reflect the latest attestation
+/// outcome (clear the fault on success, set it on failure) after a refresh
+/// cycle. Mirrors the shutdown offline-marker path: read the live record, clone
+/// our agent-built base, preserve the console-authored switches, and CAS on the
+/// CID we just read so we don't clobber a concurrent console write. Best-effort
+/// — a failure here never affects the live attestation cell.
+async fn republish_attestation_fault(
+    pds: &PdsClient,
+    attestation_pub_key: &str,
+    base_record: &ProviderRecord,
+    fault: Option<AttestationFault>,
+) {
+    let publish = async {
+        let (rk, value, cid) = find_my_provider_record(pds, attestation_pub_key).await?;
+        let mut rec = base_record.clone();
+        rec.attestationFault = fault.clone();
+        // Mid-serve: the machine is up and past provisioning.
+        rec.serving = Some(true);
+        rec.provisioning = Some(false);
+        rec.createdAt = chrono::Utc::now();
+        preserve_console_fields(&mut rec, &value);
+        pds.put_provider(&rk, &rec, Some(&cid)).await
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), publish).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "failed to re-publish provider record after attestation refresh")
+        }
+        Err(_) => {
+            tracing::warn!("provider record re-publish after attestation refresh timed out")
+        }
+    }
 }
 
 /// Resolves when the process receives a graceful shutdown signal: SIGTERM
@@ -2663,6 +2895,7 @@ mod offline_marker_tests {
             provisioning: Some(false),
             serving: Some(true),
             engineFault: None,
+            attestationFault: None,
             region: None,
             regionSource: None,
             regionObservedAt: None,
