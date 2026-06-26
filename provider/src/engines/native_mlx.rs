@@ -357,6 +357,9 @@ mod tests {
             max_tokens: 48,
             temperature: None,
             top_p: None,
+            guided_json: None,
+            tools: None,
+            tool_choice: None,
         };
         let mut streamed = String::new();
         let resp = eng

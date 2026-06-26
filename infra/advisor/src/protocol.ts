@@ -57,6 +57,12 @@ export interface Register {
    *  advisor sends the code-identity challenge here. Omitted on headless
    *  installs, which therefore stay best-effort. Additive. */
   apns_device_token?: string;
+  /** True when this machine's vllm-mlx was started with
+   *  `--enable-auto-tool-choice` (COCORE_ENABLE_TOOL_CALLS env var), so the
+   *  model can parse and emit structured tool calls. Absent when tool calling
+   *  is not enabled. The advisor surfaces this on `/providers` so the console
+   *  can gate tool requests. Additive — old advisors ignore it. */
+  supports_tool_calls?: boolean;
 }
 
 /** Content-free crash signature the provider folds into its heartbeat
@@ -130,6 +136,18 @@ export interface InferenceRequest {
    *  the `/jobs` body; the advisor never reads the plaintext. */
   input_format?: string;
   session_id: string;
+  /** Optional JSON Schema constraining the model's output. When present,
+   *  the provider passes it to the inference engine as response_format
+   *  guided decoding. Forwarded from the `/jobs` body; the advisor never
+   *  reads the plaintext. */
+  output_schema?: { name: string; strict?: boolean; schema: Record<string, unknown> };
+  /** Optional tool definitions the model may call. Forwarded from the
+   *  `/jobs` body; the advisor never inspects the plaintext. */
+  tools?: unknown;
+  /** Optional tool-choice directive (e.g. "auto", "none", "required", or
+   *  a provider-specific object). Forwarded from the `/jobs` body; the
+   *  advisor never inspects it. */
+  tool_choice?: unknown;
 }
 
 interface InferenceChunk {
@@ -137,7 +155,7 @@ interface InferenceChunk {
   seq: number;
   /** Which channel this chunk's plaintext belongs to. Absent (older
    *  providers) means the answer. The advisor relays it opaquely. */
-  channel?: "content" | "reasoning";
+  channel?: "content" | "reasoning" | "tool_call";
   ciphertext: number[] | string;
 }
 

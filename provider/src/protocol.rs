@@ -178,6 +178,16 @@ pub struct Register {
     /// stay best-effort. Additive — pre-APNs advisors ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apns_device_token: Option<String>,
+    /// True when this machine's vllm-mlx was started with
+    /// `--enable-auto-tool-choice`, so the model can parse and emit
+    /// structured tool calls. Absent when tool calling is not enabled
+    /// (the env var `COCORE_ENABLE_TOOL_CALLS` was not set). The
+    /// advisor surfaces this on `/providers` so the console can gate
+    /// tool requests — returning a 400 when tools are sent but no
+    /// provider in the pool supports them. Additive — old advisors
+    /// that don't know the field ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +245,24 @@ pub struct InferenceRequest {
     /// different attestation can't be replayed). Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_cid: Option<String>,
+    /// Optional JSON Schema constraining the model's output. When present,
+    /// the provider passes it to the inference engine as a `response_format`
+    /// guided-decoding constraint so the output conforms. The schema is
+    /// public (not encrypted) — it describes the output shape, not the
+    /// input. Additive — absent means unconstrained generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+    /// Optional list of tool/function definitions the model may call.
+    /// Public (not encrypted) — describes available functions, not user
+    /// data. Forwarded to the engine as OpenAI-compatible `tools`.
+    /// Additive — absent means no tool calling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<serde_json::Value>,
+    /// Optional tool choice strategy: "auto", "none", "required", or
+    /// a specific function object. Forwarded to the engine as
+    /// OpenAI-compatible `tool_choice`. Additive — absent means "auto".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +305,7 @@ pub enum ChunkChannel {
     #[default]
     Content,
     Reasoning,
+    ToolCall,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

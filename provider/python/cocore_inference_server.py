@@ -204,6 +204,27 @@ def main() -> None:
             "is a manual override for a VLM that auto-detection misses."
         ),
     )
+    ap.add_argument(
+        "--enable-auto-tool-choice",
+        action="store_true",
+        help=(
+            "Enable OpenAI-compatible tool calling (function calling) in "
+            "vllm-mlx. When set, the /v1/chat/completions endpoint can parse "
+            "and emit structured tool_calls so the model can invoke functions. "
+            "Requires --tool-call-parser to select the format parser for the "
+            "model family (e.g. hermes for Qwen, mistral for Mistral/Devstral)."
+        ),
+    )
+    ap.add_argument(
+        "--tool-call-parser",
+        default=None,
+        help=(
+            "Tool call parser name (e.g. auto, hermes, mistral, qwen, llama, "
+            "deepseek, kimi, granite, nemotron, xlam, functionary, glm47). "
+            "Only used when --enable-auto-tool-choice is set. Defaults to "
+            "'auto' which tries all formats."
+        ),
+    )
     args = ap.parse_args()
 
     socket_path = Path(args.uds)
@@ -268,6 +289,20 @@ def main() -> None:
         flush=True,
     )
     srv.load_model(args.model, force_mllm=args.vision)
+
+    # Enable tool calling when the flag was passed. vllm-mlx uses
+    # module-level globals (_enable_auto_tool_choice, _tool_call_parser)
+    # that the FastAPI routes read at request time. Setting them here
+    # (after load_model, before uvicorn.run) configures the server so
+    # /v1/chat/completions can parse and emit structured tool_calls.
+    if args.enable_auto_tool_choice:
+        srv._enable_auto_tool_choice = True
+        srv._tool_call_parser = args.tool_call_parser or "auto"
+        print(
+            f"[cocore-engine] tool calling enabled (parser: {srv._tool_call_parser})",
+            flush=True,
+        )
+
     print(f"[cocore-engine] model loaded; binding {socket_path}", flush=True)
 
     # SIGTERM handler that exits cleanly. uvicorn installs its own

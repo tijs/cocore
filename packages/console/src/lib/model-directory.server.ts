@@ -128,6 +128,10 @@ export interface ModelDirectoryEntry {
    *  is a capability hint for the UI (e.g. an image-upload affordance), not
    *  a gate. Additive — consumers that ignore it behave as before. */
   vision: boolean;
+  /** True when at least one online machine serving this model has tool
+   *  calling enabled (--enable-auto-tool-choice). Capability hint for the
+   *  UI, not a gate. Additive — consumers that ignore it behave as before. */
+  tools: boolean;
 }
 
 export interface ModelDirectoryResponse {
@@ -296,6 +300,10 @@ interface AdvisorProviderRow {
    *  prove the hardware-attested tier (see verified-standing.server.ts). */
   attestationUri?: string | null;
   codeAttested?: boolean;
+  /** True when this machine's vllm-mlx was started with
+   *  --enable-auto-tool-choice. Used to compute the per-model `tools`
+   *  capability hint. */
+  supportsToolCalls?: boolean;
 }
 
 /** Per-machine online info from the advisor. */
@@ -304,6 +312,10 @@ interface AdvisorOnline {
   /** The machine's tier recomputed from its ACTUAL signed attestation (the
    *  SDK verifier), not the self-asserted label. Drives the directory badges. */
   verifiedTier: VerifiedTier;
+  /** True when this machine's vllm-mlx was started with
+   *  --enable-auto-tool-choice. Used to compute the per-model `tools`
+   *  capability hint. */
+  supportsToolCalls: boolean;
 }
 
 interface AdvisorOnlineResult {
@@ -340,7 +352,7 @@ async function fetchAdvisorOnlineDids(): Promise<AdvisorOnlineResult | null> {
         // same owner DID get separate entries. Fall back to the DID alone for
         // legacy agents that predate the machineId field.
         const key = p.machineId ? `${p.did}:${p.machineId}` : p.did;
-        return [key, { lastSeen: p.lastSeen ?? p.attestedAt!, verifiedTier }];
+        return [key, { lastSeen: p.lastSeen ?? p.attestedAt!, verifiedTier, supportsToolCalls: p.supportsToolCalls === true }];
       }),
     );
     return {
@@ -492,11 +504,18 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
           // Surface the capability so the UI can show an image-upload
           // affordance; no longer used to exclude the model.
           vision: isVisionModel(modelId),
+          // Tool calling capability hint — set to true when at least one
+          // online machine serving this model supports tool calls.
+          tools: false,
         };
         byModel.set(modelId, entry);
       }
       const onlineInfo = advisorOnline.get(advisorKey);
       const seen = onlineInfo?.lastSeen ?? lastSeen;
+      // OR in tool calling support from this machine.
+      if (onlineInfo?.supportsToolCalls) {
+        entry.tools = true;
+      }
       const attestationPubKey = safeString(body.attestationPubKey);
       const machineKey = attestationPubKey ?? did;
       let machines = machinesByModel.get(modelId);

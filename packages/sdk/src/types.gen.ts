@@ -162,6 +162,9 @@ export interface JobRecord {
   nonce: string;
   expiresAt: string;
   createdAt: string;
+  outputSchema?: { name?: string; strict?: boolean; schema?: Record<string, unknown> };
+  tools?: { type: "function"; function: { name: string; description?: string; parameters?: Record<string, unknown> } }[];
+  toolChoice?: "auto" | "none" | "required";
 }
 
 export interface PaymentAuthorizationRecord {
@@ -194,6 +197,7 @@ export interface ProviderRecord {
   tier?: Tier;
   desiredTier?: Tier;
   acceptedExchanges?: string[];
+  proBono?: Record<string, unknown>;
   contactEndpoint?: string;
   active?: boolean;
   provisioning?: boolean;
@@ -226,6 +230,7 @@ export interface ReceiptRecord {
   attestation: StrongRef;
   enclaveSignature: string;
   tier?: Tier;
+  proBono?: boolean;
 }
 
 export interface SettlementRecord {

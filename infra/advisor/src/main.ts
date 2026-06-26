@@ -297,6 +297,11 @@ async function main(): Promise<void> {
               challengeVerifiedSip: p.challengeVerifiedSip,
               codeAttested: p.codeAttested,
             },
+            // Tool calling: true when this machine's vllm-mlx was started
+            // with --enable-auto-tool-choice. The console gates tool requests
+            // on this — returning a 400 when tools are sent but no provider
+            // supports them.
+            supportsToolCalls: p.supportsToolCalls,
           })),
         ),
       ).pipe(Effect.withSpan("advisor.providers")),

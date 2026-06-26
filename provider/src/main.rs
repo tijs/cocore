@@ -1520,6 +1520,15 @@ async fn cmd_serve(
         apns_device_token: cocore_provider::push_host::current_device_token(),
         #[cfg(not(all(target_os = "macos", feature = "apns")))]
         apns_device_token: None,
+        // Tool calling: advertise whether this machine's vllm-mlx was
+        // started with --enable-auto-tool-choice (COCORE_ENABLE_TOOL_CALLS
+        // env var). The advisor surfaces this so the console can gate tool
+        // requests — returning a 400 when tools are sent but no provider
+        // supports them. `None` when the env var is absent (additive — old
+        // advisors ignore it).
+        supports_tool_calls: std::env::var("COCORE_ENABLE_TOOL_CALLS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .ok(),
     };
     let attestation = attestation_ref.as_ref();
 
@@ -2143,8 +2152,19 @@ fn build_engines(
     let mut saw_venv_missing = false;
     let mut last_err: Option<String> = None;
 
+    // Tool calling: opt-in via env var. When set, each subprocess engine
+    // is started with --enable-auto-tool-choice so vllm-mlx configures its
+    // tool call parser. The capability is advertised on the Register frame
+    // so the advisor + console can gate tool requests.
+    let supports_tool_calls = std::env::var("COCORE_ENABLE_TOOL_CALLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if supports_tool_calls {
+        tracing::info!("tool calling enabled (COCORE_ENABLE_TOOL_CALLS=1); engines will start with --enable-auto-tool-choice");
+    }
+
     for model in &configured {
-        match start_engine_with_recovery(model, &venv_python) {
+        match start_engine_with_recovery(model, &venv_python, supports_tool_calls) {
             Ok(engine) => {
                 tracing::info!(model = %model, "inference subprocess engine ready");
                 registry.register(model.clone(), std::sync::Arc::new(engine));
@@ -2328,6 +2348,7 @@ fn is_vision_config_failure(last_err: Option<&str>) -> bool {
 fn start_engine_with_recovery(
     model: &str,
     venv_python: &std::path::Path,
+    supports_tool_calls: bool,
 ) -> std::result::Result<cocore_provider::engines::subprocess::SubprocessEngine, EngineStartFailure>
 {
     use cocore_provider::engines::subprocess::SubprocessEngine;
@@ -2342,7 +2363,7 @@ fn start_engine_with_recovery(
                 "venv python missing; the installer may still be provisioning it — will retry after backoff"
             );
         } else {
-            match SubprocessEngine::new(model, venv_python.to_path_buf()) {
+            match SubprocessEngine::new(model, venv_python.to_path_buf(), supports_tool_calls) {
                 Ok(engine) => match engine.start() {
                     Ok(()) => return Ok(engine),
                     Err(e) => {

@@ -36,7 +36,7 @@
 //!
 //! ## Lifecycle
 //!
-//! 1. `SubprocessEngine::new(model, venv_python)` — constructs but
+//! 1. `SubprocessEngine::new(model, venv_python, supports_tool_calls)` — constructs but
 //!    does not spawn. Generates a unique socket path under
 //!    `$HOME/.cocore/sockets/`.
 //! 2. `start()` — spawns the child (`<venv>/bin/python
@@ -232,14 +232,25 @@ pub struct SubprocessEngine {
     venv_python: PathBuf,
     socket_path: PathBuf,
     child: Mutex<Option<Child>>,
+    /// Whether this engine was started with `--enable-auto-tool-choice`
+    /// so the model can parse and emit structured tool calls. Set from
+    /// the `COCORE_ENABLE_TOOL_CALLS` env var at construction time;
+    /// passed to the Python wrapper as a CLI flag in `start()`.
+    supports_tool_calls: bool,
 }
 
 impl SubprocessEngine {
     /// Construct an engine bound to `model_id`. Does not spawn the
     /// child — call `start()` to do that. `venv_python` is the
     /// interpreter the install script bootstrapped (typically
-    /// `$HOME/.cocore/python/bin/python`).
-    pub fn new(model_id: impl Into<String>, venv_python: PathBuf) -> Result<Self> {
+    /// `$HOME/.cocore/python/bin/python`). `supports_tool_calls`
+    /// passes `--enable-auto-tool-choice` to the Python wrapper so
+    /// the model can parse and emit structured tool calls.
+    pub fn new(
+        model_id: impl Into<String>,
+        venv_python: PathBuf,
+        supports_tool_calls: bool,
+    ) -> Result<Self> {
         let model_id = model_id.into();
         let sockets_dir = state_dir()?.join("sockets");
         std::fs::create_dir_all(&sockets_dir).with_context(|| {
@@ -282,6 +293,7 @@ impl SubprocessEngine {
             venv_python,
             socket_path,
             child: Mutex::new(None),
+            supports_tool_calls,
         })
     }
 
@@ -435,15 +447,23 @@ impl SubprocessEngine {
             // teardown is still the fast path; this only backstops the
             // exits that never reach Drop.
             .arg("--parent-pid")
-            .arg(std::process::id().to_string())
-            // Capture stdout + stderr into a bounded ring buffer
-            // (see ENGINE_RING_BUFFER_CAP). We deliberately do NOT
-            // pipe child output into tracing: vllm-mlx logs prompt
-            // fragments and generated tokens by default, and routing
-            // any of that through the agent's logger would create a
-            // content leak. The ring buffer is only consulted on
-            // startup-failure bail paths below.
-            .stdout(Stdio::piped())
+            .arg(std::process::id().to_string());
+
+        // Tool calling: when the operator enabled it (COCORE_ENABLE_TOOL_CALLS),
+        // pass --enable-auto-tool-choice to the Python wrapper so vllm-mlx
+        // configures its tool call parser. The wrapper defaults the parser
+        // to "auto" (tries all formats) when --tool-call-parser isn't given.
+        if self.supports_tool_calls {
+            cmd.arg("--enable-auto-tool-choice");
+        }
+        // Capture stdout + stderr into a bounded ring buffer
+        // (see ENGINE_RING_BUFFER_CAP). We deliberately do NOT
+        // pipe child output into tracing: vllm-mlx logs prompt
+        // fragments and generated tokens by default, and routing
+        // any of that through the agent's logger would create a
+        // content leak. The ring buffer is only consulted on
+        // startup-failure bail paths below.
+        cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Don't inherit a controlling tty. If the agent dies the
             // child does reparent to launchd, but it no longer *survives*
@@ -715,10 +735,28 @@ impl SubprocessEngine {
             .messages
             .iter()
             .map(|m| {
-                serde_json::json!({
+                let mut msg = serde_json::json!({
                     "role": m.role,
                     "content": Self::render_content(m),
-                })
+                });
+                // Include tool_calls on assistant messages that have them.
+                if let Some(tool_calls) = &m.tool_calls {
+                    msg["tool_calls"] = serde_json::json!(
+                        tool_calls.iter().map(|tc| serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function_name,
+                                "arguments": tc.function_arguments,
+                            }
+                        })).collect::<Vec<_>>()
+                    );
+                }
+                // Include tool_call_id on tool-role messages.
+                if let Some(id) = &m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::json!(id);
+                }
+                msg
             })
             .collect();
         let mut body = serde_json::json!({
@@ -732,6 +770,25 @@ impl SubprocessEngine {
         }
         if let Some(p) = request.top_p {
             body["top_p"] = serde_json::json!(p);
+        }
+        // Structured output: when the requester supplied a JSON Schema,
+        // pass it to vllm-mlx as an OpenAI-compatible `response_format`
+        // so the engine constrains decoding. The `guided_json` value is
+        // already shaped as `{ name, strict, schema }` — we wrap it in
+        // the `response_format.json_schema` envelope vllm-mlx expects.
+        if let Some(schema) = &request.guided_json {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": schema
+            });
+        }
+        // Tool calling: forward tools and tool_choice to the engine as
+        // OpenAI-compatible fields so the model can invoke functions.
+        if let Some(tools) = &request.tools {
+            body["tools"] = tools.clone();
+        }
+        if let Some(choice) = &request.tool_choice {
+            body["tool_choice"] = choice.clone();
         }
         Ok(body)
     }
@@ -797,6 +854,19 @@ impl SubprocessEngine {
             {
                 if !reasoning.is_empty() {
                     on_data(DeltaChannel::Reasoning, reasoning)?;
+                }
+            }
+            // Tool calls arrive as structured `tool_calls` deltas —
+            // forward the raw JSON array on the ToolCall channel so the
+            // provider can seal and forward it. The client reassembles
+            // the fragments into complete tool calls.
+            if let Some(tool_calls) = v.pointer("/choices/0/delta/tool_calls") {
+                if !tool_calls.is_null() {
+                    let json = serde_json::to_string(tool_calls)
+                        .unwrap_or_default();
+                    if !json.is_empty() {
+                        on_data(DeltaChannel::ToolCall, &json)?;
+                    }
                 }
             }
             // The answer text may itself carry inline <think>...</think>
@@ -1144,6 +1214,9 @@ mod tests {
             max_tokens: 8,
             temperature: None,
             top_p: None,
+            guided_json: None,
+            tools: None,
+            tool_choice: None,
         };
         let body = SubprocessEngine::build_chat_body(&req, false).unwrap();
         // Text-only stays a scalar string — byte-identical to the legacy path.
@@ -1164,10 +1237,15 @@ mod tests {
                         data_b64: "aGVsbG8=".into(),
                     },
                 ],
+                tool_calls: None,
+                tool_call_id: None,
             }],
             max_tokens: 8,
             temperature: None,
             top_p: None,
+            guided_json: None,
+            tools: None,
+            tool_choice: None,
         };
         let body = SubprocessEngine::build_chat_body(&req, false).unwrap();
         let parts = body["messages"][0]["content"]
@@ -1184,5 +1262,306 @@ mod tests {
                 "image_url": { "url": "data:image/png;base64,aGVsbG8=" },
             }),
         );
+    }
+
+    #[test]
+    fn build_chat_body_emits_response_format_for_guided_json() {
+        let schema = serde_json::json!({
+            "name": "result",
+            "strict": true,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "answer": { "type": "string" }
+                },
+                "required": ["answer"],
+                "additionalProperties": false
+            }
+        });
+        let req = GenerateRequest {
+            model: "m".into(),
+            messages: vec![crate::engines::Message::text("user", "hi")],
+            max_tokens: 8,
+            temperature: None,
+            top_p: None,
+            guided_json: Some(schema),
+            tools: None,
+            tool_choice: None,
+        };
+        let body = SubprocessEngine::build_chat_body(&req, false).unwrap();
+        // The schema is wrapped in the OpenAI response_format envelope.
+        assert_eq!(
+            body["response_format"],
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "result",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "answer": { "type": "string" }
+                        },
+                        "required": ["answer"],
+                        "additionalProperties": false
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn build_chat_body_omits_response_format_when_no_guided_json() {
+        let req = GenerateRequest {
+            model: "m".into(),
+            messages: vec![crate::engines::Message::text("user", "hi")],
+            max_tokens: 8,
+            temperature: None,
+            top_p: None,
+            guided_json: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let body = SubprocessEngine::build_chat_body(&req, false).unwrap();
+        // No response_format key when guided_json is absent.
+        assert!(body.get("response_format").is_none());
+    }
+
+    // ─── Tool calling tests ───
+
+    #[test]
+    fn build_chat_body_includes_tools_and_tool_choice() {
+        let tools = serde_json::json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather for a city",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        },
+                        "required": ["city"]
+                    }
+                }
+            }
+        ]);
+        let req = GenerateRequest {
+            model: "m".into(),
+            messages: vec![crate::engines::Message::text("user", "What's the weather?")],
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            guided_json: None,
+            tools: Some(tools.clone()),
+            tool_choice: Some(serde_json::json!("auto")),
+        };
+        let body = SubprocessEngine::build_chat_body(&req, false).unwrap();
+        assert_eq!(body["tools"], tools);
+        assert_eq!(body["tool_choice"], serde_json::json!("auto"));
+    }
+
+    #[test]
+    fn build_chat_body_omits_tools_when_absent() {
+        let req = GenerateRequest {
+            model: "m".into(),
+            messages: vec![crate::engines::Message::text("user", "hi")],
+            max_tokens: 8,
+            temperature: None,
+            top_p: None,
+            guided_json: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let body = SubprocessEngine::build_chat_body(&req, false).unwrap();
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn build_chat_body_serializes_tool_calls_on_assistant_messages() {
+        use crate::engines::{Message, ToolCallData};
+        let req = GenerateRequest {
+            model: "m".into(),
+            messages: vec![
+                Message::text("user", "What's the weather?"),
+                Message {
+                    role: "assistant".into(),
+                    content: vec![],
+                    tool_calls: Some(vec![ToolCallData {
+                        id: "call_abc123".into(),
+                        function_name: "get_weather".into(),
+                        function_arguments: r#"{"city":"Tokyo"}"#.into(),
+                    }]),
+                    tool_call_id: None,
+                },
+            ],
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            guided_json: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let body = SubprocessEngine::build_chat_body(&req, false).unwrap();
+        let assistant_msg = &body["messages"][1];
+        assert_eq!(assistant_msg["role"], "assistant");
+        assert_eq!(
+            assistant_msg["tool_calls"][0]["id"],
+            serde_json::json!("call_abc123")
+        );
+        assert_eq!(
+            assistant_msg["tool_calls"][0]["type"],
+            serde_json::json!("function")
+        );
+        assert_eq!(
+            assistant_msg["tool_calls"][0]["function"]["name"],
+            serde_json::json!("get_weather")
+        );
+        assert_eq!(
+            assistant_msg["tool_calls"][0]["function"]["arguments"],
+            serde_json::json!(r#"{"city":"Tokyo"}"#)
+        );
+    }
+
+    #[test]
+    fn build_chat_body_serializes_tool_call_id_on_tool_messages() {
+        use crate::engines::{ContentPart, Message};
+        let req = GenerateRequest {
+            model: "m".into(),
+            messages: vec![
+                Message::text("user", "What's the weather?"),
+                Message {
+                    role: "assistant".into(),
+                    content: vec![],
+                    tool_calls: Some(vec![crate::engines::ToolCallData {
+                        id: "call_abc123".into(),
+                        function_name: "get_weather".into(),
+                        function_arguments: r#"{"city":"Tokyo"}"#.into(),
+                    }]),
+                    tool_call_id: None,
+                },
+                Message {
+                    role: "tool".into(),
+                    content: vec![ContentPart::Text(
+                        r#"{"temperature":22,"condition":"sunny"}"#.into(),
+                    )],
+                    tool_calls: None,
+                    tool_call_id: Some("call_abc123".into()),
+                },
+            ],
+            max_tokens: 256,
+            temperature: None,
+            top_p: None,
+            guided_json: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let body = SubprocessEngine::build_chat_body(&req, false).unwrap();
+        let tool_msg = &body["messages"][2];
+        assert_eq!(tool_msg["role"], "tool");
+        assert_eq!(
+            tool_msg["tool_call_id"],
+            serde_json::json!("call_abc123")
+        );
+    }
+
+    #[test]
+    fn process_sse_buffer_parses_tool_calls_delta() {
+        let mut buf = Vec::new();
+        let mut cursor = 0;
+        let mut splitter = ThinkTagSplitter::new();
+        let mut deltas: Vec<(DeltaChannel, String)> = Vec::new();
+        let mut on_data = |ch: DeltaChannel, s: &str| {
+            deltas.push((ch, s.to_string()));
+            Ok(())
+        };
+        let mut tokens = (0u64, 0u64);
+
+        // Simulate a vllm-mlx SSE stream where the model emits a tool call.
+        // The first delta carries the tool call id + function name.
+        let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc123\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        buf.extend_from_slice(sse.as_bytes());
+        SubprocessEngine::process_sse_buffer(
+            &mut buf,
+            &mut cursor,
+            &mut splitter,
+            &mut on_data,
+            &mut tokens,
+        )
+        .unwrap();
+
+        // The tool_call channel should have received two deltas:
+        // 1) the initial tool call with id + name
+        // 2) the arguments fragment
+        let tool_call_deltas: Vec<&str> = deltas
+            .iter()
+            .filter(|(ch, _)| *ch == DeltaChannel::ToolCall)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(tool_call_deltas.len(), 2, "expected 2 tool_call deltas");
+
+        // First delta: id + function name
+        let first: serde_json::Value =
+            serde_json::from_str(tool_call_deltas[0]).expect("first delta is JSON");
+        assert_eq!(first[0]["id"], "call_abc123");
+        assert_eq!(first[0]["function"]["name"], "get_weather");
+
+        // Second delta: arguments fragment
+        let second: serde_json::Value =
+            serde_json::from_str(tool_call_deltas[1]).expect("second delta is JSON");
+        assert_eq!(
+            second[0]["function"]["arguments"],
+            "{\"city\":\"Tokyo\"}"
+        );
+    }
+
+    #[test]
+    fn process_sse_buffer_separates_tool_calls_from_content() {
+        let mut buf = Vec::new();
+        let mut cursor = 0;
+        let mut splitter = ThinkTagSplitter::new();
+        let mut deltas: Vec<(DeltaChannel, String)> = Vec::new();
+        let mut on_data = |ch: DeltaChannel, s: &str| {
+            deltas.push((ch, s.to_string()));
+            Ok(())
+        };
+        let mut tokens = (0u64, 0u64);
+
+        // A stream that has both content and tool calls.
+        let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me check\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"NYC\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        buf.extend_from_slice(sse.as_bytes());
+        SubprocessEngine::process_sse_buffer(
+            &mut buf,
+            &mut cursor,
+            &mut splitter,
+            &mut on_data,
+            &mut tokens,
+        )
+        .unwrap();
+
+        let content: String = deltas
+            .iter()
+            .filter(|(ch, _)| *ch == DeltaChannel::Content)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        let tool_calls: Vec<&str> = deltas
+            .iter()
+            .filter(|(ch, _)| *ch == DeltaChannel::ToolCall)
+            .map(|(_, s)| s.as_str())
+            .collect();
+
+        assert_eq!(content, "Let me check");
+        assert_eq!(tool_calls.len(), 1);
     }
 }
