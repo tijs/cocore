@@ -8,6 +8,7 @@
         enclave-build shell-build \
         stack-up stack-down stack-smoke stack-logs \
         mac-installer mac-release mac-install mac-uninstall \
+        register-cdhash \
         build test e2e clean
 
 lex-validate:
@@ -170,6 +171,36 @@ mac-release:
 	@echo "   dist/SHA256SUMS:"; cat dist/SHA256SUMS
 	@echo "==> release artifacts:"
 	@ls -lh dist/cocore.app.zip dist/cocore-mac-arm64.tar.gz dist/SHA256SUMS
+	@# Surface (and optionally register) the confidential cdHash so the
+	@# advisor's known-good set tracks this release. Print-only by default;
+	@# set COCORE_AUTO_REGISTER_CDHASH=1 to push it to Railway automatically.
+	@$(MAKE) register-cdhash
+
+# The Developer-ID-signed confidential worker nested inside cocore.app. Its
+# cdHash is what the confidential tier trusts (COCORE_KNOWN_GOOD_CDHASHES) —
+# extracted from the LOCAL notarized build (CI only ad-hoc signs, so the CI
+# cdHash is not the distributable one).
+WORKER_BIN := provider-shell/build/cocore.app/Contents/CoCoreProvider.app/Contents/MacOS/cocore-provider
+
+# `make register-cdhash` extracts the confidential worker's cdHash from the
+# built app and registers it in the advisor's known-good set. Print-only unless
+# COCORE_AUTO_REGISTER_CDHASH=1 (then it sets the Railway var + redeploys, only
+# ever APPENDING — see scripts/register-known-good.sh). No-op for a build that
+# didn't nest the confidential worker.
+register-cdhash:
+	@if [ ! -f "$(WORKER_BIN)" ]; then \
+	  echo "==> no confidential worker at $(WORKER_BIN) — skipping cdHash registration (non-confidential build)"; \
+	else \
+	  echo "==> extract + register confidential cdHash"; \
+	  mkdir -p dist; \
+	  ./scripts/extract-cdhash.sh "$(WORKER_BIN)" | tee dist/cdhash.json >/dev/null; \
+	  if [ "$$COCORE_AUTO_REGISTER_CDHASH" = "1" ]; then \
+	    ./scripts/register-known-good.sh --apply dist/cdhash.json; \
+	  else \
+	    ./scripts/register-known-good.sh dist/cdhash.json; \
+	    echo "   (COCORE_AUTO_REGISTER_CDHASH=1 make register-cdhash  → apply to Railway automatically)"; \
+	  fi; \
+	fi
 
 e2e:
 	@echo "M2: live pair flow"
