@@ -24,12 +24,16 @@
 # Flags:
 #   --apply              set COCORE_KNOWN_GOOD_CDHASHES on Railway (redeploys).
 #   --service <name>     advisor service name (default "Advisor"; see note).
+#   --max <n>            retain at most the n most-recent cdHashes (default 5;
+#                        0 = unbounded). Oldest are evicted first so users still
+#                        on a recent prior release keep being recognized.
 #
 # Optional env:
 #   COCORE_CURRENT_KNOWN_GOOD  the CURRENT value, if you'd rather not (or can't)
 #                              read it from Railway. Takes precedence over the
 #                              Railway read.
 #   COCORE_ADVISOR_SERVICE     same as --service.
+#   COCORE_KNOWN_GOOD_MAX      same as --max.
 
 set -euo pipefail
 
@@ -40,6 +44,11 @@ note() { printf '  %s\n' "$*"; }
 # The Railway service that runs the advisor. NOTE: capital "A" — the service is
 # named "Advisor"; lowercase "advisor" 404s on the Railway CLI.
 SERVICE="${COCORE_ADVISOR_SERVICE:-Advisor}"
+# Retain at most the most-recent N cdHashes so the set stays bounded as we cut
+# releases, while still recognizing recent prior versions so users mid-update
+# aren't dropped (the bug this whole flow exists to prevent). Oldest are evicted
+# first. 0 = unbounded. Override with --max or COCORE_KNOWN_GOOD_MAX.
+MAX="${COCORE_KNOWN_GOOD_MAX:-5}"
 apply="no"
 positional=()
 while [[ $# -gt 0 ]]; do
@@ -47,12 +56,15 @@ while [[ $# -gt 0 ]]; do
     --apply)     apply="yes"; shift ;;
     --service)   SERVICE="${2:?--service needs a name}"; shift 2 ;;
     --service=*) SERVICE="${1#*=}"; shift ;;
-    -h|--help)   sed -n '2,33p' "$0"; exit 0 ;;
+    --max)       MAX="${2:?--max needs a count}"; shift 2 ;;
+    --max=*)     MAX="${1#*=}"; shift ;;
+    -h|--help)   sed -n '2,35p' "$0"; exit 0 ;;
     --)          shift; break ;;
     -*)          die "unknown flag: $1 (see --help)" ;;
     *)           positional+=("$1"); shift ;;
   esac
 done
+case "$MAX" in *[!0-9]*) die "--max must be a non-negative integer, got: $MAX" ;; esac
 set -- ${positional[@]+"${positional[@]}"}
 arg="${1:-}"
 
@@ -108,30 +120,47 @@ elif current="$(read_railway_current)"; then
   have_current="yes"   # read succeeded (current may be empty = var unset)
 fi
 
-# --- compute the new env value (current set + new hash, space-joined, deduped) ---
-new_value="$cd_hash"
+# --- compute the new env value (current set + new hash, deduped, capped) ----
+# Build the ordered set oldest→newest: existing hashes in their current order,
+# then the new one appended at the end. Then cap to the most-recent MAX by
+# evicting from the FRONT (oldest), so a bounded set still recognizes recent
+# prior releases. known-good.ts splits the value on /[\s,]+/.
 already="no"
 declare -a seen=()
+add() {
+  h="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -z "$h" ]] && return 0
+  for e in ${seen[@]+"${seen[@]}"}; do [[ "$e" == "$h" ]] && return 0; done
+  seen+=("$h")
+}
 if [[ "$have_current" == "yes" && -n "$current" ]]; then
-  add() {
-    local h
-    h="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-    [[ -z "$h" ]] && return 0
-    for e in ${seen[@]+"${seen[@]}"}; do [[ "$e" == "$h" ]] && return 0; done
-    seen+=("$h")
-  }
   # shellcheck disable=SC2086
   for tok in $(printf '%s' "$current" | tr ',' ' '); do add "$tok"; done
-  for e in ${seen[@]+"${seen[@]}"}; do [[ "$e" == "$cd_hash" ]] && already="yes"; done
-  add "$cd_hash"
-  new_value="${seen[*]}"   # space-joined; known-good.ts splits on /[\s,]+/
 fi
+for e in ${seen[@]+"${seen[@]}"}; do [[ "$e" == "$cd_hash" ]] && already="yes"; done
+add "$cd_hash"
+
+# Cap to the most-recent MAX (0 = unbounded). Positive-offset array slicing
+# keeps this working on macOS's stock bash 3.2 (no negative-index slicing).
+declare -a dropped=()
+if [[ "$MAX" -gt 0 && "${#seen[@]}" -gt "$MAX" ]]; then
+  drop_n=$(( ${#seen[@]} - MAX ))
+  dropped=( "${seen[@]:0:drop_n}" )
+  seen=( "${seen[@]:drop_n}" )
+fi
+new_value="${seen[*]}"
 
 bold "==> known-good registration for secure release"
 note "new cdHash:        $cd_hash"
 note "advisor service:   $SERVICE"
+note "set size:          ${#seen[@]}$( [[ "$MAX" -gt 0 ]] && printf ' (max %s)' "$MAX" )"
 if [[ "$already" == "yes" ]]; then
   note "status:            ALREADY present (no-op)"
+fi
+if [[ "${#dropped[@]}" -gt 0 ]]; then
+  # Never silently truncate — name what aged out so an operator can tell
+  # "intended eviction" from "I lost a version still in the field".
+  note "evicted (oldest):  ${dropped[*]}"
 fi
 printf '\n'
 
@@ -140,8 +169,11 @@ if [[ "$apply" == "yes" ]]; then
   command -v railway >/dev/null 2>&1 || die "railway CLI not found (needed for --apply)"
   [[ "$have_current" == "yes" ]] \
     || die "could not read the current COCORE_KNOWN_GOOD_CDHASHES from Railway service '$SERVICE'. Refusing to apply blind — a replace would de-bless the fleet. Link the project (railway link) or pass COCORE_CURRENT_KNOWN_GOOD."
-  if [[ "$already" == "yes" ]]; then
-    note "Nothing to do — already in the set. No Railway change, no redeploy."
+  # No-op only when the hash is already present AND nothing aged out — i.e. the
+  # computed set is identical to what's live. A trim (dropped non-empty) still
+  # needs to be written even if the new hash was already there.
+  if [[ "$already" == "yes" && "${#dropped[@]}" -eq 0 ]]; then
+    note "Nothing to do — already in the set, nothing evicted. No Railway change, no redeploy."
     exit 0
   fi
   bold "==> applying to Railway service '$SERVICE' (this triggers a redeploy)"
