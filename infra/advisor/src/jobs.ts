@@ -162,7 +162,10 @@ function parseJobBody(input: unknown, generateId: () => string): ParsedJob | Par
   if (b["targetMachineId"] !== undefined && typeof b["targetMachineId"] !== "string") {
     return { ok: false, status: 400, error: "targetMachineId must be a string when provided" };
   }
-  if (b["outputSchema"] !== undefined && (typeof b["outputSchema"] !== "object" || b["outputSchema"] === null)) {
+  if (
+    b["outputSchema"] !== undefined &&
+    (typeof b["outputSchema"] !== "object" || b["outputSchema"] === null)
+  ) {
     return { ok: false, status: 400, error: "outputSchema must be an object when provided" };
   }
   if (b["tools"] !== undefined && !Array.isArray(b["tools"])) {
@@ -191,7 +194,11 @@ function parseJobBody(input: unknown, generateId: () => string): ParsedJob | Par
       targetMachineId: typeof b["targetMachineId"] === "string" ? b["targetMachineId"] : undefined,
       outputSchema:
         typeof b["outputSchema"] === "object" && b["outputSchema"] !== null
-          ? (b["outputSchema"] as { name: string; strict?: boolean; schema: Record<string, unknown> })
+          ? (b["outputSchema"] as {
+              name: string;
+              strict?: boolean;
+              schema: Record<string, unknown>;
+            })
           : undefined,
       tools: Array.isArray(b["tools"]) ? b["tools"] : undefined,
       toolChoice: typeof b["toolChoice"] === "string" ? b["toolChoice"] : undefined,

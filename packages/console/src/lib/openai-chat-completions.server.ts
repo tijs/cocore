@@ -200,7 +200,12 @@ export function parseRequest(raw: OpenAiChatRequest): ParsedRequest | string {
   const messages: ChatMessage[] = [];
   let promptBytes = 0;
   let imageBytes = 0;
-  for (const m of raw.messages as Array<{ role?: unknown; content?: unknown; tool_calls?: unknown; tool_call_id?: unknown }>) {
+  for (const m of raw.messages as Array<{
+    role?: unknown;
+    content?: unknown;
+    tool_calls?: unknown;
+    tool_call_id?: unknown;
+  }>) {
     if (typeof m.role !== "string") {
       return "each message must include a string role";
     }
@@ -318,7 +323,9 @@ export function parseRequest(raw: OpenAiChatRequest): ParsedRequest | string {
         function: {
           name: fn.name,
           ...(typeof fn.description === "string" ? { description: fn.description } : {}),
-          ...(fn.parameters !== undefined && typeof fn.parameters === "object" && fn.parameters !== null
+          ...(fn.parameters !== undefined &&
+          typeof fn.parameters === "object" &&
+          fn.parameters !== null
             ? { parameters: fn.parameters as Record<string, unknown> }
             : {}),
         },
@@ -388,10 +395,7 @@ function flattenMessages(messages: ChatMessage[]): string {
  *  must travel as a messages-v1 envelope). */
 export function requestHasImages(messages: ChatMessage[]): boolean {
   return messages.some(
-    (m) =>
-      typeof m.content !== "string" ||
-      m.tool_calls != null ||
-      m.tool_call_id != null,
+    (m) => typeof m.content !== "string" || m.tool_calls != null || m.tool_call_id != null,
   );
 }
 
@@ -763,19 +767,24 @@ export async function bufferedResponse(
   // Reassemble tool-call deltas into the OpenAI tool_calls array.
   // Each delta is a JSON array fragment; we concatenate the arguments
   // strings and take the id/name from the first delta that has them.
-  let toolCalls: Array<{
-    id: string;
-    type: "function";
-    function: { name: string; arguments: string };
-  }> | undefined;
+  let toolCalls:
+    | Array<{
+        id: string;
+        type: "function";
+        function: { name: string; arguments: string };
+      }>
+    | undefined;
   let hasToolCalls = false;
   if (toolCallChunks.length > 0) {
     hasToolCalls = true;
-    const assembled: Record<number, {
-      id: string;
-      type: "function";
-      function: { name: string; arguments: string };
-    }> = {};
+    const assembled: Record<
+      number,
+      {
+        id: string;
+        type: "function";
+        function: { name: string; arguments: string };
+      }
+    > = {};
     for (const chunk of toolCallChunks) {
       try {
         const deltas = JSON.parse(chunk) as Array<{

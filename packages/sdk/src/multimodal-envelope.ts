@@ -172,21 +172,28 @@ function parseToolFields(
 ): { tool_calls?: EnvelopeToolCall[]; tool_call_id?: string } {
   const out: { tool_calls?: EnvelopeToolCall[]; tool_call_id?: string } = {};
   if (msg.tool_call_id !== undefined) {
-    if (typeof msg.tool_call_id !== "string") throw new Error(`message ${i} tool_call_id must be a string`);
+    if (typeof msg.tool_call_id !== "string")
+      throw new Error(`message ${i} tool_call_id must be a string`);
     out.tool_call_id = msg.tool_call_id;
   }
   if (msg.tool_calls !== undefined) {
     if (!Array.isArray(msg.tool_calls)) throw new Error(`message ${i} tool_calls must be an array`);
     out.tool_calls = msg.tool_calls.map((tc, j) => {
-      if (!tc || typeof tc !== "object") throw new Error(`message ${i} tool_call ${j} is not an object`);
+      if (!tc || typeof tc !== "object")
+        throw new Error(`message ${i} tool_call ${j} is not an object`);
       const t = tc as Record<string, unknown>;
       if (typeof t.id !== "string") throw new Error(`message ${i} tool_call ${j} missing id`);
-      if (t.type !== "function") throw new Error(`message ${i} tool_call ${j} type must be "function"`);
+      if (t.type !== "function")
+        throw new Error(`message ${i} tool_call ${j} type must be "function"`);
       const fn = t.function as Record<string, unknown> | undefined;
       if (!fn || typeof fn.name !== "string" || typeof fn.arguments !== "string") {
         throw new Error(`message ${i} tool_call ${j} function must have name and arguments`);
       }
-      return { id: t.id, type: "function" as const, function: { name: fn.name, arguments: fn.arguments } };
+      return {
+        id: t.id,
+        type: "function" as const,
+        function: { name: fn.name, arguments: fn.arguments },
+      };
     });
   }
   return out;

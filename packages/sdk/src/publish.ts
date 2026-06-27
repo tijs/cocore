@@ -219,7 +219,9 @@ export async function publishJob(args: {
     ...(args.inputs.outputSchema ? { outputSchema: args.inputs.outputSchema } : {}),
     ...(args.inputs.tools ? { tools: args.inputs.tools } : {}),
     ...(args.inputs.toolChoice ? { toolChoice: args.inputs.toolChoice } : {}),
-    ...(args.inputs.toolChoiceFunction ? { toolChoiceFunction: args.inputs.toolChoiceFunction } : {}),
+    ...(args.inputs.toolChoiceFunction
+      ? { toolChoiceFunction: args.inputs.toolChoiceFunction }
+      : {}),
   };
   const out = await args.transport.publish({
     repo: args.requesterDid,
@@ -311,7 +313,9 @@ export async function submitJob(args: {
       ...(args.inputs.outputSchema ? { outputSchema: args.inputs.outputSchema } : {}),
       ...(args.inputs.tools ? { tools: args.inputs.tools } : {}),
       ...(args.inputs.toolChoice ? { toolChoice: args.inputs.toolChoice } : {}),
-      ...(args.inputs.toolChoiceFunction ? { toolChoiceFunction: args.inputs.toolChoiceFunction } : {}),
+      ...(args.inputs.toolChoiceFunction
+        ? { toolChoiceFunction: args.inputs.toolChoiceFunction }
+        : {}),
     },
   });
   return { authorization, job };

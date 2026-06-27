@@ -356,12 +356,15 @@ async function fetchAdvisorOnlineDids(): Promise<AdvisorOnlineResult | null> {
         // same owner DID get separate entries. Fall back to the DID alone for
         // legacy agents that predate the machineId field.
         const key = p.machineId ? `${p.did}:${p.machineId}` : p.did;
-        return [key, {
-          lastSeen: p.lastSeen ?? p.attestedAt!,
-          verifiedTier,
-          supportsToolCalls: p.supportsToolCalls === true,
-          toolCallModels: p.toolCallModels,
-        }];
+        return [
+          key,
+          {
+            lastSeen: p.lastSeen ?? p.attestedAt!,
+            verifiedTier,
+            supportsToolCalls: p.supportsToolCalls === true,
+            toolCallModels: p.toolCallModels,
+          },
+        ];
       }),
     );
     return {

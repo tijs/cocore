@@ -24,7 +24,11 @@ import { runTraced } from "@/lib/o11y.server.ts";
 import { restoreAtprotoSessionEffect } from "@/integrations/auth/atproto.server.ts";
 import { appviewBackedSession, appviewSessionInfo } from "@/lib/appview-backed-session.server.ts";
 import { isAppviewForwardConfigured } from "@/lib/appview-pds-forward.server.ts";
-import { type AdvisorProviderRow, type DispatchInputs, runDispatch } from "@/lib/inference-dispatch.server.ts";
+import {
+  type AdvisorProviderRow,
+  type DispatchInputs,
+  runDispatch,
+} from "@/lib/inference-dispatch.server.ts";
 import { listMyFriendDids } from "@/lib/friends.server.ts";
 import { resolveProBonoProviderKeys } from "@/lib/pro-bono.server.ts";
 import {
@@ -315,11 +319,7 @@ export async function handlePrivateChatCompletions(request: Request): Promise<Re
 
   // Tool calling gate: if the request includes tools, verify at least one
   // friend provider supports tool calling for this model.
-  const toolError = await checkToolCallSupport(
-    parsed.model,
-    parsed.tools,
-    allowedProviderDids,
-  );
+  const toolError = await checkToolCallSupport(parsed.model, parsed.tools, allowedProviderDids);
   if (toolError) return jsonError(400, toolError, "tool_calls_not_supported");
 
   const id = `chatcmpl-${crypto.randomUUID().replace(/-/g, "")}`;

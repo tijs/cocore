@@ -163,7 +163,10 @@ export interface JobRecord {
   expiresAt: string;
   createdAt: string;
   outputSchema?: { name?: string; strict?: boolean; schema?: Record<string, unknown> };
-  tools?: { type: "function"; function: { name: string; description?: string; parameters?: Record<string, unknown> } }[];
+  tools?: {
+    type: "function";
+    function: { name: string; description?: string; parameters?: Record<string, unknown> };
+  }[];
   toolChoice?: "auto" | "none" | "required";
 }
 

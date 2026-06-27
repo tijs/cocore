@@ -140,20 +140,21 @@ describe("handleChatCompletions wire contract", () => {
   test("tool requests require the requested model in toolCallModels when reported", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify([
-            {
-              did: "did:plc:provider",
-              supportedModels: ["model-a"],
-              attestedAt: new Date().toISOString(),
-              active: true,
-              supportsToolCalls: true,
-              toolCallModels: ["model-b"],
-            },
-          ]),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify([
+              {
+                did: "did:plc:provider",
+                supportedModels: ["model-a"],
+                attestedAt: new Date().toISOString(),
+                active: true,
+                supportsToolCalls: true,
+                toolCallModels: ["model-b"],
+              },
+            ]),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
       ),
     );
     const res = await handleChatCompletions(
@@ -167,20 +168,21 @@ describe("handleChatCompletions wire contract", () => {
   test("tool requests pass gating when toolCallModels contains the requested model", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify([
-            {
-              did: "did:plc:provider",
-              supportedModels: ["model-a"],
-              attestedAt: new Date().toISOString(),
-              active: true,
-              supportsToolCalls: true,
-              toolCallModels: ["model-a"],
-            },
-          ]),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify([
+              {
+                did: "did:plc:provider",
+                supportedModels: ["model-a"],
+                attestedAt: new Date().toISOString(),
+                active: true,
+                supportsToolCalls: true,
+                toolCallModels: ["model-a"],
+              },
+            ]),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
       ),
     );
     state.events = [
