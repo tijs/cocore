@@ -742,6 +742,52 @@ final class AgentSupervisor {
         }
     }
 
+    /// This machine's receipt-signing P-256 public key (base64 of the raw
+    /// 64-byte X‖Y point — the value published as `attestation.publicKey`), read
+    /// by running the bundled CLI's `agent pubkey` (which loads the same
+    /// Secure-Enclave identity the serve loop signs with). Returns nil on any
+    /// error. The Secure Mode wizard threads this into the coordinator's
+    /// `request-attestation` call so the MDM DeviceInformation attestation binds
+    /// to the signing key (`DeviceAttestationNonce = sha256(pubkey)`). Same
+    /// synchronous shell-out pattern as `probeTier`.
+    nonisolated static func agentPubkey() -> String? {
+        guard let bin = locateBinary() else { return nil }
+        let p = Process()
+        p.executableURL = bin
+        p.arguments = ["agent", "pubkey"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+        } catch {
+            return nil
+        }
+        // Bound the wait. `readDataToEndOfFile()` blocks until the child closes
+        // stdout, so a wedged `cocore agent pubkey` (Secure Enclave contention,
+        // a hung keychain prompt) would otherwise pin this thread forever and
+        // leave the wizard's attesting step spinning. 15s is generous for an
+        // enclave key read; past it we kill the child and give up — the caller
+        // then falls back to the agent's background attestation. (We poll
+        // termination rather than read-then-wait precisely so the read can't be
+        // the thing that hangs.)
+        let deadline = Date().addingTimeInterval(15)
+        while p.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        if p.isRunning {
+            p.terminate()
+            return nil
+        }
+        guard p.terminationStatus == 0 else { return nil }
+        // Output is a single ~88-char base64 line — far under the pipe buffer,
+        // so the child never blocks on write and this read returns promptly.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let out = (String(data: data, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return out.isEmpty ? nil : out
+    }
+
     /// The binary to run for `agent serve`. On a machine the owner opted into
     /// attested-confidential we spawn the nested, measured push-receiver bundle
     /// `Contents/CoCoreProvider.app/Contents/MacOS/cocore-provider` — it holds

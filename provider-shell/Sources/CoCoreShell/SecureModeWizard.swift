@@ -163,12 +163,12 @@ struct AttestationDiagnostic {
     var enrolled: Bool
     var elapsedSeconds: Int
     var polls: Int
-    /// `push-attestation` response: status (bundled|acknowledged|queued|
+    /// `request-attestation` (option-B) response: status (queued|
     /// queued-no-push|error), whether it was a stub (no real NanoMDM call),
     /// and any server-side detail.
-    var pushStatus: String?
-    var pushStubbed: Bool?
-    var pushDetail: String?
+    var requestStatus: String?
+    var requestStubbed: Bool?
+    var requestDetail: String?
     /// Last `attestation-chain` poll: store status (pending|error|captured),
     /// any detail, and the last non-200 HTTP code seen (nil when every GET was
     /// a clean 200 that simply carried no chain yet).
@@ -180,7 +180,7 @@ struct AttestationDiagnostic {
     /// least-specific so the first matching cause wins.
     var code: String {
         if !enrolled { return "secure-mode/not-enrolled" }
-        if pushStatus == "error" { return "secure-mode/push-failed" }
+        if requestStatus == "error" { return "secure-mode/push-failed" }
         if chainStatus == "error" || chainHTTP != nil { return "secure-mode/chain-store-error" }
         return "secure-mode/chain-not-captured"
     }
@@ -194,7 +194,7 @@ struct AttestationDiagnostic {
                 + "the management profile."
         case "secure-mode/push-failed":
             return "The coordinator couldn't queue the attestation request "
-                + "(\(pushDetail ?? "no detail"))."
+                + "(\(requestDetail ?? "no detail"))."
         case "secure-mode/chain-store-error":
             let detail = chainDetail ?? (chainHTTP.map { "HTTP \($0)" } ?? "unknown")
             return "The attestation-chain store returned an error (\(detail))."
@@ -216,8 +216,10 @@ struct AttestationDiagnostic {
         case "secure-mode/chain-store-error":
             return "check the console chain store + the step-ca / NanoMDM attestation webhook ingest."
         default:
-            return "the Attest button does not itself trigger a hardware attestation — "
-                + "capture is driven by the agent's background option-B flow. Check the "
+            return "the option-B attestation request is in (MDM DeviceInformation "
+                + "bound to the signing key); capture is async and Apple-rate-limits it "
+                + "(~1/device/7d), so it commonly won't land inside the wizard's window. "
+                + "The agent's background flow also re-requests/picks it up. Check the "
                 + "agent log for \"MDA auto:\" lines (request/bind), and with "
                 + "COCORE_MDM_WEBHOOK_DEBUG set GET attestation-chain?serial="
                 + "zzwebhookdebuglast to see whether NanoMDM is posting results."
@@ -227,15 +229,20 @@ struct AttestationDiagnostic {
     /// The full key=value block we log + surface. One place to read every
     /// signal that fed the classification.
     var report: String {
-        let stub = pushStubbed.map { $0 ? "true" : "false" } ?? "—"
+        let stub = requestStubbed.map { $0 ? "true" : "false" } ?? "—"
         // nil chainHTTP means either a clean 200 last poll OR no poll ever ran
-        // (push-failed path) — distinguish them via polls so the log never
+        // (request-failed path) — distinguish them via polls so the log never
         // shows a fabricated "200" for a leg that never executed.
         let http = chainHTTP.map { "\($0)" } ?? (polls == 0 ? "n/a" : "200")
+        // `chain-not-captured` is the benign "requested, still landing" outcome
+        // shown on the positive pending screen — say "pending" there, not
+        // "failed", so the copyable detail doesn't read as an error. Genuine
+        // faults keep the "failed" header.
+        let verb = code == "secure-mode/chain-not-captured" ? "pending" : "failed"
         return [
-            "co/core Secure Mode attestation failed [\(code)]",
+            "co/core Secure Mode attestation \(verb) [\(code)]",
             "serial=\(serial) enrolled=\(enrolled) elapsed=\(elapsedSeconds)s polls=\(polls)",
-            "push-attestation: status=\(pushStatus ?? "—") stubbed=\(stub) detail=\(pushDetail ?? "—")",
+            "request-attestation: status=\(requestStatus ?? "—") stubbed=\(stub) detail=\(requestDetail ?? "—")",
             "chain-store: status=\(chainStatus ?? "—") http=\(http) detail=\(chainDetail ?? "—")",
             "cause: \(summary)",
             "next: \(operatorNextStep)",
@@ -262,8 +269,13 @@ struct SecureModeWizardView: View {
 
     /// The wizard's explicit state machine. Every step is reachable, and
     /// every step is skippable (→ Secure Mode stays best-effort).
+    /// `pending` is a terminal-but-positive state: the attestation has been
+    /// requested but capture is async + Apple-rate-limited, so we present
+    /// "requested, will land in the background" rather than a red failure. It
+    /// lives AFTER `done` so the linear `skipStep` sequence (intro→…→done) is
+    /// unchanged — `pending` is only reached by an explicit `advance(to:)`.
     enum Step: Int {
-        case intro, updating, enroll, attesting, done
+        case intro, updating, enroll, attesting, done, pending
     }
 
     @State private var step: Step = .intro
@@ -285,13 +297,17 @@ struct SecureModeWizardView: View {
 
     /// Diagnostic signals captured during the attesting step, so a stall
     /// surfaces WHY (see `AttestationDiagnostic`) instead of just "not ready".
-    @State private var pushStatus: String?
-    @State private var pushStubbed: Bool?
-    @State private var pushDetail: String?
+    @State private var requestStatus: String?
+    @State private var requestStubbed: Bool?
+    @State private var requestDetail: String?
     @State private var chainStatus: String?
     @State private var chainDetail: String?
     @State private var chainHTTP: Int?
     @State private var pollAttempts = 0
+    /// The copy-pasteable diagnostic report shown (collapsed) on the `pending`
+    /// step, so the benign "still attesting" state still carries the full
+    /// signal an operator can paste back without it reading as a failure.
+    @State private var pendingDetail: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -361,15 +377,21 @@ struct SecureModeWizardView: View {
         .background(Brand.surface)
     }
 
+    /// Terminal states show a single "Done" and drop the "Skip"/"Not now"
+    /// affordances. `pending` is terminal-but-positive (attestation requested,
+    /// landing in the background), so it reads like `done`, not a stuck step.
+    private var isTerminal: Bool { step == .done || step == .pending }
+
     private var footer: some View {
         HStack(spacing: 12) {
-            // Skip is always available — Secure Mode is best-effort.
-            if step != .done {
+            // Skip is available on the in-progress steps — Secure Mode is
+            // best-effort.
+            if !isTerminal {
                 Button("Skip this step") { skipStep() }
                     .buttonStyle(.link)
             }
             Spacer()
-            if step == .done {
+            if isTerminal {
                 Button("Done") { close() }
                     .keyboardShortcut(.defaultAction)
             } else {
@@ -388,6 +410,7 @@ struct SecureModeWizardView: View {
         case .enroll: enrollStep
         case .attesting: attestingStep
         case .done: doneStep
+        case .pending: pendingStep
         }
     }
 
@@ -509,6 +532,42 @@ struct SecureModeWizardView: View {
             Text("Requesters can now verify your Mac in hardware before sending it work.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Terminal-but-positive: the attestation has been requested (option-B) but
+    /// the Apple hardware attestation lands asynchronously and is rate-limited,
+    /// so we DON'T present the timeout as a failure. The owner can close the
+    /// window; the agent's background flow finishes the bind and Secure Mode
+    /// lights up on its own.
+    private var pendingStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Attestation requested", systemImage: "clock.badge.checkmark")
+                .font(.title2).bold().foregroundStyle(Brand.accentText)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(
+                "We've asked this Mac to hardware-attest its identity, bound to your "
+                    + "agent's signing key. Apple runs this in the background and rate-limits "
+                    + "it, so the attestation can take a while to land — sometimes hours. You "
+                    + "don't need to keep this window open: Secure Mode will turn on "
+                    + "automatically once the attestation is captured."
+            )
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button("Check again now") { advance(to: .attesting); startAttestingStep() }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    .disabled(working)
+            }
+            if let detail = pendingDetail {
+                DisclosureGroup("Technical detail") {
+                    Text(detail)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
         }
     }
 
@@ -668,31 +727,31 @@ struct SecureModeWizardView: View {
                 progress = nil
                 return  // attestingStep now renders the "Sign in again" panel
             }
-            let pushStart = Date()
+            let requestStart = Date()
             do {
-                try await pushAttestation()
+                try await requestAttestation()
                 progress = "Building the attestation chain…"
                 pollForAttestationChain()
             } catch {
                 working = false
-                // The push leg failing is the same silent-failure pattern we
+                // The request leg failing is the same silent-failure pattern we
                 // fix for the poll leg — classify + log it instead of dropping
-                // to a bare string. The push definitively failed (it threw), so
-                // force the error status UNCONDITIONALLY: recordPushResponse may
-                // have already captured a non-"error" body status, and a plain
+                // to a bare string. The request definitively failed (it threw),
+                // so force the error status UNCONDITIONALLY: recordRequestResponse
+                // may have already captured a non-"error" body status, and a plain
                 // `?? "error"` would leave that stale value and misclassify the
                 // failure onto a chain code. Keep the server's message as the
                 // detail when it gave one, else the thrown error's text.
-                pushStatus = "error"
-                pushDetail = pushDetail ?? error.localizedDescription
+                requestStatus = "error"
+                requestDetail = requestDetail ?? error.localizedDescription
                 let diag = AttestationDiagnostic(
                     serial: serial,
                     enrolled: EnrollmentProbe.isEnrolled(),
-                    elapsedSeconds: Int(Date().timeIntervalSince(pushStart)),
+                    elapsedSeconds: Int(Date().timeIntervalSince(requestStart)),
                     polls: 0,
-                    pushStatus: pushStatus,
-                    pushStubbed: pushStubbed,
-                    pushDetail: pushDetail,
+                    requestStatus: requestStatus,
+                    requestStubbed: requestStubbed,
+                    requestDetail: requestDetail,
                     chainStatus: nil,
                     chainDetail: nil,
                     chainHTTP: nil
@@ -703,10 +762,39 @@ struct SecureModeWizardView: View {
         }
     }
 
-    /// POST {apiBase}/api/agent/mdm/push-attestation {serial,enrollmentId}.
-    private func pushAttestation() async throws {
+    /// POST {apiBase}/api/agent/mdm/request-attestation {serial,udid,publicKey}.
+    ///
+    /// This is the call that ACTUALLY drives hardware attestation (option-B): the
+    /// coordinator sends this Mac an MDM `DeviceInformation` attestation bound to
+    /// the agent's signing key (`DeviceAttestationNonce = sha256(publicKey)`), so
+    /// the captured chain earns `hardware-attested`. The old wizard only hit
+    /// `push-attestation`, which is a no-op stub for the bundled-ACME backend —
+    /// it polled a store nothing was filling, so first runs always timed out.
+    ///
+    /// Best-effort on inputs: if we can't read this Mac's UDID or the agent's
+    /// signing key we DON'T fail — we skip the explicit request (the agent's own
+    /// background option-B flow still drives it) and fall through to polling for
+    /// an already-captured chain. Throws only on a definitive server error
+    /// (non-200), which the caller classifies as `secure-mode/push-failed`.
+    private func requestAttestation() async throws {
+        // The agent's receipt-signing pubkey (base64 raw 64-byte P-256) — read
+        // off the main thread since it shells out to the bundled CLI.
+        let publicKey = await Task.detached { AgentSupervisor.agentPubkey() }.value
+        guard !udid.isEmpty, let publicKey else {
+            requestStatus = nil
+            requestStubbed = nil
+            requestDetail =
+                "couldn't read this Mac's UDID or the agent signing key; relying on "
+                + "the agent's background attestation"
+            NSLog(
+                "cocore: Secure Mode — skipping explicit request-attestation (udidEmpty=%@ pubkey=%@); polling for an existing chain",
+                udid.isEmpty ? "true" : "false",
+                publicKey == nil ? "nil" : "ok"
+            )
+            return
+        }
         let (base, apiKey) = try agentAuth()
-        guard let url = URL(string: "\(base)/api/agent/mdm/push-attestation") else {
+        guard let url = URL(string: "\(base)/api/agent/mdm/request-attestation") else {
             throw WizardError.badURL
         }
         var req = URLRequest(url: url)
@@ -714,11 +802,10 @@ struct SecureModeWizardView: View {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 20
-        var body: [String: String] = ["serial": serial]
-        if let id = enrollmentId { body["enrollmentId"] = id }
+        let body: [String: String] = ["serial": serial, "udid": udid, "publicKey": publicKey]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await URLSession.shared.data(for: req)
-        recordPushResponse(data)
+        recordRequestResponse(data)
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
             throw WizardError.http((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
@@ -727,25 +814,26 @@ struct SecureModeWizardView: View {
     /// Reset the captured diagnostic signals at the start of an attest run so a
     /// Retry never reports stale state from a previous attempt.
     private func resetAttestDiagnostics() {
-        pushStatus = nil
-        pushStubbed = nil
-        pushDetail = nil
+        requestStatus = nil
+        requestStubbed = nil
+        requestDetail = nil
         chainStatus = nil
         chainDetail = nil
         chainHTTP = nil
         pollAttempts = 0
+        pendingDetail = nil
     }
 
-    /// Capture the `push-attestation` response signals (status/stubbed/detail)
-    /// for the failure diagnostic. Best-effort: a non-JSON body just leaves the
-    /// fields nil.
-    private func recordPushResponse(_ data: Data) {
+    /// Capture the `request-attestation` response signals (status/stubbed/detail)
+    /// for the diagnostic. Best-effort: a non-JSON body just leaves the fields
+    /// nil.
+    private func recordRequestResponse(_ data: Data) {
         guard
             let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return }
-        pushStatus = obj["status"] as? String
-        pushStubbed = obj["stubbed"] as? Bool
-        pushDetail = obj["detail"] as? String
+        requestStatus = obj["status"] as? String
+        requestStubbed = obj["stubbed"] as? Bool
+        requestDetail = obj["detail"] as? String
     }
 
     /// Poll GET {apiBase}/api/agent/mdm/attestation-chain?serial=... until a
@@ -800,15 +888,30 @@ struct SecureModeWizardView: View {
                     enrolled: EnrollmentProbe.isEnrolled(),
                     elapsedSeconds: Int(Date().timeIntervalSince(start)),
                     polls: pollAttempts,
-                    pushStatus: pushStatus,
-                    pushStubbed: pushStubbed,
-                    pushDetail: pushDetail,
+                    requestStatus: requestStatus,
+                    requestStubbed: requestStubbed,
+                    requestDetail: requestDetail,
                     chainStatus: chainStatus,
                     chainDetail: chainDetail,
                     chainHTTP: chainHTTP
                 )
                 NSLog("cocore: %@", diag.report)
-                stepError = diag.userMessage
+                // `chain-not-captured` is the EXPECTED first-run outcome: the
+                // option-B request is in, but Apple captures the attestation
+                // asynchronously and rate-limits it, so it rarely lands inside
+                // this 180s window. Present it as "requested, pending" — not a
+                // red failure — and keep the durable Secure Mode intent so the
+                // agent keeps re-driving it until the chain lands. Genuine
+                // faults (not-enrolled / request-failed / store-error) still
+                // surface as an error the owner must act on.
+                if diag.code == "secure-mode/chain-not-captured" {
+                    MenuBarController.setSecureModeDesired(true)
+                    state.secureModeDesired = true
+                    pendingDetail = diag.report
+                    advance(to: .pending)
+                } else {
+                    stepError = diag.userMessage
+                }
             }
         }
     }
