@@ -303,7 +303,26 @@ export function parseRequest(raw: OpenAiChatRequest): ParsedRequest | string {
     if (!Array.isArray(raw.tools)) {
       return "tools must be an array when provided";
     }
-    tools = raw.tools as ParsedRequest["tools"];
+    const validated: ParsedRequest["tools"] = [];
+    for (let i = 0; i < raw.tools.length; i++) {
+      const t = raw.tools[i] as Record<string, unknown> | null;
+      if (!t || typeof t !== "object") return `tools[${i}] must be an object`;
+      if (t.type !== "function") return `tools[${i}].type must be "function"`;
+      const fn = t.function as Record<string, unknown> | undefined;
+      if (!fn || typeof fn.name !== "string" || fn.name.length === 0)
+        return `tools[${i}].function.name must be a non-empty string`;
+      validated.push({
+        type: "function",
+        function: {
+          name: fn.name,
+          ...(typeof fn.description === "string" ? { description: fn.description } : {}),
+          ...(fn.parameters !== undefined && typeof fn.parameters === "object" && fn.parameters !== null
+            ? { parameters: fn.parameters as Record<string, unknown> }
+            : {}),
+        },
+      });
+    }
+    tools = validated;
   }
   // Parse tool_choice.
   let toolChoice: ParsedRequest["toolChoice"];
