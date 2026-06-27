@@ -230,6 +230,93 @@ def test_tool_choice_object_form(base_url, api_key, model):
     return False
 
 
+def test_full_tool_loop(base_url, api_key, model):
+    """Test a real two-turn tool loop: model emits tool_calls, the client
+    executes the tool, sends a tool-role result, and the model answers from
+    that result."""
+    print("\n=== Full tool loop ===")
+    messages = list(FORCED_TOOL_MESSAGES)
+    status, body = make_request(
+        base_url,
+        api_key,
+        {
+            "model": model,
+            "messages": messages,
+            "tools": TOOLS,
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+            "max_tokens": 256,
+        },
+    )
+    print(f"  turn1 status: {status}")
+    if status != 200:
+        print(f"  FAIL: turn1 returned {status}")
+        return False
+
+    assistant = body["choices"][0]["message"]
+    tool_calls = assistant.get("tool_calls") or []
+    if not tool_calls:
+        print("  FAIL: turn1 did not return tool_calls")
+        return False
+    tool_call = tool_calls[0]
+    if tool_call["function"]["name"] != "get_weather":
+        print(f"  FAIL: expected get_weather, got {tool_call['function']['name']}")
+        return False
+    args = json.loads(tool_call["function"]["arguments"])
+    print(f"  executing tool: get_weather({args})")
+
+    # Deterministic local tool implementation for the E2E. The OpenAI-style
+    # API only asks the model to *request* tool calls; the client/agent owns
+    # executing the function and sending the result back as a tool message.
+    tool_result = {
+        "city": args.get("city", "Tokyo"),
+        "temperature_c": 21.7,
+        "condition": "clear",
+    }
+    messages.append(
+        {
+            "role": "assistant",
+            "content": assistant.get("content") or "",
+            "tool_calls": tool_calls,
+        }
+    )
+    messages.append(
+        {
+            "role": "tool",
+            "tool_call_id": tool_call["id"],
+            "content": json.dumps(tool_result),
+        }
+    )
+    messages.append(
+        {
+            "role": "user",
+            "content": "Now answer using the tool result. Include the exact temperature.",
+        }
+    )
+
+    status, body = make_request(
+        base_url,
+        api_key,
+        {
+            "model": model,
+            "messages": messages,
+            "tools": TOOLS,
+            "tool_choice": "none",
+            "max_tokens": 128,
+        },
+    )
+    print(f"  turn2 status: {status}")
+    if status != 200:
+        print(f"  FAIL: turn2 returned {status}")
+        return False
+    content = body["choices"][0]["message"].get("content") or ""
+    print(f"  final answer: {content[:200]}")
+    if "Tokyo" in content and "21.7" in content:
+        print("  PASS: model used the executed tool result")
+        return True
+    print("  FAIL: final answer did not clearly use the tool result")
+    return False
+
+
 def test_structured_output(base_url, api_key, model):
     """Test that response_format produces schema-conformant output."""
     print("\n=== Structured output (response_format) ===")
@@ -373,6 +460,7 @@ def main():
         results.append(("no_tools_not_gated", test_no_tools_not_gated(base_url, args.api_key, model)))
         results.append(("tool_call_non_streaming", test_tool_call_non_streaming(base_url, args.api_key, model)))
         results.append(("tool_choice_object_form", test_tool_choice_object_form(base_url, args.api_key, model)))
+        results.append(("full_tool_loop", test_full_tool_loop(base_url, args.api_key, model)))
         results.append(("streaming_tool_call", test_streaming_tool_call(base_url, args.api_key, model)))
         results.append(("structured_output", test_structured_output(base_url, args.api_key, model)))
 
