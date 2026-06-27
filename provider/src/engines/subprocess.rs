@@ -279,9 +279,13 @@ pub fn apply_hf_download_env(cmd: &mut Command) {
 fn xet_activity_mtime() -> u64 {
     // Mirror huggingface_hub's cache-root resolution:
     // HF_HOME > XDG_CACHE_HOME/huggingface > ~/.cache/huggingface.
-    let hf_cache_root = if let Ok(hf_home) = std::env::var("HF_HOME").filter(|v| !v.is_empty()) {
+    // (`std::env::var` returns a Result, so `.ok().filter(..)` to drop both
+    // the unset and the set-but-empty cases before falling through.)
+    let hf_cache_root = if let Some(hf_home) =
+        std::env::var("HF_HOME").ok().filter(|v| !v.is_empty())
+    {
         PathBuf::from(hf_home)
-    } else if let Ok(xdg) = std::env::var("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
+    } else if let Some(xdg) = std::env::var("XDG_CACHE_HOME").ok().filter(|v| !v.is_empty()) {
         Path::new(&xdg).join("huggingface")
     } else {
         let Ok(home) = std::env::var("HOME") else {
