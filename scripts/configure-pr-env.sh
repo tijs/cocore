@@ -67,14 +67,28 @@ fi
 # AppView. The internal secret isn't cloned — reuse Client's if it has one,
 # else mint a fresh one for this env.
 KEY="$(get "$CLIENT_SERVICE" ATPROTO_PRIVATE_KEY_JWK)"
-[[ -n "$KEY" ]] || { echo "ERROR: $ENV $CLIENT_SERVICE has no ATPROTO_PRIVATE_KEY_JWK (clone incomplete)" >&2; exit 1; }
+if [[ -z "$KEY" ]]; then
+  # Railway's env clone does not reliably carry the (sealed) OAuth key over, so
+  # a fresh PR-env clone can land without it. Mint one for THIS env instead of
+  # hard-failing — same self-heal pattern as COCORE_INTERNAL_SECRET below. A
+  # preview env is isolated + ephemeral, so a per-env OAuth client key is
+  # self-consistent: the console publishes its own matching jwks.json, and we
+  # set the identical key on BOTH Client and AppView (so the OAuth restorer's
+  # keyset matches the minting client). Production is untouched.
+  note "$CLIENT_SERVICE has no ATPROTO_PRIVATE_KEY_JWK (clone incomplete) — minting one for $ENV"
+  KEY="$(bash "$(dirname "$0")/generate-atproto-jwk.sh")"
+  [[ -n "$KEY" ]] || { echo "ERROR: failed to mint ATPROTO_PRIVATE_KEY_JWK for $ENV" >&2; exit 1; }
+fi
 SECRET="$(get "$CLIENT_SERVICE" COCORE_INTERNAL_SECRET)"
 [[ -n "$SECRET" ]] || SECRET="$(get "$SERVICES_SERVICE" COCORE_INTERNAL_SECRET)"
 [[ -n "$SECRET" ]] || SECRET="$(openssl rand -hex 32)"
 note "secrets resolved (OAuth key + internal secret)"
 
-# Client: own public URLs + the AppView DID it service-auths against.
+# Client: own public URLs + the AppView DID it service-auths against. Also
+# (re)assert the OAuth key so a freshly-minted one lands on the Client too —
+# idempotent when the clone already carried it.
 railway variables --project "$PROJECT" --service "$CLIENT_SERVICE" --environment "$ENV" --skip-deploys \
+  --set "ATPROTO_PRIVATE_KEY_JWK=$KEY" \
   --set "COCORE_ADVISOR_URL=$ADVISOR_URL" \
   --set "COCORE_APPVIEW_DID=$SERVICES_DID" \
   --set "COCORE_APPVIEW_INTERNAL_URL=http://services.railway.internal:8081" \
