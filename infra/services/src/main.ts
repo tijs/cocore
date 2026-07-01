@@ -133,7 +133,7 @@ const CONFIG = Effect.runSync(
     softwareVersion: Config.string("COCORE_SOFTWARE_VERSION").pipe(
       Config.withDefault("cocore-services@dev"),
     ),
-    termsVersion: Config.string("COCORE_TERMS_VERSION").pipe(Config.withDefault("v2-2026-06-13")),
+    termsVersion: Config.string("COCORE_TERMS_VERSION").pipe(Config.withDefault("v3-2026-07-01")),
     termsUri: Config.string("COCORE_TERMS_URI").pipe(Config.option),
     consolePublicUrl: Config.string("CONSOLE_PUBLIC_URL").pipe(Config.option),
     leaderboardTtlMs: Config.integer("COCORE_LEADERBOARD_TTL_MS").pipe(Config.withDefault(60_000)),

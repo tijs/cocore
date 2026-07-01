@@ -1822,8 +1822,8 @@ function MarketingPage() {
             <div {...stylex.props(styles.stepGridSep)}>
               <Body variant="secondary">
                 Someone picks up your job, runs it, then returns the result after signing with a key
-                locked in the Secure Enclave that never leaves their hardware — proof of exactly who
-                did the work, and that nobody touched it after.
+                held in the Secure Enclave that never leaves their hardware — evidence of who did
+                the work, and a check that the result wasn&apos;t altered afterward.
               </Body>
             </div>
             <div {...stylex.props(styles.stepCode)}>

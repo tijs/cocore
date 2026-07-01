@@ -2265,7 +2265,7 @@ export function ChatPage(): ReactElement {
                       </h2>
                       <p {...stylex.props(styles.emptyText)}>
                         billed per generated token from your balance — nothing is metered while you
-                        type. your transcript stays in this browser; the network only sees sealed
+                        type. your transcript stays in this browser; the network only sees encrypted
                         prompts and signed receipts.
                       </p>
                       <div {...stylex.props(styles.sugg)}>

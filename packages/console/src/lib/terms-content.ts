@@ -13,11 +13,11 @@
 //      modal lights up for everyone.
 
 export const termsContent = {
-  version: "v2-2026-06-13",
-  effectiveDate: "2026-06-13",
+  version: "v3-2026-07-01",
+  effectiveDate: "2026-07-01",
   tos: `# Terms of Service
 
-**Effective:** 2026-06-13 · **Version:** v2
+**Effective:** 2026-07-01 · **Version:** v3
 
 co/core is **alpha software**. Read the entire document before using
 it.
@@ -119,6 +119,13 @@ client), you affirmatively agree that:
      back to active members as a patronage rebate
      (\`patronageDistribution\`), in proportion to how much they
      used and supplied the network.
+   - **Balances are experimental and are not money.** Token
+     metering, settlement, credits, grants, and rebates are
+     experimental and may be incorrect, delayed, reversed, or lost
+     — including through bugs in the agent or exchange, or a
+     provider's self-reported usage. Tokens (\`CC\`) have no cash
+     value, are not redeemable, and confer no entitlement. Do not
+     rely on a balance.
 
    Every one of these numbers is a field on the active policy
    record, signed under the exchange's DID, so you can verify the
@@ -126,6 +133,31 @@ client), you affirmatively agree that:
    switch exchanges at any time by editing your job's
    \`acceptedExchanges\` field; a different exchange may publish a
    different rate, fee, grant, or cadence.
+
+## Attestation and the confidential tier are experimental
+
+Some providers advertise a **hardware-attested** trust level or an
+**attested-confidential** tier. These are experimental, best-effort
+signals — **not** independently audited or proven guarantees:
+
+1. **Attestation** is our best-effort check that a machine is
+   genuine Apple hardware running a known build. We do not treat it
+   as independently verified, and it may be wrong, stale, or worked
+   around in ways we have not ruled out. Do not rely on a
+   trust-level badge as proof of anything.
+
+2. **The confidential tier** aims to keep your prompt unreadable to
+   the machine's operator by running inference inside a measured,
+   signed build under a hardened runtime. It is a raised bar,
+   **not** a hardware enclave, and it is not audited: a compromised
+   OS, an agent bug, a mis-routed request, or a maliciously
+   substituted build could still expose your prompt. Treat every
+   provider as semi-trusted, and **do not send anything through a
+   confidential provider that you could not tolerate the operator
+   reading.**
+
+These features may change, regress, or be withdrawn at any time
+without notice.
 
 ## Generative-AI disclosure
 
@@ -161,7 +193,7 @@ and do not run the provider agent.
 `,
   privacy: `# Privacy Policy
 
-**Effective:** 2026-06-13 · **Version:** v2
+**Effective:** 2026-07-01 · **Version:** v3
 
 co/core stores as little personal data as it can while still
 functioning as an open, ATProto-native protocol.
@@ -203,6 +235,11 @@ exchanges are federable and anyone can run their own) collects:
 - We do **not** track non-signed-in visitors beyond the access
   logs on Railway, Cloudflare, and the GitHub release-asset CDN —
   same logs that any other operator's HTTP service collects.
+- Confidentiality from the **provider** is a separate, experimental
+  feature (see the Terms). The exchange not seeing your prompt does
+  not mean the provider machine's operator cannot — treat the
+  confidential tier as unproven and don't send a provider anything
+  you'd need kept private.
 
 ## Where data lives
 

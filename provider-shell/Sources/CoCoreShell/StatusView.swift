@@ -89,7 +89,7 @@ struct StatusRows: View {
             LabeledContent("Secure Mode") {
                 switch state.secureModePhase {
                 case .on:
-                    Text("On — hardware-attested").foregroundStyle(.green)
+                    Text("On — hardware-attested (experimental)").foregroundStyle(.green)
                 case .securing:
                     Text("Securing…").foregroundStyle(.orange)
                 case .off:
@@ -99,7 +99,7 @@ struct StatusRows: View {
             switch state.secureModePhase {
             case .on:
                 secureCaption(
-                    "This Mac is enrolled and proven to be genuine Apple hardware (SIP verified).",
+                    "This Mac is enrolled and attested as genuine Apple hardware (SIP verified). Experimental — a best-effort signal, not a guarantee.",
                     .secondary)
             case .securing(let reason):
                 // The interstitial: tell the operator it's mid-flight and what,
@@ -107,7 +107,7 @@ struct StatusRows: View {
                 secureCaption(reason, .orange)
             case .off:
                 secureCaption(
-                    "Proves this is genuine, untampered Apple hardware (SIP verified). Optional.",
+                    "Attests this is genuine, untampered Apple hardware (SIP verified). Experimental; optional.",
                     .secondary)
             }
             if let exp = state.attestationExpiresAt {
@@ -143,7 +143,7 @@ struct StatusRows: View {
             LabeledContent("Confidential tier") {
                 switch state.confidentialPhase {
                 case .active:
-                    Text("🔒 Confidential").foregroundStyle(.green)
+                    Text("🔒 Confidential (experimental)").foregroundStyle(.green)
                 case .applying:
                     Text("Applying…").foregroundStyle(.orange)
                 case .off:
@@ -155,7 +155,7 @@ struct StatusRows: View {
             switch state.confidentialPhase {
             case .active:
                 secureCaption(
-                    "Requests run sealed inside the measured, signed agent, under a hardened runtime with no subprocess to tap — so you, this Mac's operator, have no ordinary way to read what requestors send or receive. That's the guarantee requestors get. (It's a software-sealed posture, not a hardware enclave: it holds as long as macOS and the signed build aren't compromised.)",
+                    "Requests run inside the measured, signed agent, under a hardened runtime with no subprocess to tap — this aims to keep what requestors send and receive unreadable to you, this Mac's operator. It's experimental and not independently audited: a software-sealed posture, not a hardware enclave, and it only holds as long as macOS and the signed build aren't compromised.",
                     .secondary)
             case .applying(let reason):
                 // The interstitial that fixes "I have to toggle until it takes":
@@ -166,7 +166,7 @@ struct StatusRows: View {
                     .orange)
             case .off:
                 secureCaption(
-                    "Requests run in a local helper process that you, this Mac's operator, could read — fine for non-sensitive work. Enable confidential to seal them inside the measured agent so you have no ordinary way to read them. The confidential engine serves Qwen2 / Qwen3 / Llama / Gemma / Phi-class models.",
+                    "Requests run in a local helper process that you, this Mac's operator, could read — fine for non-sensitive work. Confidential mode aims to keep them unreadable to you by running inside the measured agent (experimental — a hardened-runtime posture, not a hardware enclave). The confidential engine serves Qwen2 / Qwen3 / Llama / Gemma / Phi-class models.",
                     .secondary)
             }
             if let setConfidential = onSetConfidential {

@@ -29,7 +29,7 @@ export function InferenceDocsOverviewPage({ baseUrl }: { baseUrl: string }) {
         <code {...stylex.props(docsStyles.codeInline)}>{baseUrl}</code>. Use it with the OpenAI SDK,
         curl, or any client that speaks{" "}
         <code {...stylex.props(docsStyles.codeInline)}>/v1/chat/completions</code>. Each request is
-        matched to an online, attested provider and settled with a signed receipt.
+        matched to an online provider and settled with a signed receipt.
       </p>
       <p {...stylex.props(docsStyles.prose)}>
         Requests can carry text or images: vision-capable models accept inline base64 or remote{" "}

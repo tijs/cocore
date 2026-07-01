@@ -530,7 +530,7 @@ export function MachineDetail({ rkey }: { rkey: string }) {
                 <dt {...stylex.props(styles.kvDt)}>Attestation</dt>
                 <dd {...stylex.props(styles.kvDd)}>
                   {m.trustLevel === "hardware-attested"
-                    ? "Hardware-attested — genuine Apple hardware, SIP verified"
+                    ? "Hardware-attested (experimental) — genuine Apple hardware, SIP verified"
                     : "Self-attested (software)"}
                 </dd>
               </>
@@ -538,7 +538,7 @@ export function MachineDetail({ rkey }: { rkey: string }) {
             <dt {...stylex.props(styles.kvDt)}>Confidential tier</dt>
             <dd {...stylex.props(styles.kvDd)}>
               {m.tier === "attested-confidential"
-                ? "🔒 Confidential — sealed so the operator has no ordinary way to read your prompts"
+                ? "🔒 Confidential (experimental) — aims to keep prompts unreadable to the operator"
                 : m.desiredTier === "attested-confidential"
                   ? "Upgrade pending — opted in; finishing on the next serve"
                   : "Best-effort — fast, but the operator can read prompts"}
@@ -578,9 +578,10 @@ export function MachineDetail({ rkey }: { rkey: string }) {
             ) : (
               <>
                 <LabelText variant="secondary">
-                  Optional: upgrade this machine to the confidential tier so the operator has no
-                  ordinary way to read prompts. It won&apos;t change how this machine serves today —
-                  you can turn it off anytime.
+                  Optional: upgrade this machine to the confidential tier, which aims to keep
+                  prompts unreadable to the operator. It&apos;s experimental and not independently
+                  audited, and it won&apos;t change how this machine serves today — you can turn it
+                  off anytime.
                 </LabelText>
                 <Button
                   variant="primary"
