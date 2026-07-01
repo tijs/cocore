@@ -92,8 +92,8 @@ export function InferenceApiReferencePage({ baseUrl }: { baseUrl: string }) {
                       <code {...stylex.props(docsStyles.codeInline)}>image/*</code> (e.g.{" "}
                       <code {...stylex.props(docsStyles.codeInline)}>image/png</code>,{" "}
                       <code {...stylex.props(docsStyles.codeInline)}>image/jpeg</code>). The bytes
-                      are sealed directly into the signed job, so the receipt verifies offline with
-                      no extra fetch.
+                      are committed directly into the signed job, so the receipt verifies offline
+                      with no extra fetch.
                     </li>
                     <li {...stylex.props(inferenceDocsSharedStyles.bullet)}>
                       <strong>Remote URL</strong> — an{" "}

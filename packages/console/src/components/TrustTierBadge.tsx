@@ -11,23 +11,23 @@ import { Badge } from "@/design-system/badge";
 export type TrustTier = "best-effort" | "hardware-attested" | "attested-confidential";
 
 const CONFIDENTIAL_TITLE =
-  "Confidential tier — verified from THIS machine's signed, Apple-rooted attestation: genuine hardware bound to its signing key, a known-good measured build, hardened posture, and live code-attestation. Your prompt is served inside the measured binary's in-process engine (no observable subprocess), so the operator has no ordinary path to the plaintext. This is a hardened-runtime posture, not a hardware enclave: the guarantee rests on macOS and the signed-binary supply chain being intact, and a compromised OS, an agent vulnerability, or a maliciously substituted signed build could still expose the prompt.";
+  "Confidential tier (experimental). Aims to keep prompts unreadable to the machine's operator by running them inside the measured, signed agent — a hardened-runtime posture, not a hardware enclave, and not independently audited. A compromised OS or a substituted build could still expose the prompt, so don't send anything you'd need kept private.";
 
 const HARDWARE_TITLE =
-  "Hardware-attested — verified from this machine's signed, Apple-rooted attestation chain, bound to its signing key. Proven genuine Apple hardware (not a self-asserted claim).";
+  "Hardware-attested (experimental). A best-effort signal, recomputed from this machine's signed Apple-rooted attestation chain, that it's genuine Apple hardware. Treat it as a useful hint, not a guarantee.";
 
 export function TrustTierBadge({ tier }: { tier: TrustTier }): React.ReactNode {
   if (tier === "attested-confidential") {
     return (
-      <Badge size="sm" variant="success" title={CONFIDENTIAL_TITLE}>
-        🔒 Confidential
+      <Badge size="sm" variant="default" title={CONFIDENTIAL_TITLE}>
+        🔒 Confidential · experimental
       </Badge>
     );
   }
   if (tier === "hardware-attested") {
     return (
       <Badge size="sm" variant="primary" title={HARDWARE_TITLE}>
-        🛡️ Hardware-attested
+        🛡️ Hardware-attested · experimental
       </Badge>
     );
   }

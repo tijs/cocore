@@ -1194,7 +1194,7 @@ struct ModelsView: View {
                 Text("Add a model")
             } footer: {
                 sectionFooter(
-                    "Search any MLX model on HuggingFace, or pick a suggestion. co/core runs MLX weights (mlx-community/… or another 4-bit MLX conversion); a stock PyTorch repo won't load.\n\nOnly “Confidential ✓” models can serve in the confidential engine (Qwen2/Qwen3/Llama/Gemma/Phi-class). A “Best-effort only” model (newer Qwen3.5+/Gemma4/Llama4 archs) runs in a helper the operator can read — choosing one means this machine can't offer confidential guarantees to requestors for it."
+                    "Search any MLX model on HuggingFace, or pick a suggestion. co/core runs MLX weights (mlx-community/… or another 4-bit MLX conversion); a stock PyTorch repo won't load.\n\nOnly “Confidential ✓” models can serve in the confidential engine (Qwen2/Qwen3/Llama/Gemma/Phi-class). A “Best-effort only” model (newer Qwen3.5+/Gemma4/Llama4 archs) runs in a helper the operator can read — choosing one means this machine can't offer requestors the confidential posture for it."
                 )
             }
             .onChange(of: searchQuery) { query in runSearch(query) }
@@ -1268,7 +1268,7 @@ struct ModelsView: View {
                 .foregroundStyle(Brand.success)
                 .clipShape(Capsule())
                 .help(
-                    "Runs in the in-process confidential engine — this machine can serve it with the attested-confidential guarantee."
+                    "Runs in the in-process confidential engine — this machine can serve it in the confidential tier (experimental; not a hard guarantee)."
                 )
         case .incapable:
             Text("Best-effort only")
@@ -1278,7 +1278,7 @@ struct ModelsView: View {
                 .foregroundStyle(.orange)
                 .clipShape(Capsule())
                 .help(
-                    "This architecture can't run in the confidential engine. Serving it means this machine can't offer confidential guarantees to requestors for this model."
+                    "This architecture can't run in the confidential engine. Serving it means this machine can't offer requestors the confidential posture for this model."
                 )
         case .unknown:
             EmptyView()

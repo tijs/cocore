@@ -558,7 +558,7 @@ struct SecureModeWizardView: View {
             Text("🎉 This Mac is now a hardware-attested co/core provider.")
                 .font(.title2).bold().foregroundStyle(Brand.accentText)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Requesters can now verify your Mac in hardware before sending it work.")
+            Text("Requesters can now check your Mac's attestation before sending it work. Attestation is experimental — a best-effort signal, not a guarantee.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
