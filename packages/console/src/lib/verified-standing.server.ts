@@ -66,7 +66,6 @@ export const HARDWARE_BLOCKER_CODES = new Set([
   "mda-invalid",
   "mda-unbound",
   "mda-no-binding-material",
-  "no-hardware-attestation",
   "no-mda-chain",
 ]);
 
