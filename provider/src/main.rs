@@ -3054,8 +3054,7 @@ fn is_python_env_broken(last_err: Option<&str>) -> bool {
         && (e.contains("import vllm_mlx") || e.contains("ModuleNotFoundError"));
     // The specific transformers-5.13 / mlx-lm incompatibility, matched
     // exactly so it classifies even if a future wrapper reorders imports.
-    let transformers_register_break =
-        e.contains("'str' object has no attribute '__module__'");
+    let transformers_register_break = e.contains("'str' object has no attribute '__module__'");
     import_traceback || transformers_register_break
 }
 
@@ -3520,7 +3519,6 @@ mod active_gate_tests {
 
 #[cfg(test)]
 mod offline_marker_tests {
-    use super::*;
     use cocore_provider::pds::{ProviderRecord, TrustLevel};
 
     /// A provider record as the AGENT builds it in-memory: the

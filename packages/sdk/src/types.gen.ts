@@ -163,11 +163,9 @@ export interface JobRecord {
   expiresAt: string;
   createdAt: string;
   outputSchema?: { name?: string; strict?: boolean; schema?: Record<string, unknown> };
-  tools?: {
-    type: "function";
-    function: { name: string; description?: string; parameters?: Record<string, unknown> };
-  }[];
+  tools?: { type: "function"; function: { name: string; description?: string; parameters?: Record<string, unknown> } }[];
   toolChoice?: "auto" | "none" | "required";
+  toolChoiceFunction?: string;
 }
 
 export interface PaymentAuthorizationRecord {
@@ -208,6 +206,8 @@ export interface ProviderRecord {
   payoutsEnabled?: boolean;
   binaryVersion?: string;
   engineFault?: { code: string; message: string; models?: string[]; at: string };
+  attestationFault?: { code: string; message: string; at: string };
+  toolCalls?: boolean;
   shareLocation?: boolean;
   region?: string;
   regionSource?: string;
