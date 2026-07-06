@@ -1534,10 +1534,14 @@ async fn cmd_serve(
     let signer: Arc<dyn secure_enclave::SigningIdentity> =
         secure_enclave::load_or_create_identity()?.into();
 
-    // X25519 encryption keypair for sealed prompts. M2 will persist
-    // this alongside the session; for now we generate fresh on every
-    // serve and the advisor only stores it for forwarding.
-    let enc = cocore_provider::crypto::ProviderKeypair::generate();
+    // Encryption key for sealed prompts + the APNs code-challenge nonce. On a
+    // confidential (`secure_enclave`) build this is the SE-resident P-256 ECIES
+    // key (`encScheme = p256-ecies-se`) whose decrypting scalar never leaves the
+    // enclave; otherwise the software X25519 key (`x25519-xsalsa20-poly1305`).
+    // The advertised `encScheme` tells requesters + the advisor which codec to
+    // seal with, so old peers keep using X25519 against best-effort machines.
+    let enc = cocore_provider::crypto::load_or_create_encryption_key();
+    let enc_scheme = enc.enc_scheme().to_string();
 
     // Publish a `dev.cocore.compute.provider` record so the user's
     // PDS (and the AppView indexing it) advertise this machine.
@@ -1876,6 +1880,7 @@ async fn cmd_serve(
         &session,
         &*signer,
         &enc.public_key_b64(),
+        &enc_scheme,
         &engine_facts,
         &pds,
     )
@@ -2108,6 +2113,12 @@ async fn cmd_serve(
         // Echo our binary version live so the advisor can route version-gated
         // jobs (e.g. image input requires a release that supports messages-v1).
         binary_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        // ADR-0005 confidential-tier evidence, echoed live: whether the signing
+        // key is Secure-Enclave-resident, and the encryption key's scheme (so
+        // the advisor seals the code-challenge nonce with the matching codec).
+        // Old software-key agents report false/x25519 and stay best-effort.
+        secure_enclave_available: Some(signer.is_hardware_bound()),
+        enc_scheme: Some(enc_scheme.clone()),
     };
 
     // Periodic re-attestation. Attestations expire after 24h; without this the
@@ -2126,6 +2137,7 @@ async fn cmd_serve(
         let session = session.clone();
         let signer = signer.clone();
         let enc_pub = enc.public_key_b64();
+        let enc_scheme = enc_scheme.clone();
         let engine_facts = engine_facts.clone();
         let attestation_pub_key = attestation_pub_key.clone();
         let base_record = provider_record.clone();
@@ -2137,6 +2149,7 @@ async fn cmd_serve(
                     &session,
                     &*signer,
                     &enc_pub,
+                    &enc_scheme,
                     &engine_facts,
                     &pds,
                 )
@@ -2207,7 +2220,7 @@ async fn cmd_serve(
                         .run(
                             register.clone(),
                             &*signer,
-                            &enc,
+                            &*enc,
                             &pds,
                             attestation.clone(),
                             &engines,
@@ -2288,7 +2301,7 @@ async fn cmd_serve(
                         );
                         let client = AdvisorClient::new(advisor_url);
                         tokio::select! {
-                            res = client.run(register.clone(), &*signer, &enc, &pds, attestation.clone(), &eng, provider_rkey.as_deref(), &desired_at_start, desired_tier_at_start.as_deref(), &model_schedules, &configured_models, push_rx.as_mut(), &pro_bono_at_start, tool_calls_at_start) => {
+                            res = client.run(register.clone(), &*signer, &*enc, &pds, attestation.clone(), &eng, provider_rkey.as_deref(), &desired_at_start, desired_tier_at_start.as_deref(), &model_schedules, &configured_models, push_rx.as_mut(), &pro_bono_at_start, tool_calls_at_start) => {
                                 match &res {
                                     Ok(()) => advisor_fault.reset(),
                                     Err(e) => {
@@ -2435,11 +2448,19 @@ async fn build_and_publish_attestation(
     session: &oauth::Session,
     signer: &dyn secure_enclave::SigningIdentity,
     encryption_pub_key_b64: &str,
+    enc_scheme: &str,
     engine_facts: &EngineAttestationFacts,
     pds: &PdsClient,
 ) -> AttestationOutcome {
     let mut attestation_inputs =
         attestation::build_stub_inputs(&session.did, encryption_pub_key_b64);
+    // The encryption key's scheme (`p256-ecies-se` on a Secure-Enclave build,
+    // else `x25519`) and whether the signing key is Secure-Enclave-resident.
+    // Together these are the evidence the confidential-tier verifier gates on
+    // (ADR-0005) — a non-extractable decryption key + a non-extractable signing
+    // key, so a copied software key can't serve confidential off-box.
+    attestation_inputs.enc_scheme = enc_scheme.to_string();
+    attestation_inputs.secure_enclave_available = signer.is_hardware_bound();
     // MDA option-B (the live macOS hardware-attested path). EXPLICIT env wins;
     // otherwise AUTO derives serial + Hardware UUID + coordinator URLs from the
     // session console base and, only when this Mac is MDM-enrolled, loads the
