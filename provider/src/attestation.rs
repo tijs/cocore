@@ -404,10 +404,7 @@ pub fn build(
         // record's skip-when-None, so best-effort attestations stay byte-minimal
         // and old verifiers (which read absent as x25519) are unaffected.
         if inputs.enc_scheme != "x25519" {
-            map.insert(
-                "encScheme".into(),
-                Value::String(inputs.enc_scheme.clone()),
-            );
+            map.insert("encScheme".into(), Value::String(inputs.enc_scheme.clone()));
         }
         if let Some(ev) = &app_attest {
             map.insert(

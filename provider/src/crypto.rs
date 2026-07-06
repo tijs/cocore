@@ -284,7 +284,9 @@ mod enclave_enc {
             };
             if rc != 0 {
                 unsafe { cocore_enclave_enc_release(handle) };
-                return Err(CryptoError::Enclave(format!("enc_public_key returned {rc}")));
+                return Err(CryptoError::Enclave(format!(
+                    "enc_public_key returned {rc}"
+                )));
             }
             Ok(Self {
                 handle,
@@ -394,7 +396,13 @@ pub mod ecies {
         let key = derive_key(z);
         let cipher = Aes256Gcm::new((&key).into());
         let ct = cipher
-            .encrypt(Nonce::from_slice(iv), Payload { msg: plaintext, aad: &[] })
+            .encrypt(
+                Nonce::from_slice(iv),
+                Payload {
+                    msg: plaintext,
+                    aad: &[],
+                },
+            )
             // AES-GCM encryption of an in-memory buffer cannot fail.
             .expect("aes-256-gcm seal cannot fail");
         let mut out = Vec::with_capacity(IV_LEN + ct.len());
@@ -419,7 +427,13 @@ pub mod ecies {
         let cipher = Aes256Gcm::new((&key).into());
         let (iv, body) = blob.split_at(IV_LEN);
         cipher
-            .decrypt(Nonce::from_slice(iv), Payload { msg: body, aad: &[] })
+            .decrypt(
+                Nonce::from_slice(iv),
+                Payload {
+                    msg: body,
+                    aad: &[],
+                },
+            )
             .map_err(|e| CryptoError::Aead(e.to_string()))
     }
 
