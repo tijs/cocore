@@ -903,16 +903,19 @@ fn cache_provider_rkey(did: &str, attestation_pub_key: &str, rkey: &str) {
     }
 }
 
-fn cached_provider_rkey(did: &str, attestation_pub_key: &str) -> Option<String> {
+fn cached_provider_rkey(did: &str) -> Option<String> {
     let raw = std::fs::read_to_string(provider_rkey_cache_path()?).ok()?;
-    parse_cached_provider_rkey(&raw, did, attestation_pub_key)
+    parse_cached_provider_rkey(&raw, did)
 }
 
-/// Honor the cache only for the exact identity that wrote it; anything
-/// else (foreign DID, re-keyed enclave, corrupt file) reads as no cache.
-fn parse_cached_provider_rkey(raw: &str, did: &str, attestation_pub_key: &str) -> Option<String> {
+/// Honor the cache for this machine's DID, REGARDLESS of the stored pubkey. The
+/// rkey is this machine's stable record id; a signing-key rotation (software →
+/// Secure Enclave on 0.9.43) changes the pubkey but NOT which record is ours, so
+/// gating on the pubkey used to strand the record and mint a fresh one. A re-pair
+/// under a different account (DID mismatch) still invalidates it.
+fn parse_cached_provider_rkey(raw: &str, did: &str) -> Option<String> {
     let entry: CachedProviderRkey = serde_json::from_str(raw).ok()?;
-    (entry.did == did && entry.attestation_pub_key == attestation_pub_key).then_some(entry.rkey)
+    (entry.did == did).then_some(entry.rkey)
 }
 
 /// Find this machine's existing provider record (if any) on the
@@ -929,17 +932,23 @@ fn parse_cached_provider_rkey(raw: &str, did: &str, attestation_pub_key: &str) -
 /// is the prevention story.
 async fn dedup_and_publish_provider(
     pds: &cocore_provider::pds::PdsClient,
-    attestation_pub_key: &str,
     record: &ProviderRecord,
+    cached_rkey: Option<&str>,
 ) -> anyhow::Result<(cocore_provider::pds::PublishedRecord, bool, usize)> {
     // The single agent write path for this machine's provider record: a
-    // compare-and-swap read-modify-write that reads the LATEST record, merges
-    // the agent's authored fields onto it (owner-intent + unknown fields
-    // preserved — see `merge_agent_provider_fields`), and putRecords under a
-    // swap guard, retrying on `InvalidSwap` by re-reading. A read failure
-    // aborts — we never publish a fabricated body on a blind read. It also
-    // dedups: a DID that holds several records with our attestationPubKey
-    // (stale reinstall dupes) keeps the newest and deletes the rest.
+    // compare-and-swap read-modify-write that reads the LATEST records, decides
+    // which one is OURS (across a signing-key rotation — see
+    // `reconcile_provider_records`), merges the agent's authored fields onto its
+    // body (owner-intent + unknown fields preserved AND harvested from any
+    // orphaned prior record), and putRecords under a swap guard, retrying on
+    // `InvalidSwap` by re-reading. A read failure aborts — we never publish a
+    // fabricated body on a blind read. It also dedups: stale duplicates for THIS
+    // machine (reinstalls, key rotations) are deleted; sibling machines under the
+    // same DID are left untouched.
+    use cocore_provider::pds::{
+        merge_agent_provider_fields, reconcile_provider_records, ListedProviderRecord,
+        MachineIdentity,
+    };
     const MAX_ATTEMPTS: u32 = 6;
     let collection = "dev.cocore.compute.provider";
     let mut deleted = 0usize;
@@ -947,62 +956,71 @@ async fn dedup_and_publish_provider(
     for attempt in 1..=MAX_ATTEMPTS {
         // Read latest. A transport/auth failure propagates and ABORTS — the
         // republish never invents a record on top of an unreadable PDS.
-        let listed = pds.list_my_records(collection).await?;
-        let mut matching: Vec<(String, String, String, serde_json::Value)> = Vec::new();
-        let mut other_pubkey_count = 0usize;
-        for r in &listed {
-            let rkey = r.uri.rsplit('/').next().unwrap_or("").to_string();
-            let key = r.value.get("attestationPubKey").and_then(|v| v.as_str());
-            let created_at = r
-                .value
-                .get("createdAt")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            match key {
-                Some(k) if k == attestation_pub_key => {
-                    matching.push((rkey, r.cid.clone(), created_at, r.value.clone()));
-                }
-                Some(_) => other_pubkey_count += 1,
-                // No attestationPubKey — pre-2026-05 record; leave alone.
-                None => {}
-            }
-        }
-        if attempt == 1 && other_pubkey_count > 0 {
-            tracing::info!(
-                other_pubkey_count,
-                "saw provider records on this DID with a different attestationPubKey — those describe other machines; leaving alone"
-            );
-        }
-        // Sort newest-first by createdAt; the head is canonical.
-        matching.sort_by(|a, b| b.2.cmp(&a.2));
+        let listed_raw = pds.list_my_records(collection).await?;
+        let listed: Vec<ListedProviderRecord> = listed_raw
+            .iter()
+            .map(|r| {
+                let rkey = r.uri.rsplit('/').next().unwrap_or("").to_string();
+                ListedProviderRecord::from_value(rkey, r.cid.clone(), r.value.clone())
+            })
+            .collect();
 
-        let Some((rkey, cid, _, existing_value)) = matching.first().cloned() else {
-            // First publish: no record yet. The agent authors everything; owner
-            // fields are absent (correct for a brand-new machine).
+        // Identity is taken from the record we're about to publish — its
+        // fingerprint/pubkey/hardware profile — plus the locally-cached rkey.
+        let me = MachineIdentity {
+            attestation_pub_key: &record.attestationPubKey,
+            machine_fingerprint: record.machineFingerprint.as_deref(),
+            machine_label: &record.machineLabel,
+            model_identifier: record.modelIdentifier.as_deref(),
+            chip: &record.chip,
+            cached_rkey,
+        };
+
+        let Some(recon) = reconcile_provider_records(&listed, &me) else {
+            // No record is ours yet: first publish. The agent authors
+            // everything; owner fields are absent (correct for a new machine).
             let published = pds.publish_provider(record).await?;
             return Ok((published, false, deleted));
         };
+        if attempt == 1 && recon.ambiguous_legacy > 0 {
+            tracing::warn!(
+                count = recon.ambiguous_legacy,
+                "multiple legacy provider records share this machine's hardware profile; \
+                 leaving them alone (ambiguous) — resolve on the console"
+            );
+        }
 
-        // Delete duplicate losers (best-effort; only need to run once).
-        for (loser_rkey, loser_cid, _, _) in matching.iter().skip(1) {
-            match pds
-                .delete_record(collection, loser_rkey, Some(loser_cid))
-                .await
-            {
-                Ok(()) => {
-                    deleted += 1;
-                    tracing::info!(rkey = %loser_rkey, "deleted duplicate provider record");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, rkey = %loser_rkey, "failed to delete duplicate provider record")
+        // Delete stale duplicates for THIS machine (best-effort; only need once).
+        // Reconciliation never lists a sibling machine's record here.
+        if attempt == 1 {
+            for (loser_rkey, loser_cid) in &recon.delete {
+                match pds
+                    .delete_record(collection, loser_rkey, Some(loser_cid))
+                    .await
+                {
+                    Ok(()) => {
+                        deleted += 1;
+                        tracing::info!(rkey = %loser_rkey, "deleted stale provider record for this machine (key rotation / reinstall)");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, rkey = %loser_rkey, "failed to delete stale provider record")
+                    }
                 }
             }
         }
 
-        // Merge the agent's fields onto the LATEST body and CAS-put.
-        let merged = cocore_provider::pds::merge_agent_provider_fields(&existing_value, record);
-        match pds.put_record(collection, &rkey, &merged, Some(&cid)).await {
+        // Merge the agent's fields onto the harvested base and CAS-put at the
+        // canonical rkey (owner intent carried forward from any orphaned record).
+        let merged = merge_agent_provider_fields(&recon.base, record);
+        match pds
+            .put_record(
+                collection,
+                &recon.canonical_rkey,
+                &merged,
+                Some(&recon.canonical_cid),
+            )
+            .await
+        {
             Ok(published) => return Ok((published, true, deleted)),
             Err(e) if is_swap_conflict(&e) && attempt < MAX_ATTEMPTS => {
                 // Someone (a console edit, a sibling write) committed between our
@@ -1559,6 +1577,17 @@ async fn cmd_serve(
         "collected system profile"
     );
     let attestation_pub_key = signer.public_key_b64();
+    // Stable per-machine fingerprint (hashed hardware serial, salted by DID).
+    // Unlike `attestation_pub_key` this survives a signing-key rotation, so the
+    // agent recognizes its own record after the 0.9.43 software→Secure-Enclave
+    // key switch and adopts it (carrying `desiredTier`/`active`/... forward)
+    // instead of orphaning it. `None` on a host whose serial can't be read.
+    let machine_fingerprint: Option<String> = cocore_provider::mda_loader::device_serial()
+        .map(|serial| cocore_provider::pds::machine_fingerprint(&serial, &session.did));
+    // The rkey this machine last published to (DID-scoped, so it survives the
+    // key rotation). Lets the reconciler keep the machine's record id stable
+    // instead of minting a fresh one when the signing key changes.
+    let cached_rkey: Option<String> = cached_provider_rkey(&session.did);
 
     // Publish a PROVISIONING provider record immediately — before the
     // (potentially slow) engine load below. A cold model load can take
@@ -1582,6 +1611,7 @@ async fn cmd_serve(
             eCores: profile.e_cores,
             modelIdentifier: profile.model_identifier.clone(),
             os: profile.os.clone(),
+            machineFingerprint: machine_fingerprint.clone(),
             supportedModels: vec![],
             priceList: vec![],
             encryptionPubKey: enc.public_key_b64(),
@@ -1623,7 +1653,7 @@ async fn cmd_serve(
             regionObservedAt: None,
             createdAt: chrono::Utc::now(),
         };
-        match dedup_and_publish_provider(&pds, &attestation_pub_key, &provisioning_record).await {
+        match dedup_and_publish_provider(&pds, &provisioning_record, cached_rkey.as_deref()).await {
             Ok((published, _, _)) => tracing::info!(
                 uri = %published.uri,
                 "published provisioning provider record — machine is visible while the engine loads"
@@ -1929,6 +1959,7 @@ async fn cmd_serve(
         ramGB: profile.ram_gb,
         gpuCores: profile.gpu_cores,
         memoryBandwidthGBs: profile.memory_bandwidth_gbs,
+        machineFingerprint: machine_fingerprint.clone(),
         cpuCores: profile.cpu_cores,
         pCores: profile.p_cores,
         eCores: profile.e_cores,
@@ -2002,8 +2033,8 @@ async fn cmd_serve(
     // can flip `serving` to false at the same rkey on graceful shutdown.
     let provider_rkey: Option<String> = match dedup_and_publish_provider(
         &pds,
-        &attestation_pub_key,
         &provider_record,
+        cached_rkey.as_deref(),
     )
     .await
     {
@@ -2025,7 +2056,7 @@ async fn cmd_serve(
             // the advisor Register still carries our stable `machine_id` —
             // otherwise the console can't join live standing onto the record
             // and shows a healthy, connected machine as "not reachable".
-            let cached = cached_provider_rkey(&session.did, &attestation_pub_key);
+            let cached = cached_rkey.clone();
             match &cached {
                 Some(r) => tracing::warn!(
                     error = %e,
@@ -2139,7 +2170,7 @@ async fn cmd_serve(
         let enc_pub = enc.public_key_b64();
         let enc_scheme = enc_scheme.clone();
         let engine_facts = engine_facts.clone();
-        let attestation_pub_key = attestation_pub_key.clone();
+        let refresh_rkey = provider_rkey.clone();
         let base_record = provider_record.clone();
         tokio::spawn(async move {
             let interval = attestation_refresh_interval();
@@ -2170,7 +2201,7 @@ async fn cmd_serve(
                 // re-publish here doesn't affect the live attestation cell.
                 republish_attestation_fault(
                     &pds,
-                    &attestation_pub_key,
+                    refresh_rkey.as_deref(),
                     &base_record,
                     outcome.fault.clone(),
                 )
@@ -2373,7 +2404,7 @@ async fn cmd_serve(
                     // paused moments ago stays paused instead of being un-paused
                     // by this marker) and every other owner/unknown field — and
                     // retries on a swap conflict.
-                    dedup_and_publish_provider(&pds, &attestation_pub_key, &offline).await
+                    dedup_and_publish_provider(&pds, &offline, provider_rkey.as_deref()).await
                 };
                 match tokio::time::timeout(std::time::Duration::from_secs(5), publish).await {
                     Ok(Ok((published, _, _))) => tracing::info!(uri = %published.uri, "published provider record with serving=false (owner switches preserved)"),
@@ -2588,7 +2619,7 @@ fn attestation_refresh_interval() -> std::time::Duration {
 /// — a failure here never affects the live attestation cell.
 async fn republish_attestation_fault(
     pds: &PdsClient,
-    attestation_pub_key: &str,
+    cached_rkey: Option<&str>,
     base_record: &ProviderRecord,
     fault: Option<AttestationFault>,
 ) {
@@ -2601,7 +2632,7 @@ async fn republish_attestation_fault(
         rec.createdAt = chrono::Utc::now();
         // Single CAS write path: merges onto the latest record (owner switches +
         // unknown fields preserved) and retries on conflict.
-        dedup_and_publish_provider(pds, attestation_pub_key, &rec).await
+        dedup_and_publish_provider(pds, &rec, cached_rkey).await
     };
     match tokio::time::timeout(std::time::Duration::from_secs(10), publish).await {
         Ok(Ok(_)) => {}
@@ -3933,9 +3964,9 @@ mod provider_rkey_cache_tests {
         r#"{"did":"did:plc:alice","attestation_pub_key":"BKey==","rkey":"3mov7tbvvns2m"}"#;
 
     #[test]
-    fn matching_identity_returns_the_cached_rkey() {
+    fn matching_did_returns_the_cached_rkey() {
         assert_eq!(
-            parse_cached_provider_rkey(RAW, "did:plc:alice", "BKey=="),
+            parse_cached_provider_rkey(RAW, "did:plc:alice"),
             Some("3mov7tbvvns2m".to_string())
         );
     }
@@ -3944,33 +3975,32 @@ mod provider_rkey_cache_tests {
     fn a_foreign_did_never_resurrects_the_rkey() {
         // Re-paired under a different account: the old record isn't ours to
         // impersonate on the advisor.
-        assert_eq!(
-            parse_cached_provider_rkey(RAW, "did:plc:bob", "BKey=="),
-            None
-        );
+        assert_eq!(parse_cached_provider_rkey(RAW, "did:plc:bob"), None);
     }
 
     #[test]
-    fn a_rekeyed_enclave_invalidates_the_cache() {
+    fn a_rekeyed_enclave_keeps_the_cached_rkey() {
+        // THE fix: a signing-key rotation (software -> Secure Enclave on 0.9.43)
+        // changes the pubkey but NOT which record is this machine's. The cache is
+        // DID-scoped now, so the rkey survives the rotation and the reconciler
+        // adopts the record in place instead of orphaning it. (The stored pubkey
+        // in RAW is ignored on read.)
         assert_eq!(
-            parse_cached_provider_rkey(RAW, "did:plc:alice", "BOtherKey=="),
-            None
+            parse_cached_provider_rkey(RAW, "did:plc:alice"),
+            Some("3mov7tbvvns2m".to_string())
         );
     }
 
     #[test]
     fn garbage_or_legacy_content_reads_as_no_cache() {
         assert_eq!(
-            parse_cached_provider_rkey("not json", "did:plc:alice", "BKey=="),
+            parse_cached_provider_rkey("not json", "did:plc:alice"),
             None
         );
-        assert_eq!(
-            parse_cached_provider_rkey("", "did:plc:alice", "BKey=="),
-            None
-        );
+        assert_eq!(parse_cached_provider_rkey("", "did:plc:alice"), None);
         // A bare rkey from a hypothetical older format is ignored, not trusted.
         assert_eq!(
-            parse_cached_provider_rkey("\"3mov7tbvvns2m\"", "did:plc:alice", "BKey=="),
+            parse_cached_provider_rkey("\"3mov7tbvvns2m\"", "did:plc:alice"),
             None
         );
     }
@@ -3995,6 +4025,7 @@ mod offline_marker_tests {
             eCores: Some(4),
             modelIdentifier: Some("Macmini9,1".into()),
             os: Some("macOS 26.4.1".into()),
+            machineFingerprint: Some("fp-test".into()),
             supportedModels: vec!["stub".into()],
             priceList: vec![],
             encryptionPubKey: "enc".into(),
