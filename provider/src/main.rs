@@ -249,15 +249,65 @@ fn cmd_diag(out: Option<std::path::PathBuf>) -> Result<()> {
 /// JSON `value` + `cid` let a one-shot command flip a single field and write
 /// it back with a compare-and-swap, preserving everything the serve loop
 /// published — the same spread-and-override the console uses.
+/// This machine's STABLE record identifiers, derived WITHOUT loading the signing
+/// key: the locally-cached rkey (`provider-rkey.json`, DID-scoped) and the
+/// hardware fingerprint (hashed serial). These survive a signing-key rotation
+/// AND the SE-vs-software-fallback split — the serve process loads the
+/// Secure-Enclave key while a short-lived CLI (`agent tier`, invoked by the tray
+/// supervisor) may fall back to the software key, so matching the record on the
+/// pubkey alone made the supervisor misread `best-effort` and spawn the wrong
+/// worker. The stable ids are the join key; the pubkey is only a legacy fallback.
+fn stable_record_ids(did: &str) -> (Option<String>, Option<String>) {
+    let cached_rkey = cached_provider_rkey(did);
+    let fingerprint = cocore_provider::mda_loader::device_serial()
+        .map(|serial| cocore_provider::pds::machine_fingerprint(&serial, did));
+    (cached_rkey, fingerprint)
+}
+
+/// Does a listed provider record belong to THIS machine? Resolved by stable
+/// identity first (cached rkey, then hardware fingerprint), falling back to the
+/// signing pubkey for pre-fingerprint records. Never matches a sibling machine:
+/// the cached rkey is this install's own, the fingerprint is hardware-unique, and
+/// a sibling's pubkey differs.
+fn record_is_mine(
+    rkey: &str,
+    value: &serde_json::Value,
+    cached_rkey: Option<&str>,
+    fingerprint: Option<&str>,
+    pubkey: &str,
+) -> bool {
+    if cached_rkey == Some(rkey) {
+        return true;
+    }
+    if let (Some(fp), Some(rfp)) = (
+        fingerprint,
+        value.get("machineFingerprint").and_then(|v| v.as_str()),
+    ) {
+        if fp == rfp {
+            return true;
+        }
+    }
+    value.get("attestationPubKey").and_then(|v| v.as_str()) == Some(pubkey)
+}
+
 async fn find_my_provider_record(
     pds: &PdsClient,
+    did: &str,
     attestation_pub_key: &str,
 ) -> Result<(String, serde_json::Value, String)> {
     let listed = pds.list_my_records("dev.cocore.compute.provider").await?;
+    let (cached_rkey, fingerprint) = stable_record_ids(did);
     let rec = listed
         .into_iter()
         .find(|r| {
-            r.value.get("attestationPubKey").and_then(|v| v.as_str()) == Some(attestation_pub_key)
+            let rkey = r.uri.rsplit('/').next().unwrap_or("");
+            record_is_mine(
+                rkey,
+                &r.value,
+                cached_rkey.as_deref(),
+                fingerprint.as_deref(),
+                attestation_pub_key,
+            )
         })
         .context("no provider record for this machine yet — has it served at least once?")?;
     let rkey = rec
@@ -269,19 +319,21 @@ async fn find_my_provider_record(
     Ok((rkey, rec.value, rec.cid))
 }
 
-/// Open this machine's session + identity for a one-shot record edit.
-fn open_pds() -> Result<(PdsClient, String)> {
+/// Open this machine's session + identity for a one-shot record edit. Returns the
+/// DID (the stable-id lookup key) alongside the signing pubkey (legacy fallback).
+fn open_pds() -> Result<(PdsClient, String, String)> {
     let session = oauth::load_session()?.context("not paired — run `cocore agent pair` first")?;
+    let did = session.did.clone();
     let pds = PdsClient::new(session);
     let signer = secure_enclave::load_or_create_identity()?;
-    Ok((pds, signer.public_key_b64()))
+    Ok((pds, did, signer.public_key_b64()))
 }
 
 /// `cocore agent pause` / `resume`: flip the shared `active` switch on this
 /// machine's provider record. Source of truth is the owner's PDS, so this
 /// is exactly what the console writes — both sides converge on one field.
 async fn cmd_set_active(active: bool) -> Result<()> {
-    let (pds, pubkey) = open_pds()?;
+    let (pds, did, pubkey) = open_pds()?;
     // The write is a compare-and-swap on the record's CID. A still-serving
     // agent republishes its provider record (reconnect, attestation refresh)
     // and bumps the CID out from under us, so the swap can lose a race. Treat
@@ -290,7 +342,7 @@ async fn cmd_set_active(active: bool) -> Result<()> {
     // a stuck pause. Only the swap conflict is retried; other errors bubble up.
     const MAX_ATTEMPTS: u32 = 4;
     for attempt in 1..=MAX_ATTEMPTS {
-        let find = find_my_provider_record(&pds, &pubkey).await;
+        let find = find_my_provider_record(&pds, &did, &pubkey).await;
         if find.is_err() && active {
             // First serve hasn't published a provider record yet. An absent
             // `active` field reads as true, so resume is already the desired
@@ -361,7 +413,7 @@ fn apply_desired_tier(value: &mut serde_json::Value, on: bool) -> bool {
 /// the supervisor re-selects the confidential worker. CAS on the CID with a
 /// bounded retry, exactly like `cmd_set_active`.
 async fn cmd_set_confidential(on: bool) -> Result<()> {
-    let (pds, pubkey) = open_pds()?;
+    let (pds, did, pubkey) = open_pds()?;
     let label = if on {
         "attested-confidential"
     } else {
@@ -369,7 +421,7 @@ async fn cmd_set_confidential(on: bool) -> Result<()> {
     };
     const MAX_ATTEMPTS: u32 = 4;
     for attempt in 1..=MAX_ATTEMPTS {
-        let find = find_my_provider_record(&pds, &pubkey).await;
+        let find = find_my_provider_record(&pds, &did, &pubkey).await;
         if find.is_err() && !on {
             // No provider record yet — an absent `desiredTier` already reads as
             // best-effort, so disabling is a no-op.
@@ -416,10 +468,10 @@ async fn cmd_set_confidential(on: bool) -> Result<()> {
 /// is a no-op — the caller's local plist write still applies and first serve
 /// publishes the full record. Returns whether a write actually happened.
 async fn cmd_set_desired_models(models: Vec<String>) -> Result<bool> {
-    let (pds, pubkey) = open_pds()?;
+    let (pds, did, pubkey) = open_pds()?;
     const MAX_ATTEMPTS: u32 = 5;
     for attempt in 1..=MAX_ATTEMPTS {
-        let find = find_my_provider_record(&pds, &pubkey).await;
+        let find = find_my_provider_record(&pds, &did, &pubkey).await;
         if find.is_err() {
             // No provider record yet — nothing to patch `desiredModels` onto.
             // The local plist still carries the set; first serve publishes it.
@@ -497,15 +549,13 @@ enum TierRead {
     Unreadable,
 }
 
-/// This machine's current identity `(did, attestationPubKey)`, or `None` when
-/// not paired / the enclave key can't be loaded. Scopes the durable tier cache
-/// the same way `provider-rkey.json` is scoped.
-fn current_identity() -> Option<(String, String)> {
-    let session = oauth::load_session().ok().flatten()?;
-    let pubkey = secure_enclave::load_or_create_identity()
-        .ok()?
-        .public_key_b64();
-    Some((session.did, pubkey))
+/// This machine's paired DID, or `None` when not paired. Used to scope the
+/// durable tier cache. Does NOT load the signing key — the cache (like the rkey
+/// cache) is DID-scoped so it survives a key rotation AND the SE-vs-software
+/// identity split (a CLI that loaded the software-fallback key must still find
+/// the cached intent the serve process wrote under the same DID).
+fn current_did() -> Option<String> {
+    oauth::load_session().ok().flatten().map(|s| s.did)
 }
 
 /// Read this machine's owner-chosen `desiredTier` straight from its PDS provider
@@ -521,6 +571,7 @@ async fn read_desired_tier_live() -> TierRead {
         return TierRead::Unreadable;
     };
     let pubkey = signer.public_key_b64();
+    let did = session.did.clone();
     let pds = PdsClient::new(session);
     let listed = match pds.list_my_records("dev.cocore.compute.provider").await {
         Ok(l) => l,
@@ -528,10 +579,23 @@ async fn read_desired_tier_live() -> TierRead {
         // Unreadable — honor cached intent, don't collapse to best-effort.
         Err(_) => return TierRead::Unreadable,
     };
+    // Match this machine's record by STABLE identity (cached rkey / fingerprint),
+    // NOT the signing pubkey. This CLI process (the tray supervisor runs it to
+    // pick the worker) may load the software-fallback key while the serve process
+    // uses the SE key; matching on the pubkey then found no record and misread
+    // best-effort, silently downgrading a confidential machine's worker.
+    let (cached_rkey, fingerprint) = stable_record_ids(&did);
     let tier = listed
         .into_iter()
         .find(|r| {
-            r.value.get("attestationPubKey").and_then(|v| v.as_str()) == Some(pubkey.as_str())
+            let rkey = r.uri.rsplit('/').next().unwrap_or("");
+            record_is_mine(
+                rkey,
+                &r.value,
+                cached_rkey.as_deref(),
+                fingerprint.as_deref(),
+                &pubkey,
+            )
         })
         .and_then(|r| {
             r.value
@@ -549,41 +613,36 @@ async fn read_desired_tier_live() -> TierRead {
 /// to the last cached intent; only with neither do we default to best-effort.
 /// Backs both `agent tier` and the in-process confidential gate.
 async fn resolve_desired_tier() -> &'static str {
-    let ident = current_identity();
+    let did = current_did();
     match read_desired_tier_live().await {
         TierRead::Read(Some(t)) if t == "attested-confidential" => {
-            if let Some((did, pk)) = &ident {
-                cache_desired_tier(did, pk, "attested-confidential");
+            if let Some(did) = &did {
+                cache_desired_tier(did, "attested-confidential");
             }
             "attested-confidential"
         }
         TierRead::Read(_) => {
             // Read cleanly; owner is best-effort (field absent or other value).
-            if let Some((did, pk)) = &ident {
-                cache_desired_tier(did, pk, "best-effort");
+            if let Some(did) = &did {
+                cache_desired_tier(did, "best-effort");
             }
             "best-effort"
         }
-        TierRead::Unreadable => {
-            match ident
-                .as_ref()
-                .and_then(|(did, pk)| cached_desired_tier(did, pk))
-            {
-                Some(t) if t == "attested-confidential" => {
-                    tracing::warn!(
+        TierRead::Unreadable => match did.as_ref().and_then(|did| cached_desired_tier(did)) {
+            Some(t) if t == "attested-confidential" => {
+                tracing::warn!(
                         "could not read desiredTier from PDS (session may be expired); honoring cached owner intent = attested-confidential"
                     );
-                    "attested-confidential"
-                }
-                Some(_) => "best-effort",
-                None => {
-                    tracing::warn!(
+                "attested-confidential"
+            }
+            Some(_) => "best-effort",
+            None => {
+                tracing::warn!(
                         "could not read desiredTier from PDS and no cached intent; defaulting to best-effort"
                     );
-                    "best-effort"
-                }
+                "best-effort"
             }
-        }
+        },
     }
 }
 
@@ -604,14 +663,16 @@ fn desired_tier_cache_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".cocore").join("desired-tier.json"))
 }
 
-/// Best-effort: never blocks or fails the tier probe.
-fn cache_desired_tier(did: &str, attestation_pub_key: &str, tier: &str) {
+/// Best-effort: never blocks or fails the tier probe. The stored
+/// `attestation_pub_key` is retained for humans/back-compat but NOT gated on
+/// read — a key rotation must not drop the owner's cached intent.
+fn cache_desired_tier(did: &str, tier: &str) {
     let Some(path) = desired_tier_cache_path() else {
         return;
     };
     let entry = CachedDesiredTier {
         did: did.to_string(),
-        attestation_pub_key: attestation_pub_key.to_string(),
+        attestation_pub_key: String::new(),
         tier: tier.to_string(),
     };
     if let Ok(json) = serde_json::to_string(&entry) {
@@ -619,16 +680,19 @@ fn cache_desired_tier(did: &str, attestation_pub_key: &str, tier: &str) {
     }
 }
 
-fn cached_desired_tier(did: &str, attestation_pub_key: &str) -> Option<String> {
+fn cached_desired_tier(did: &str) -> Option<String> {
     let raw = std::fs::read_to_string(desired_tier_cache_path()?).ok()?;
-    parse_cached_desired_tier(&raw, did, attestation_pub_key)
+    parse_cached_desired_tier(&raw, did)
 }
 
-/// Honor the cache only for the exact identity that wrote it; a foreign DID,
-/// a re-keyed enclave, or a corrupt file reads as no cache.
-fn parse_cached_desired_tier(raw: &str, did: &str, attestation_pub_key: &str) -> Option<String> {
+/// Honor the cache for this machine's DID, REGARDLESS of the stored pubkey. A
+/// signing-key rotation (software → Secure Enclave) or the SE-vs-software CLI
+/// split changes the pubkey but not the owner's tier intent; gating on it used
+/// to strand the intent and misreport best-effort. A foreign DID (re-pair) or a
+/// corrupt file still reads as no cache.
+fn parse_cached_desired_tier(raw: &str, did: &str) -> Option<String> {
     let entry: CachedDesiredTier = serde_json::from_str(raw).ok()?;
-    (entry.did == did && entry.attestation_pub_key == attestation_pub_key).then_some(entry.tier)
+    (entry.did == did).then_some(entry.tier)
 }
 
 /// `cocore agent tier`: print this machine's owner-chosen trust tier
@@ -642,8 +706,8 @@ async fn cmd_print_tier() -> Result<()> {
 
 /// `cocore agent active`: print `serving` or `paused` from the shared switch.
 async fn cmd_print_active() -> Result<()> {
-    let (pds, pubkey) = open_pds()?;
-    let active = match find_my_provider_record(&pds, &pubkey).await {
+    let (pds, did, pubkey) = open_pds()?;
+    let active = match find_my_provider_record(&pds, &did, &pubkey).await {
         Ok((_, value, _)) => value
             .get("active")
             .and_then(|v| v.as_bool())
@@ -672,28 +736,29 @@ async fn cmd_attestation(retry: bool) -> Result<()> {
         }
     }
 
-    let (pds, pubkey) = open_pds()?;
+    let (pds, did, pubkey) = open_pds()?;
 
     // Provider record: the ACHIEVED trustLevel + any attestation fault.
-    let (trust_level, attestation_fault_msg) = match find_my_provider_record(&pds, &pubkey).await {
-        Ok((_, value, _)) => {
-            let tl = value
-                .get("trustLevel")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let fault = value
-                .get("attestationFault")
-                .and_then(|f| f.get("message"))
-                .and_then(|m| m.as_str())
-                .map(str::to_string);
-            (tl, fault)
-        }
-        Err(_) => (
-            "unknown (this machine has not served yet)".to_string(),
-            None,
-        ),
-    };
+    let (trust_level, attestation_fault_msg) =
+        match find_my_provider_record(&pds, &did, &pubkey).await {
+            Ok((_, value, _)) => {
+                let tl = value
+                    .get("trustLevel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let fault = value
+                    .get("attestationFault")
+                    .and_then(|f| f.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string);
+                (tl, fault)
+            }
+            Err(_) => (
+                "unknown (this machine has not served yet)".to_string(),
+                None,
+            ),
+        };
     println!("trustLevel:    {trust_level}");
 
     // Local MDM enrollment (macOS system state; non-macOS reports `no`).
@@ -1451,6 +1516,7 @@ async fn read_my_desired_models() -> Vec<String> {
     let Some(session) = oauth::load_session().ok().flatten() else {
         return Vec::new();
     };
+    let did = session.did.clone();
     let pds = PdsClient::new(session);
     let Ok(signer) = secure_enclave::load_or_create_identity() else {
         return Vec::new();
@@ -1465,7 +1531,7 @@ async fn read_my_desired_models() -> Vec<String> {
     // an empty list on the first read (Ok path) with no retry.
     const ATTEMPTS: u32 = 3;
     for attempt in 1..=ATTEMPTS {
-        match find_my_provider_record(&pds, &pubkey).await {
+        match find_my_provider_record(&pds, &did, &pubkey).await {
             Ok((_, value, _)) => {
                 return value
                     .get("desiredModels")
@@ -1694,7 +1760,7 @@ async fn cmd_serve(
         share_location_at_start,
         tool_calls_at_start,
     ): (Vec<String>, Option<String>, ProBonoPolicy, bool, bool) =
-        match find_my_provider_record(&pds, &attestation_pub_key).await {
+        match find_my_provider_record(&pds, &session.did, &attestation_pub_key).await {
             Ok((_, value, _)) => {
                 let models = value
                     .get("desiredModels")
@@ -3023,7 +3089,12 @@ fn build_engines(
     let configured: Vec<String> = raw
         .split(',')
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        // Never route the built-in `stub` through the vLLM subprocess loader: it
+        // isn't a HuggingFace repo, so the subprocess `snapshot_download("stub")`
+        // 404s ("RepositoryNotFoundError"), exits status 1, and the recovery loop
+        // burns 3 retries + a WARN on every restart (bug report br_5051054f). The
+        // `stub` engine is always registered separately below.
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("stub"))
         .collect();
 
     // Per-model scheduling: narrow to the models whose time window is open
@@ -3725,35 +3796,37 @@ mod desired_tier_cache_tests {
     }
 
     #[test]
-    fn round_trips_for_the_same_identity() {
+    fn round_trips_for_the_same_did() {
         let raw = write("did:plc:abc", "PUBKEY", "attested-confidential");
         assert_eq!(
-            parse_cached_desired_tier(&raw, "did:plc:abc", "PUBKEY").as_deref(),
+            parse_cached_desired_tier(&raw, "did:plc:abc").as_deref(),
             Some("attested-confidential"),
         );
     }
 
     #[test]
-    fn ignores_a_foreign_did_or_rekeyed_enclave() {
+    fn a_foreign_did_ignores_the_cache() {
         let raw = write("did:plc:abc", "PUBKEY", "attested-confidential");
         // Different DID (re-pair under another account) → no cache.
+        assert_eq!(parse_cached_desired_tier(&raw, "did:plc:xyz"), None);
+    }
+
+    #[test]
+    fn a_rekeyed_enclave_keeps_the_cached_intent() {
+        // THE fix: a signing-key rotation (or the SE-vs-software CLI split)
+        // changes the pubkey but NOT the owner's tier intent. The cache is
+        // DID-scoped now, so the intent survives — the stored pubkey (here
+        // "PUBKEY") is ignored on read.
+        let raw = write("did:plc:abc", "PUBKEY", "attested-confidential");
         assert_eq!(
-            parse_cached_desired_tier(&raw, "did:plc:xyz", "PUBKEY"),
-            None
-        );
-        // Different attestation key (re-keyed enclave) → no cache.
-        assert_eq!(
-            parse_cached_desired_tier(&raw, "did:plc:abc", "OTHER"),
-            None
+            parse_cached_desired_tier(&raw, "did:plc:abc").as_deref(),
+            Some("attested-confidential"),
         );
     }
 
     #[test]
     fn corrupt_file_reads_as_no_cache() {
-        assert_eq!(
-            parse_cached_desired_tier("not json", "did:plc:abc", "PUBKEY"),
-            None,
-        );
+        assert_eq!(parse_cached_desired_tier("not json", "did:plc:abc"), None);
     }
 
     #[test]
@@ -3762,7 +3835,7 @@ mod desired_tier_cache_tests {
         // machine doesn't leave a stale confidential cache to resurrect.
         let raw = write("did:plc:abc", "PUBKEY", "best-effort");
         assert_eq!(
-            parse_cached_desired_tier(&raw, "did:plc:abc", "PUBKEY").as_deref(),
+            parse_cached_desired_tier(&raw, "did:plc:abc").as_deref(),
             Some("best-effort"),
         );
     }
@@ -3953,6 +4026,66 @@ mod active_gate_tests {
         let mut paused = false;
         assert_eq!(active_gate_decision(None, &mut paused), ActiveGate::Serve);
         assert!(!paused);
+    }
+}
+
+#[cfg(test)]
+mod record_is_mine_tests {
+    use super::record_is_mine;
+
+    fn val(pubkey: &str, fingerprint: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({ "attestationPubKey": pubkey });
+        if let Some(f) = fingerprint {
+            v["machineFingerprint"] = serde_json::json!(f);
+        }
+        v
+    }
+
+    #[test]
+    fn cached_rkey_matches_even_when_pubkey_rotated() {
+        // The serve process wrote the record under the SE key; a CLI that loaded
+        // the software-fallback key must still recognize it via the cached rkey.
+        let v = val("SE_KEY", Some("FP_ME"));
+        assert!(record_is_mine(
+            "r_me",
+            &v,
+            Some("r_me"),
+            Some("FP_ME"),
+            "SOFTWARE_KEY"
+        ));
+    }
+
+    #[test]
+    fn fingerprint_matches_when_rkey_cache_absent() {
+        let v = val("SE_KEY", Some("FP_ME"));
+        assert!(record_is_mine(
+            "r_me",
+            &v,
+            None,
+            Some("FP_ME"),
+            "SOFTWARE_KEY"
+        ));
+    }
+
+    #[test]
+    fn legacy_pubkey_fallback_matches() {
+        // A pre-fingerprint record with no machineFingerprint: fall back to key.
+        let v = val("MY_KEY", None);
+        assert!(record_is_mine("r_me", &v, None, None, "MY_KEY"));
+    }
+
+    #[test]
+    fn a_sibling_is_never_mine() {
+        // Different rkey, different fingerprint, different key → not ours. Must
+        // hold so a stable-id read never reads a sibling machine's desiredTier.
+        let sib = val("SIB_KEY", Some("FP_SIB"));
+        assert!(!record_is_mine(
+            "r_sib",
+            &sib,
+            Some("r_me"),
+            Some("FP_ME"),
+            "MY_KEY"
+        ));
     }
 }
 
