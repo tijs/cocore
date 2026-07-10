@@ -39,6 +39,11 @@ final class MenuBarController {
     /// Drives a loud "keeps crashing — send a report" menu row so a flapping
     /// machine doesn't just silently respawn behind a flat ledger.
     private var crashLoopCount = 0
+    /// True once the supervisor has opened its restart circuit breaker (too
+    /// many respawns too fast — e.g. a confidential machine that never
+    /// verifies). Drives a "Auto-restart paused — Retry" row so the machine
+    /// stops churning instead of respawning ~every minute behind the user.
+    private var restartStormActive = false
     /// Bounded to ONE auto-bounce per "stuck" window so we never loop-restart
     /// the agent — see `reconcileConfidential`. Reset whenever confidential
     /// becomes verified or is turned off.
@@ -162,6 +167,21 @@ final class MenuBarController {
                 // the serve switch above.
                 await self?.reconcileConfidential()
                 self?.reconcileSecurePosture()
+                // Half-open probe for the restart circuit: if the agent is
+                // down but should be serving, ask the supervisor to start. The
+                // supervisor gates this through the circuit breaker, so while a
+                // storm cooldown is open this is a no-op, and once it lapses
+                // exactly one probe gets through — self-healing a transient
+                // storm without reopening the ~1/min loop.
+                await self?.reconcileSupervisorLiveness()
+                // Mirror the live circuit state: once the cooldown lapses and a
+                // probe brings the agent back healthy, drop the "auto-restart
+                // paused" row without waiting for a user click.
+                if let self, self.restartStormActive, !self.supervisor.restartCircuitOpen,
+                    self.supervisor.isServing() {
+                    self.restartStormActive = false
+                    self.rebuildMenu()
+                }
             }
         }
 
@@ -181,6 +201,13 @@ final class MenuBarController {
         // silent respawn-behind-a-flat-ledger failure mode).
         supervisor.onCrashLoop = { [weak self] count in
             self?.crashLoopCount = count
+            self?.rebuildMenu()
+        }
+        // The supervisor stopped auto-respawning after a restart storm. Surface
+        // it so the user gets a "Retry" instead of a silently-dead machine.
+        supervisor.onRestartStorm = { [weak self] in
+            self?.restartStormActive = true
+            self?.refreshServing()
             self?.rebuildMenu()
         }
 
@@ -283,6 +310,16 @@ final class MenuBarController {
             // The agent keeps exiting. Say so plainly and offer the one-click
             // report inline rather than letting it respawn silently.
             menu.addItem(disabled("⚠ The agent keeps crashing (\(crashLoopCount)×)"))
+            menu.addItem(action(title: "Send bug report…", #selector(sendBugReport)))
+            menu.addItem(.separator())
+        }
+        if restartStormActive {
+            // The supervisor stopped respawning after a restart storm (the
+            // agent kept bouncing ~every minute without stabilising — usually a
+            // desired posture like confidential that never verifies). Offer an
+            // explicit Retry that clears the cooldown, plus a report.
+            menu.addItem(disabled("⚠ Auto-restart paused — the agent kept restarting"))
+            menu.addItem(action(title: "Retry now", #selector(retryAfterRestartStorm)))
             menu.addItem(action(title: "Send bug report…", #selector(sendBugReport)))
             menu.addItem(.separator())
         }
@@ -474,6 +511,9 @@ final class MenuBarController {
             }
             Self.setOwnerPaused(false)
             pausedByOwner = false
+            // A deliberate Resume overrides any restart-storm cooldown.
+            restartStormActive = false
+            supervisor.resetRestartCircuit()
             await supervisor.start()
             refreshServing()
             rebuildMenu()
@@ -493,9 +533,15 @@ final class MenuBarController {
                 presentServeSwitchError(action: "pause", detail: out)
                 return
             }
-            await supervisor.stop()
+            // Arm the paused state BEFORE stopping: `supervisor.stop()`
+            // suspends while it waits for the child to exit, and during that
+            // gap `isServing()` can briefly read false. Setting the marker +
+            // `pausedByOwner` first ensures the liveness probe (which runs on
+            // the same actor between awaits) sees "owner-paused" and won't
+            // resurrect the machine we're deliberately stopping.
             Self.setOwnerPaused(true)
             pausedByOwner = true
+            await supervisor.stop()
             refreshServing()
             rebuildMenu()
         }
@@ -544,6 +590,10 @@ final class MenuBarController {
             didAutoBounceConfidential = false
             lastConfidentialActionAt = on ? Date() : nil
             lastAutoBounceAt = nil
+            // A tier change is fresh intent — clear any restart-storm cooldown
+            // so the switch-over isn't blocked by a loop the OLD tier caused.
+            restartStormActive = false
+            supervisor.resetRestartCircuit()
             // Bounce so the fresh serve reads the new desiredTier and the
             // supervisor selects the right worker (same as Restart serving).
             await supervisor.stop()
@@ -585,6 +635,8 @@ final class MenuBarController {
             didAutoBounceConfidential = false
             lastConfidentialActionAt = Date()
             lastAutoBounceAt = nil  // explicit Retry overrides the auto-bounce cooldown
+            restartStormActive = false
+            supervisor.resetRestartCircuit()  // explicit Retry overrides the storm cooldown too
             await supervisor.stop()
             await supervisor.start()
             refreshServing()
@@ -769,6 +821,27 @@ final class MenuBarController {
         }
     }
 
+    /// Half-open probe for the supervisor's restart circuit. When the agent is
+    /// down but the owner wants it serving — signed in, not owner-paused, not
+    /// remotely paused — ask the supervisor to start. It funnels through the
+    /// circuit breaker, so during an open storm cooldown this is a no-op and
+    /// after the cooldown lapses exactly one probe gets through. That both
+    /// self-heals a transient storm and closes the pre-existing gap where an
+    /// agent that exited cleanly (not a <10s crash the terminationHandler
+    /// respawns) could sit down until the next user action. LaunchAgent installs
+    /// have launchd's KeepAlive for this, so we only probe the app-supervised
+    /// (no-plist) path.
+    @MainActor
+    private func reconcileSupervisorLiveness() async {
+        guard !supervisor.isLaunchAgentManaged else { return }
+        guard state.session != nil else { return }
+        guard !pausedByOwner, !Self.isRemotelyPaused() else { return }
+        guard !supervisor.isServing() else { return }
+        // Circuit-gated: refused during an open cooldown, one probe after it.
+        await supervisor.start()
+        refreshServing()
+    }
+
     /// Bounce the agent after the advisor flagged this machine unresponsive.
     /// A clean re-register clears the bad-standing marker (the agent does
     /// this on connect), so the red ping + this row drop away once it
@@ -778,6 +851,20 @@ final class MenuBarController {
             await supervisor.stop()
             await supervisor.start()
             refreshServing()
+        }
+    }
+
+    /// Explicit "Retry now" after the supervisor tripped its restart circuit.
+    /// Clears the cooldown (a human is deliberately overriding it) and starts
+    /// the agent fresh. If the underlying problem persists the circuit will
+    /// simply re-open, so this can't reinstate an infinite loop.
+    @objc private func retryAfterRestartStorm() {
+        Task {
+            restartStormActive = false
+            supervisor.resetRestartCircuit()
+            await supervisor.start()
+            refreshServing()
+            rebuildMenu()
         }
     }
 

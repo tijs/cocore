@@ -794,12 +794,35 @@ async fn cmd_attestation(retry: bool) -> Result<()> {
     // The common point of confusion: enrolled, but still self-attested.
     if enrolled && trust_level != "hardware-attested" {
         println!();
-        println!(
-            "This Mac is MDM-enrolled but not yet hardware-attested. A key-bound \
-             attestation chain was requested and lands on the next attestation \
-             refresh (≤23h). To re-request sooner, run \
-             `cocore agent attestation --retry`."
-        );
+        // Whether a request is already outstanding for the key the SERVE signs
+        // with. Prefer the serve's published signing key over this CLI process's
+        // own: on a Secure-Enclave build the short-lived CLI can load a
+        // different software key than the long-running serve, and the MDA loader
+        // attests the serve's key. If a request is already outstanding, the
+        // machine is waiting on Apple's re-attestation window, not on us.
+        let serve_key = cocore_provider::secure_enclave::read_published_signing_pubkey();
+        let awaiting_apple = serve_key
+            .as_deref()
+            .map(cocore_provider::mda_loader::requested_for_key)
+            .unwrap_or(false);
+        if awaiting_apple {
+            println!(
+                "This Mac is MDM-enrolled but not yet hardware-attested. A key-bound \
+                 attestation was already requested for the current signing key. Apple \
+                 rate-limits device attestation to ~1 per device / 7 days, so if the \
+                 signing key changed recently the rebind only lands once that window \
+                 opens — up to several days. `--retry` re-asks but cannot beat Apple's \
+                 limit; the chain rebinds on its own once the window opens (as long as \
+                 the signing key stays stable)."
+            );
+        } else {
+            println!(
+                "This Mac is MDM-enrolled but not yet hardware-attested. A key-bound \
+                 attestation chain was requested and lands on the next attestation \
+                 refresh (≤23h). To re-request sooner, run \
+                 `cocore agent attestation --retry`."
+            );
+        }
     }
     Ok(())
 }
