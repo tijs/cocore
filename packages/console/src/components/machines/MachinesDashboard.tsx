@@ -116,7 +116,7 @@ const FLEET_TABLE_COLUMNS: {
   minWidth?: number;
   maxWidth?: number;
 }[] = [
-  { id: "alias", name: "Alias", width: 320 },
+  { id: "alias", name: "Alias", width: 400 },
   { id: "state", name: "State", width: 80 },
   { id: "gpu", name: "GPU", width: 120 },
   { id: "job", name: "Status", minWidth: 140 },
