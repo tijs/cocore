@@ -445,6 +445,10 @@ pub fn acquire_auto(console_base: &str, api_key: &str, public_key_b64: &str) -> 
     // Try the already-captured chain first (reused across refreshes; rate-limit
     // friendly — we never re-request once we have a bound chain). The endpoint
     // is bearer-gated, so we MUST present the api_key (a keyless GET 401s).
+    // Track whether the coordinator holds a chain that exists but is bound to a
+    // SUPERSEDED key, so the "why isn't this rebinding" log below can be honest
+    // about the actual state instead of implying every boot re-requests.
+    let mut stale_chain_held = false;
     if let Ok(chain) = load_from_url_with_key(&chain_url, api_key) {
         if !chain.is_empty() {
             // Only trust a chain that actually binds THIS signing key. After a
@@ -459,12 +463,18 @@ pub fn acquire_auto(console_base: &str, api_key: &str, public_key_b64: &str) -> 
                 );
                 return chain;
             }
+            stale_chain_held = true;
+            // NB: this is an OBSERVATION, not the action. Whether we actually
+            // re-request is decided (and logged) below — the old copy claimed
+            // "re-requesting" here unconditionally, which read as a re-request
+            // every ~60s cycle in br_ed8f257c even when the cooldown then held
+            // us off, and cost a full triage round-trip to see through.
             tracing::warn!(
-                "MDA auto: captured chain does not bind the current signing key (rotated?); re-requesting"
+                "MDA auto: captured chain is bound to a SUPERSEDED signing key, not the current one — it can never verify, so ignoring it"
             );
         }
     }
-    // No chain yet → request one (cooldown-gated), then return empty for now.
+    // No usable chain → request one (cooldown-gated), then return empty for now.
     let Some(udid) = device_hardware_uuid() else {
         tracing::warn!("MDA auto: could not read Hardware UUID; cannot request attestation");
         return Vec::new();
@@ -481,14 +491,27 @@ pub fn acquire_auto(console_base: &str, api_key: &str, public_key_b64: &str) -> 
             mark_auto_requested(public_key_b64);
             if key_rotated {
                 tracing::info!(
-                    "MDA auto: signing key rotated — requested a fresh key-bound attestation (bypassed cooldown); chain lands on a later refresh"
+                    "MDA auto: signing key changed since the last request — requested a fresh key-bound attestation (bypassed cooldown); it lands on a later refresh"
                 );
             } else {
+                // Same key, cooldown elapsed: we DID re-request. Name Apple's
+                // limit so a stuck machine reads as "waiting on Apple", not
+                // "broken" — Apple caps DeviceInformation attestation at
+                // ~1/device/7d, so a rebind only lands after that window opens,
+                // however often we ask.
                 tracing::info!(
-                    "MDA auto: requested attestation; chain will land on a later refresh"
+                    "MDA auto: re-requested a key-bound attestation for the current signing key; Apple rate-limits device attestation to ~1/device/7d, so the rebind lands once that window opens"
                 );
             }
         }
+    } else if stale_chain_held {
+        // Honest about the hold-off: we are NOT re-requesting this boot, and the
+        // chain the coordinator holds is stale. This is the steady state of a
+        // machine whose key rotated inside Apple's 7-day attestation window.
+        tracing::info!(
+            cooldown_h = AUTO_REQUEST_COOLDOWN.as_secs() / 3600,
+            "MDA auto: stale chain, but already re-requested for the current key within the cooldown — holding off (waiting on Apple's ~7-day attestation window to rebind); not re-requesting this boot"
+        );
     } else {
         tracing::debug!("MDA auto: within request cooldown; not re-requesting this boot");
     }
@@ -608,6 +631,14 @@ fn mark_auto_requested(public_key_b64: &str) {
         }
         let _ = std::fs::write(&path, public_key_b64.as_bytes());
     }
+}
+
+/// True when we've already requested a key-bound MDA attestation for
+/// `public_key_b64`. When a machine is enrolled-but-not-attested and THIS is
+/// true, it's waiting on Apple's ~1/device/7-day DeviceInformation window — not
+/// on us to ask — so the UI should say "waiting on Apple", not "requesting".
+pub fn requested_for_key(public_key_b64: &str) -> bool {
+    last_requested_pubkey().as_deref() == Some(public_key_b64)
 }
 
 /// The signing key we last requested an MDA attestation for, if any.
