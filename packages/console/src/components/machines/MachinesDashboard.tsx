@@ -116,7 +116,7 @@ const FLEET_TABLE_COLUMNS: {
   minWidth?: number;
   maxWidth?: number;
 }[] = [
-  { id: "alias", name: "Alias", width: 320 },
+  { id: "alias", name: "Alias", width: 400 },
   { id: "state", name: "State", width: 80 },
   { id: "gpu", name: "GPU", width: 120 },
   { id: "job", name: "Status", minWidth: 140 },
@@ -2392,7 +2392,7 @@ export function MachinesDashboard() {
                         if (column.id === "alias") {
                           return (
                             <TableCell contentStyle={styles.aliasCellContent}>
-                              <Flex direction="row" gap="md" align="center">
+                              <Flex direction="row" gap="md" align="center" wrap>
                                 <RouterLink
                                   to="/machines/$rkey"
                                   params={{ rkey: m.id }}
