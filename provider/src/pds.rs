@@ -148,15 +148,15 @@ pub struct ProviderRecord {
     /// fields so opting out clears any previously-shared value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shareLocation: Option<bool>,
-    /// The owner's opt-in to serving tool/function calls. Owner-written INTENT,
-    /// like `desiredModels`/`active`/`desiredTier`/`proBono`/`shareLocation`:
-    /// the agent reconciles toward it (when true it enables vLLM automatic tool
-    /// choice for the curated top models and verifies each with a forced-tool
-    /// startup canary before advertising it) but NEVER authors it, so it must
-    /// PRESERVE whatever it finds on every re-publish. Absent ≡ off (no engine
-    /// advertises tool calls; the machine serves exactly as before).
+    /// Legacy owner opt-in to tool calling. New agents default eligible models
+    /// on, but preserve this field for older agents and console compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub toolCalls: Option<bool>,
+    /// Explicit owner opt-out from default-on tool calling. `true` wins over the
+    /// legacy opt-in; absent/false leaves eligible models enabled unless the
+    /// operator explicitly overrides `COCORE_ENABLE_TOOL_CALLS`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolCallsDisabled: Option<bool>,
     /// True while the agent is still loading its inference engine. Set on
     /// the early "provisioning" publish at serve start so the machine
     /// appears on the console immediately; cleared (set false) on the
@@ -228,7 +228,24 @@ pub const OWNER_INTENT_KEYS: &[&str] = &[
     "proBono",
     "shareLocation",
     "toolCalls",
+    "toolCallsDisabled",
 ];
+
+/// Resolve tool calling once for startup and live reconciliation. An explicit
+/// operator setting wins; otherwise only the additive opt-out disables the
+/// default. The legacy field remains an input to make its compatibility
+/// semantics explicit: true still means on, while false is not a new opt-out.
+pub fn effective_tool_calls(
+    explicit_env: Option<bool>,
+    legacy_tool_calls: Option<bool>,
+    tool_calls_disabled: Option<bool>,
+) -> bool {
+    match (explicit_env, legacy_tool_calls, tool_calls_disabled) {
+        (Some(enabled), _, _) => enabled,
+        (None, _, Some(true)) => false,
+        (None, _, _) => true,
+    }
+}
 
 /// Agent-authored OPTIONAL fields — present some serves, absent others (a tier
 /// the machine earned then lost, an engineFault that cleared, region when the
@@ -916,7 +933,13 @@ impl PdsClient {
     pub async fn get_provider_control(
         &self,
         rkey: &str,
-    ) -> Option<(bool, Vec<String>, Option<String>, bool)> {
+    ) -> Option<(
+        bool,
+        Vec<String>,
+        Option<String>,
+        Option<bool>,
+        Option<bool>,
+    )> {
         let listed = self
             .list_my_records("dev.cocore.compute.provider")
             .await
@@ -944,14 +967,17 @@ impl PdsClient {
             .get("desiredTier")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        // The owner's tool-calling opt-in; absent ≡ off. The serve loop restarts
-        // on a change so the fresh build rebuilds engines with the new setting.
-        let tool_calls = rec
-            .value
-            .get("toolCalls")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        Some((active, desired, desired_tier, tool_calls))
+        // Return both owner fields so the serve loop can derive the effective
+        // policy using the same explicit-environment precedence as startup.
+        let tool_calls = rec.value.get("toolCalls").and_then(|v| v.as_bool());
+        let tool_calls_disabled = rec.value.get("toolCallsDisabled").and_then(|v| v.as_bool());
+        Some((
+            active,
+            desired,
+            desired_tier,
+            tool_calls,
+            tool_calls_disabled,
+        ))
     }
 
     /// Field-scoped patch of this machine's provider record: set (or, with
@@ -1190,6 +1216,16 @@ impl PdsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_tool_policy_defaults_on_and_honours_precedence() {
+        assert!(effective_tool_calls(None, None, None));
+        assert!(effective_tool_calls(None, Some(true), None));
+        assert!(effective_tool_calls(None, Some(false), None));
+        assert!(!effective_tool_calls(None, Some(true), Some(true)));
+        assert!(!effective_tool_calls(Some(false), Some(true), None));
+        assert!(effective_tool_calls(Some(true), None, Some(true)));
+    }
 
     fn rec(
         rkey: &str,

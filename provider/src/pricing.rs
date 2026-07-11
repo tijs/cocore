@@ -53,10 +53,10 @@ pub struct ModelRate {
     /// floor + price) but are NOT recommended. UX-only; never on the wire.
     pub recommended: bool,
     /// The vLLM `--tool-call-parser` name this model pairs with, when cocore
-    /// knows one (`hermes` for the Qwen rotation, `llama4_pythonic` for
-    /// Llama 4, …). `None` means cocore has no vetted parser pairing for this
-    /// id, so it stays OUT of the curated tool-calling set: when the owner
-    /// flips the per-machine `toolCalls` switch the agent only enables
+    /// knows one (`qwen3_xml` for Qwen 3.5/3.6, `hermes` for Qwen 2.5,
+    /// `llama4_pythonic` for Llama 4, …). `None` means cocore has no vetted
+    /// parser pairing for this id, so it stays OUT of the curated tool-calling
+    /// set: when effective machine policy is on, the agent only enables
     /// automatic tool choice for entries that carry a parser here, then still
     /// gates advertisement behind the forced-tool startup canary. This is the
     /// "restrict to top models for now" boundary — adding a new model to the
@@ -100,7 +100,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 4,
         description: "Qwen3.5 0.8B — fast, low quality; fits any Apple Silicon",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen3.5-2B-MLX-4bit",
@@ -110,7 +110,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 6,
         description: "Qwen3.5 2B — small but coherent; good on 8GB",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen3.5-4B-MLX-4bit",
@@ -120,7 +120,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 8,
         description: "Qwen3.5 4B — balanced default for 8GB+ Macs",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     // NOTE: `mlx-community/gemma-4-e4b-it-4bit` was previously here. It is a
     // merged/multimodal (Gemma "E4B") checkpoint whose weights are nested under
@@ -138,7 +138,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 16,
         description: "Qwen3.5 9B — strong general-purpose; 16GB+ recommended",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen3.5-27B-4bit",
@@ -148,7 +148,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 24,
         description: "Qwen3.5 27B — high-quality dense model; 24GB+",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen3.6-27B-4bit",
@@ -158,7 +158,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 24,
         description: "Qwen3.6 27B — frontier-class dense; 24GB+",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen3.5-35B-A3B-4bit",
@@ -168,7 +168,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 32,
         description: "Qwen3.5 35B-A3B MoE — fast for its size; 32GB+",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen3.6-35B-A3B-4bit",
@@ -178,7 +178,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 32,
         description: "Qwen3.6 35B-A3B MoE — fast for its size; 32GB+",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     // DWQ re-quant of the entry above. Same architecture and chat/tool
     // template, so it pairs with the same parser — machines already serving
@@ -193,7 +193,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 32,
         description: "Qwen3.6 35B-A3B MoE (DWQ quant) — fast for its size; 32GB+",
         recommended: false,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     ModelRate {
         model_id: "mlx-community/Llama-4-Scout-17B-16E-Instruct-4bit",
@@ -213,7 +213,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 96,
         description: "Qwen3.5 122B-A10B MoE — flagship; 96GB+ Mac Studio/Ultra",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen3.5-397B-A17B-4bit",
@@ -223,7 +223,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 256,
         description: "Qwen3.5 397B-A17B MoE — flagship; 256GB+ Ultra",
         recommended: true,
-        tool_call_parser: Some("hermes"),
+        tool_call_parser: Some("qwen3_xml"),
     },
     // ---- Legacy catalog (still servable; not recommended) -------------
     // Kept so a machine that already pinned one of these keeps its RAM
@@ -237,7 +237,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 4,
         description: "Qwen 0.5B (legacy) — fast, low quality",
         recommended: false,
-        tool_call_parser: None,
+        tool_call_parser: Some("hermes"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen2.5-3B-Instruct-4bit",
@@ -247,7 +247,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 8,
         description: "Qwen 3B (legacy) — small but coherent",
         recommended: false,
-        tool_call_parser: None,
+        tool_call_parser: Some("hermes"),
     },
     ModelRate {
         model_id: "mlx-community/Qwen2.5-7B-Instruct-4bit",
@@ -257,7 +257,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 16,
         description: "Qwen 7B (legacy) — strong general-purpose",
         recommended: false,
-        tool_call_parser: None,
+        tool_call_parser: Some("hermes"),
     },
     ModelRate {
         model_id: "mlx-community/gemma-3-4b-it-qat-4bit",
@@ -277,7 +277,7 @@ pub const RATES: &[ModelRate] = &[
         min_ram_gb: 32,
         description: "Qwen 32B (legacy) — frontier-class",
         recommended: false,
-        tool_call_parser: None,
+        tool_call_parser: Some("hermes"),
     },
     ModelRate {
         model_id: "mlx-community/Llama-3.3-70B-Instruct-4bit",
@@ -315,12 +315,15 @@ pub fn min_ram_gb(model_id: &str) -> Option<u32> {
 /// The vetted vLLM `--tool-call-parser` for a model id, or `None` when cocore
 /// has no parser pairing for it (off-catalog model, or a catalog entry we
 /// haven't vetted for tool calls — every legacy entry, the stub). This is the
-/// curated "top models" boundary the per-machine `toolCalls` switch reconciles
-/// against: only a model that returns `Some` here is eligible to attempt tool
-/// calling, and even then the forced-tool startup canary still decides whether
-/// the engine actually advertises it. Adding a model to the rotation is a
-/// one-line parser pairing in `RATES`, never a code change here.
+/// curated model boundary the effective machine policy reconciles against:
+/// only a model that returns `Some` here may attempt tool calling, and the
+/// forced-tool startup canary still decides whether it is advertised. Catalog
+/// models carry their parser in `RATES`; exact off-catalog exceptions are
+/// matched explicitly here without making them picker entries.
 pub fn tool_call_parser(model_id: &str) -> Option<&'static str> {
+    if model_id == "leonsarmiento/Ornith-1.0-35B-5bit-mlx" {
+        return Some("qwen3_xml");
+    }
     RATES
         .iter()
         .find(|r| r.model_id == model_id)
@@ -700,17 +703,55 @@ mod tests {
     }
 
     #[test]
+    fn curated_tool_parsers_are_exact_and_fail_closed() {
+        for model in [
+            "mlx-community/Qwen3.5-0.8B-MLX-4bit",
+            "mlx-community/Qwen3.5-2B-MLX-4bit",
+            "mlx-community/Qwen3.5-4B-MLX-4bit",
+            "mlx-community/Qwen3.5-9B-MLX-4bit",
+            "mlx-community/Qwen3.5-27B-4bit",
+            "mlx-community/Qwen3.5-35B-A3B-4bit",
+            "mlx-community/Qwen3.5-122B-A10B-4bit",
+            "mlx-community/Qwen3.5-397B-A17B-4bit",
+            "mlx-community/Qwen3.6-27B-4bit",
+            "mlx-community/Qwen3.6-35B-A3B-4bit",
+            "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ",
+            "leonsarmiento/Ornith-1.0-35B-5bit-mlx",
+        ] {
+            assert_eq!(tool_call_parser(model), Some("qwen3_xml"), "{model}");
+        }
+        for model in [
+            "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+            "mlx-community/Qwen2.5-3B-Instruct-4bit",
+            "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "mlx-community/Qwen2.5-32B-Instruct-4bit",
+        ] {
+            assert_eq!(tool_call_parser(model), Some("hermes"), "{model}");
+        }
+        for model in [
+            "mlx-community/Llama-3.3-70B-Instruct-4bit",
+            "mlx-community/gemma-3-4b-it-qat-4bit",
+            "deepseek-coder-v2-lite-instruct",
+            "text-embedding-nomic-embed-text-v1.5",
+            "stub",
+            "unknown/model",
+        ] {
+            assert_eq!(tool_call_parser(model), None, "{model}");
+        }
+    }
+
+    #[test]
     fn dwq_requant_pairs_with_same_parser_but_stays_off_the_rotation() {
         // The DWQ re-quant shares the canonical entry's chat/tool template,
         // so it must carry the same parser pairing (issue #166: a machine
         // serving it could never pass the tool-call canary)…
         assert_eq!(
             tool_call_parser("mlx-community/Qwen3.6-35B-A3B-4bit-DWQ"),
-            Some("hermes")
+            Some("qwen3_xml")
         );
         assert_eq!(
             tool_call_parser("mlx-community/Qwen3.6-35B-A3B-4bit"),
-            Some("hermes")
+            Some("qwen3_xml")
         );
         // …while the picker rotation keeps recommending only the canonical
         // quant.

@@ -322,6 +322,16 @@ interface AdvisorOnline {
   toolCallModels?: string[];
 }
 
+export function hasVerifiedToolCallSupport(
+  online: Pick<AdvisorOnline, "supportsToolCalls" | "toolCallModels"> | undefined,
+  modelId: string,
+): boolean {
+  if (!online) return false;
+  return Array.isArray(online.toolCallModels)
+    ? online.toolCallModels.includes(modelId)
+    : online.supportsToolCalls;
+}
+
 interface AdvisorOnlineResult {
   /** Keyed by "${did}:${machineId}" for machines that report a machineId,
    *  or just "${did}" for legacy agents. Used for per-machine online checks
@@ -526,12 +536,7 @@ export async function buildModelDirectory(): Promise<ModelDirectoryResponse> {
       const seen = onlineInfo?.lastSeen ?? lastSeen;
       // OR in tool calling support from this machine. New agents report the
       // exact verified model subset; legacy agents only reported a coarse bool.
-      if (
-        onlineInfo &&
-        (Array.isArray(onlineInfo.toolCallModels)
-          ? onlineInfo.toolCallModels.includes(modelId)
-          : onlineInfo.supportsToolCalls)
-      ) {
+      if (hasVerifiedToolCallSupport(onlineInfo, modelId)) {
         entry.tools = true;
       }
       const attestationPubKey = safeString(body.attestationPubKey);

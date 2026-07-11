@@ -165,6 +165,19 @@ function providerRow(body: Record<string, unknown>): AppviewIndexedRecord {
   };
 }
 
+function machineFrom(body: Record<string, unknown>): Machine {
+  return providerRowsToMachines([providerRow(body)], ZERO_STATS, new Map()).at(0)!;
+}
+
+test("tool calling renders default-on with additive opt-out precedence", () => {
+  assert.equal(machineFrom({}).toolCalls, true);
+  assert.equal(machineFrom({ toolCalls: true }).toolCalls, true);
+  assert.equal(machineFrom({ toolCalls: false }).toolCalls, true);
+  assert.equal(machineFrom({ toolCallsDisabled: false }).toolCalls, true);
+  assert.equal(machineFrom({ toolCallsDisabled: true }).toolCalls, false);
+  assert.equal(machineFrom({ toolCalls: true, toolCallsDisabled: true }).toolCalls, false);
+});
+
 test("engineFault is mapped onto the machine when the record carries it", () => {
   const m = providerRowsToMachines(
     [

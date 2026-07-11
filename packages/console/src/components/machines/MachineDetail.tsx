@@ -820,7 +820,7 @@ export function MachineDetail({ rkey }: { rkey: string }) {
                 onSuccess: () =>
                   showToast(
                     enabled
-                      ? `${m.alias}: tool calling on for top models on the next serve`
+                      ? `${m.alias}: tool calling on for eligible models on the next serve`
                       : `${m.alias}: tool calling off`,
                   ),
                 onError: (e) =>

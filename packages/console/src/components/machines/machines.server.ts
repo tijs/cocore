@@ -61,6 +61,7 @@ type ProviderRecordBody = {
   region?: string;
   proBono?: { mode?: string; dids?: string[] };
   toolCalls?: boolean;
+  toolCallsDisabled?: boolean;
   attestationPubKey?: string;
 };
 
@@ -117,6 +118,7 @@ function parseProviderBody(body: unknown): ProviderRecordBody {
     region: typeof o.region === "string" ? o.region : undefined,
     proBono: parseProBono(o.proBono),
     toolCalls: typeof o.toolCalls === "boolean" ? o.toolCalls : undefined,
+    toolCallsDisabled: typeof o.toolCallsDisabled === "boolean" ? o.toolCallsDisabled : undefined,
     attestationPubKey:
       typeof o.attestationPubKey === "string" && o.attestationPubKey.length > 0
         ? o.attestationPubKey
@@ -765,7 +767,9 @@ export function providerRowsToMachines(
           ? body.proBono.mode
           : undefined,
       proBonoDids: body.proBono?.dids,
-      toolCalls: body.toolCalls,
+      // New agents default on; the additive opt-out wins even if a stale
+      // legacy opt-in is also present.
+      toolCalls: body.toolCallsDisabled !== true,
     };
 
     if (body.active === false) {

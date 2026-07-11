@@ -4,8 +4,8 @@ use cocore_provider::{
     advisor::AdvisorClient,
     attestation, oauth,
     pds::{
-        AttestationFault, EngineFault, ModelPrice, PdsClient, ProBonoPolicy, ProviderRecord,
-        TrustLevel,
+        effective_tool_calls, AttestationFault, EngineFault, ModelPrice, PdsClient, ProBonoPolicy,
+        ProviderRecord, TrustLevel,
     },
     pricing,
     protocol::Register,
@@ -1312,7 +1312,7 @@ async fn wait_until_active(pds: &cocore_provider::pds::PdsClient, rkey: Option<&
         let read = pds
             .get_provider_control(rk)
             .await
-            .map(|(active, _, _, _)| active);
+            .map(|(active, _, _, _, _)| active);
         if active_gate_decision(read, &mut confirmed_paused) == ActiveGate::Serve {
             clear_serving_paused();
             return;
@@ -1729,6 +1729,7 @@ async fn cmd_serve(
             // stamps region (no network lookup before the engine is up).
             shareLocation: None,
             toolCalls: None,
+            toolCallsDisabled: None,
             provisioning: Some(true),
             // NOT serving yet: this record is published immediately (so the
             // machine is visible) while the engine is still loading/downloading.
@@ -1780,6 +1781,10 @@ async fn cmd_serve(
     // of an unmeasured Python child, defeating the tier). We still read
     // `desiredModels` below so a change still triggers a reload restart.
     let confidential = push_rx.is_some();
+    // Capture the operator override before filling the engine's environment
+    // from the owner record. It remains authoritative during live reconciliation.
+    let tool_calls_env_override = std::env::var_os("COCORE_ENABLE_TOOL_CALLS")
+        .map(|v| v == "1" || v.to_string_lossy().eq_ignore_ascii_case("true"));
     let (
         desired_at_start,
         desired_tier_at_start,
@@ -1813,29 +1818,34 @@ async fn cmd_serve(
                 // served job can decide per-requester whether it's free. Absent /
                 // malformed ≡ off (every job metered + billed).
                 let pro_bono = ProBonoPolicy::from_record_value(&value).unwrap_or_default();
-                // The owner's tool-calling opt-in. Absent ≡ off (no engine
-                // advertises tool calls). Gates the curated tool-call path below.
-                let tool_calls = value
-                    .get("toolCalls")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let tool_calls = effective_tool_calls(
+                    tool_calls_env_override,
+                    value.get("toolCalls").and_then(|v| v.as_bool()),
+                    value.get("toolCallsDisabled").and_then(|v| v.as_bool()),
+                );
                 (models, tier, pro_bono, share_location, tool_calls)
             }
-            Err(_) => (Vec::new(), None, ProBonoPolicy::default(), false, false),
+            Err(_) => (
+                Vec::new(),
+                None,
+                ProBonoPolicy::default(),
+                false,
+                effective_tool_calls(tool_calls_env_override, None, None),
+            ),
         };
 
-    // Reconcile the owner's tool-calling intent into the env knob `build_engines`
-    // reads. An EXPLICIT operator setting always wins (a launchd plist / shell
-    // that pinned `COCORE_ENABLE_TOOL_CALLS` keeps full control, including the
-    // global-parser passthrough); we only fill it in from the console intent when
-    // the operator left it unset. `for_model` then enables automatic tool choice
-    // for just the curated top models, and the startup canary decides what's
-    // actually advertised — so flipping this on can only ADD capability.
-    if std::env::var_os("COCORE_ENABLE_TOOL_CALLS").is_none() && tool_calls_at_start {
+    // Feed the effective default into the existing engine knob only when the
+    // operator did not set it. Exact model eligibility and the startup canary
+    // still decide what is advertised.
+    if tool_calls_env_override.is_none() {
         tracing::info!(
-            "owner enabled tool calling for this machine (console toolCalls=true); curated top models will attempt tool calls and verify with a startup canary"
+            enabled = tool_calls_at_start,
+            "using provider-record default for structured tool-call intent generation"
         );
-        std::env::set_var("COCORE_ENABLE_TOOL_CALLS", "1");
+        std::env::set_var(
+            "COCORE_ENABLE_TOOL_CALLS",
+            if tool_calls_at_start { "1" } else { "0" },
+        );
     }
     match inference_models_action(confidential, &desired_at_start) {
         InferenceModelsAction::Clear => {
@@ -2090,6 +2100,7 @@ async fn cmd_serve(
         // start; this carries the switch itself through the re-publish.)
         shareLocation: None,
         toolCalls: None,
+        toolCallsDisabled: None,
         // Engine is loaded by this point — clear the provisioning flag we
         // set on the early publish above, so the console flips the row
         // from "provisioning" to live.
@@ -2356,6 +2367,7 @@ async fn cmd_serve(
                             push_rx.as_mut(),
                             &pro_bono_at_start,
                             tool_calls_at_start,
+                            tool_calls_env_override,
                         )
                         .await;
                     let lived = connected_at.elapsed();
@@ -2425,7 +2437,7 @@ async fn cmd_serve(
                         );
                         let client = AdvisorClient::new(advisor_url);
                         tokio::select! {
-                            res = client.run(register.clone(), &*signer, &*enc, &pds, attestation.clone(), &eng, provider_rkey.as_deref(), &desired_at_start, desired_tier_at_start.as_deref(), &model_schedules, &configured_models, push_rx.as_mut(), &pro_bono_at_start, tool_calls_at_start) => {
+                            res = client.run(register.clone(), &*signer, &*enc, &pds, attestation.clone(), &eng, provider_rkey.as_deref(), &desired_at_start, desired_tier_at_start.as_deref(), &model_schedules, &configured_models, push_rx.as_mut(), &pro_bono_at_start, tool_calls_at_start, tool_calls_env_override) => {
                                 match &res {
                                     Ok(()) => advisor_fault.reset(),
                                     Err(e) => {
@@ -4212,6 +4224,7 @@ mod offline_marker_tests {
             proBono: None,
             shareLocation: None,
             toolCalls: None,
+            toolCallsDisabled: None,
             provisioning: Some(false),
             serving: Some(true),
             engineFault: None,
@@ -4274,7 +4287,9 @@ mod offline_marker_tests {
             "desiredModels": ["mlx-community/Qwen2.5-3B-Instruct-4bit", "stub"],
             "desiredTier": "attested-confidential",
             "proBono": { "mode": "direct", "dids": ["did:plc:friend"] },
-            "shareLocation": true
+            "shareLocation": true,
+            "toolCalls": true,
+            "toolCallsDisabled": true
         });
 
         let merged = merge_agent_provider_fields(&live, &offline);
@@ -4297,6 +4312,11 @@ mod offline_marker_tests {
             Some(&serde_json::json!({ "mode": "direct", "dids": ["did:plc:friend"] }))
         );
         assert_eq!(merged.get("shareLocation"), Some(&serde_json::json!(true)));
+        assert_eq!(merged.get("toolCalls"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            merged.get("toolCallsDisabled"),
+            Some(&serde_json::json!(true))
+        );
     }
 
     /// THE property that kills the whole bug class: a field this agent build has
@@ -4389,7 +4409,12 @@ mod offline_marker_tests {
         let mut rebuilt = agent_built_record();
         rebuilt.active = Some(true); // agent erroneously authoring an owner field
         rebuilt.desiredModels = Some(vec!["agent-should-not-set-this".into()]);
-        let live = serde_json::json!({ "active": false, "desiredModels": ["owner-choice"] });
+        rebuilt.toolCallsDisabled = Some(false);
+        let live = serde_json::json!({
+            "active": false,
+            "desiredModels": ["owner-choice"],
+            "toolCallsDisabled": true
+        });
 
         let merged = merge_agent_provider_fields(&live, &rebuilt);
 
@@ -4402,6 +4427,11 @@ mod offline_marker_tests {
             merged.get("desiredModels"),
             Some(&serde_json::json!(["owner-choice"])),
             "agent can never overwrite the owner's model pick"
+        );
+        assert_eq!(
+            merged.get("toolCallsDisabled"),
+            Some(&serde_json::json!(true)),
+            "agent can never overwrite the owner's tool opt-out"
         );
     }
 

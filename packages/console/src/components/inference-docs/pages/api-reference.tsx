@@ -135,6 +135,53 @@ export function InferenceApiReferencePage({ baseUrl }: { baseUrl: string }) {
                   </p>
                 </>
               )}
+              {section.id === "inference-api-tool-calling" && (
+                <>
+                  <p {...stylex.props(docsStyles.prose)}>
+                    Pass OpenAI-compatible{" "}
+                    <code {...stylex.props(docsStyles.codeInline)}>tools</code> and optional{" "}
+                    <code {...stylex.props(docsStyles.codeInline)}>tool_choice</code>. A capable
+                    model may return{" "}
+                    <code {...stylex.props(docsStyles.codeInline)}>tool_calls</code> with{" "}
+                    <code {...stylex.props(docsStyles.codeInline)}>
+                      finish_reason: "tool_calls"
+                    </code>
+                    . The provider generates only the structured intent; it never executes a tool.
+                    Your client executes it and sends the result back as a tool-role message.
+                    Upgraded eligible machines with no stored preference attempt this by default;
+                    owners can opt out per machine without disabling ordinary inference.
+                  </p>
+                  <HighlightedBlock
+                    lang="json"
+                    code={`{
+  "model": "mlx-community/Qwen3.5-4B-MLX-4bit",
+  "messages": [{ "role": "user", "content": "Check Amsterdam weather" }],
+  "tools": [{
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "parameters": {
+        "type": "object",
+        "properties": { "city": { "type": "string" } },
+        "required": ["city"]
+      }
+    }
+  }]
+}`}
+                  />
+                  <p {...stylex.props(docsStyles.prose)}>
+                    Support is live and per model, not inferred from catalog metadata. The models
+                    directory reports{" "}
+                    <code {...stylex.props(docsStyles.codeInline)}>tools: true</code> only when a
+                    connected machine passed a forced-tool startup canary for that exact model. If
+                    none did, the request fails with{" "}
+                    <code {...stylex.props(docsStyles.codeInline)}>
+                      400 tool_calls_not_supported
+                    </code>
+                    ; ordinary requests still route normally.
+                  </p>
+                </>
+              )}
               {section.id === "inference-api-provider-version" && (
                 <>
                   <p {...stylex.props(docsStyles.prose)}>
