@@ -499,7 +499,7 @@ impl AdvisorClient {
                         ctx.engines.terminate_all();
                         std::process::exit(3);
                     }
-                    if tool_policy_changed(tool_calls, tool_calls_at_start) {
+                    if tool_calls != tool_calls_at_start {
                         // Owner flipped the tool-calling switch on the console.
                         // The per-model tool-call parser is chosen at engine
                         // build time, so reload the same way a model-set edit
@@ -779,12 +779,12 @@ async fn read_provider_control(
 ) -> Option<(bool, Vec<String>, Option<String>, bool)> {
     pds.get_provider_control(rkey)
         .await
-        .map(|(active, desired, tier, legacy, disabled)| {
+        .map(|(active, desired, tier, _legacy, disabled)| {
             (
                 active,
                 desired,
                 tier,
-                effective_tool_calls(tool_calls_env_override, legacy, disabled),
+                effective_tool_calls(tool_calls_env_override, disabled),
             )
         })
 }
@@ -812,10 +812,6 @@ fn models_changed(a: &[String], b: &[String]) -> bool {
         s.into_iter().map(str::to_string).collect::<Vec<_>>()
     };
     norm(a) != norm(b)
-}
-
-fn tool_policy_changed(next: bool, at_start: bool) -> bool {
-    next != at_start
 }
 
 /// Environment escape hatch that permits a plaintext (`ws://`) advisor URL.
@@ -2270,14 +2266,6 @@ mod tests {
         assert!(models_changed(&a(&["x", "y"]), &a(&["x"]))); // removed
         assert!(models_changed(&a(&["x"]), &[])); // cleared → local default
         assert!(models_changed(&[], &a(&["x"]))); // newly pinned
-    }
-
-    #[test]
-    fn effective_tool_policy_reloads_only_when_behavior_changes() {
-        assert!(tool_policy_changed(false, true));
-        assert!(tool_policy_changed(true, false));
-        assert!(!tool_policy_changed(true, true));
-        assert!(!tool_policy_changed(false, false));
     }
 
     #[test]

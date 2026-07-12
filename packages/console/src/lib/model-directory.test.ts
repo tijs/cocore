@@ -10,6 +10,34 @@ describe("hasVerifiedToolCallSupport", () => {
     assert.equal(hasVerifiedToolCallSupport(online, "model-b"), true);
   });
 
+  test("prefers the exact list even when the legacy bool is false", () => {
+    assert.equal(
+      hasVerifiedToolCallSupport(
+        { supportsToolCalls: false, toolCallModels: ["model-a"] },
+        "model-a",
+      ),
+      true,
+    );
+  });
+
+  test("empty or non-array toolCallModels falls back to the legacy bool", () => {
+    assert.equal(
+      hasVerifiedToolCallSupport({ supportsToolCalls: true, toolCallModels: [] }, "model-a"),
+      false,
+    );
+    assert.equal(
+      hasVerifiedToolCallSupport(
+        { supportsToolCalls: true, toolCallModels: "bad" as unknown as string[] },
+        "model-a",
+      ),
+      true,
+    );
+    assert.equal(
+      hasVerifiedToolCallSupport({ supportsToolCalls: false, toolCallModels: [] }, "model-a"),
+      false,
+    );
+  });
+
   test("falls back only for legacy registrations", () => {
     assert.equal(hasVerifiedToolCallSupport({ supportsToolCalls: true }, "model-a"), true);
     assert.equal(hasVerifiedToolCallSupport({ supportsToolCalls: false }, "model-a"), false);

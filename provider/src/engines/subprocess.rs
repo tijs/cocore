@@ -1841,6 +1841,33 @@ mod tests {
         assert!(!tool_canary_passed(&serde_json::json!({
             "choices": [{ "message": {} }]
         })));
+        assert!(!tool_canary_passed(&response(
+            Some("report_status"),
+            Some("not json")
+        )));
+        assert!(!tool_canary_passed(&response(
+            Some("report_status"),
+            Some("{\"status\": \"not ok\"}")
+        )));
+        assert!(!tool_canary_passed(&response(
+            Some("report_status"),
+            Some(r#"{"status":"ok","extra":"x"}"#),
+        )));
+        assert!(!tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [] } }]
+        })));
+        assert!(!tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [{ "function": { "name": "wrong", "arguments": "{\"status\":\"ok\"}" } }] } }]
+        })));
+        assert!(tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [
+                { "function": { "name": "wrong", "arguments": "{\"status\":\"ok\"}" } },
+                { "function": { "name": "report_status", "arguments": "{\"status\":\"ok\"}" } }
+            ]}}]
+        })));
+        assert!(!tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [{ "function": { "name": "report_status", "arguments": { "status": "ok" } } }] } }]
+        })));
     }
 
     #[test]

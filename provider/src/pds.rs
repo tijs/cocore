@@ -231,19 +231,29 @@ pub const OWNER_INTENT_KEYS: &[&str] = &[
     "toolCallsDisabled",
 ];
 
-/// Resolve tool calling once for startup and live reconciliation. An explicit
-/// operator setting wins; otherwise only the additive opt-out disables the
-/// default. The legacy field remains an input to make its compatibility
-/// semantics explicit: true still means on, while false is not a new opt-out.
-pub fn effective_tool_calls(
-    explicit_env: Option<bool>,
-    legacy_tool_calls: Option<bool>,
-    tool_calls_disabled: Option<bool>,
-) -> bool {
-    match (explicit_env, legacy_tool_calls, tool_calls_disabled) {
-        (Some(enabled), _, _) => enabled,
-        (None, _, Some(true)) => false,
-        (None, _, _) => true,
+/// Resolve the effective tool-calling policy once for startup and live
+/// reconciliation. An explicit operator environment override wins; otherwise
+/// the additive owner opt-out (`toolCallsDisabled: true`) disables the
+/// default-on behaviour. The legacy `toolCalls` field is preserved for
+/// serialization and older agents but is intentionally not an input here:
+/// the new model is default-on unless explicitly opted out.
+pub fn effective_tool_calls(explicit_env: Option<bool>, tool_calls_disabled: Option<bool>) -> bool {
+    match (explicit_env, tool_calls_disabled) {
+        (Some(enabled), _) => enabled,
+        (None, Some(true)) => false,
+        (None, _) => true,
+    }
+}
+
+/// Parse the operator's `COCORE_ENABLE_TOOL_CALLS` override. Recognised values
+/// (`"1"`, `"true"` and `"0"`, `"false"`) return `Some`; anything else
+/// (including the empty string or a typo) returns `None`, so a malformed
+/// value cannot silently turn tool calling off.
+pub fn parse_tool_calls_env_override(value: Option<&str>) -> Option<bool> {
+    match value {
+        Some(v) if v.eq_ignore_ascii_case("true") || v == "1" => Some(true),
+        Some(v) if v.eq_ignore_ascii_case("false") || v == "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -1219,12 +1229,33 @@ mod tests {
 
     #[test]
     fn effective_tool_policy_defaults_on_and_honours_precedence() {
-        assert!(effective_tool_calls(None, None, None));
-        assert!(effective_tool_calls(None, Some(true), None));
-        assert!(effective_tool_calls(None, Some(false), None));
-        assert!(!effective_tool_calls(None, Some(true), Some(true)));
-        assert!(!effective_tool_calls(Some(false), Some(true), None));
-        assert!(effective_tool_calls(Some(true), None, Some(true)));
+        // Default-on when no owner field and no env override.
+        assert!(effective_tool_calls(None, None));
+        // Legacy opt-in is ignored absent the opt-out.
+        assert!(effective_tool_calls(None, Some(false)));
+        // Additive opt-out disables, regardless of legacy opt-in.
+        assert!(!effective_tool_calls(None, Some(true)));
+        // Explicit env override wins over opt-out.
+        assert!(!effective_tool_calls(Some(false), Some(true)));
+        assert!(effective_tool_calls(Some(true), Some(true)));
+        // Explicit env override wins over default-on and over opt-in.
+        assert!(!effective_tool_calls(Some(false), None));
+        assert!(effective_tool_calls(Some(true), None));
+    }
+
+    #[test]
+    fn parse_tool_calls_env_override_recognises_bools_and_rejects_garbage() {
+        assert_eq!(parse_tool_calls_env_override(Some("1")), Some(true));
+        assert_eq!(parse_tool_calls_env_override(Some("true")), Some(true));
+        assert_eq!(parse_tool_calls_env_override(Some("TRUE")), Some(true));
+        assert_eq!(parse_tool_calls_env_override(Some("0")), Some(false));
+        assert_eq!(parse_tool_calls_env_override(Some("false")), Some(false));
+        assert_eq!(parse_tool_calls_env_override(Some("FALSE")), Some(false));
+        // Absent, empty, or typo => None (cannot silently disable).
+        assert_eq!(parse_tool_calls_env_override(None), None);
+        assert_eq!(parse_tool_calls_env_override(Some("")), None);
+        assert_eq!(parse_tool_calls_env_override(Some("yes")), None);
+        assert_eq!(parse_tool_calls_env_override(Some("flase")), None);
     }
 
     fn rec(

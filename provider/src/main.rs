@@ -4,8 +4,8 @@ use cocore_provider::{
     advisor::AdvisorClient,
     attestation, oauth,
     pds::{
-        effective_tool_calls, AttestationFault, EngineFault, ModelPrice, PdsClient, ProBonoPolicy,
-        ProviderRecord, TrustLevel,
+        effective_tool_calls, parse_tool_calls_env_override, AttestationFault, EngineFault,
+        ModelPrice, PdsClient, ProBonoPolicy, ProviderRecord, TrustLevel,
     },
     pricing,
     protocol::Register,
@@ -1783,8 +1783,8 @@ async fn cmd_serve(
     let confidential = push_rx.is_some();
     // Capture the operator override before filling the engine's environment
     // from the owner record. It remains authoritative during live reconciliation.
-    let tool_calls_env_override = std::env::var_os("COCORE_ENABLE_TOOL_CALLS")
-        .map(|v| v == "1" || v.to_string_lossy().eq_ignore_ascii_case("true"));
+    let tool_calls_env_override =
+        parse_tool_calls_env_override(std::env::var("COCORE_ENABLE_TOOL_CALLS").ok().as_deref());
     let (
         desired_at_start,
         desired_tier_at_start,
@@ -1820,7 +1820,6 @@ async fn cmd_serve(
                 let pro_bono = ProBonoPolicy::from_record_value(&value).unwrap_or_default();
                 let tool_calls = effective_tool_calls(
                     tool_calls_env_override,
-                    value.get("toolCalls").and_then(|v| v.as_bool()),
                     value.get("toolCallsDisabled").and_then(|v| v.as_bool()),
                 );
                 (models, tier, pro_bono, share_location, tool_calls)
@@ -1830,7 +1829,7 @@ async fn cmd_serve(
                 None,
                 ProBonoPolicy::default(),
                 false,
-                effective_tool_calls(tool_calls_env_override, None, None),
+                effective_tool_calls(tool_calls_env_override, None),
             ),
         };
 
