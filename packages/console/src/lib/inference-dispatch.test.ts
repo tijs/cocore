@@ -281,10 +281,7 @@ describe("filterByToolCalls — tool-calling routing", () => {
   });
 
   test("keeps only machines that passed the canary for the requested model", () => {
-    assert.deepEqual(
-      filterByToolCalls([CANARY, NOCANARY, CANARY_OTHER], MODEL, true),
-      [CANARY],
-    );
+    assert.deepEqual(filterByToolCalls([CANARY, NOCANARY, CANARY_OTHER], MODEL, true), [CANARY]);
   });
 
   test("a machine whose canary set omits the model is excluded (the 503 bug)", () => {
@@ -307,7 +304,10 @@ describe("filterByToolCalls — tool-calling routing", () => {
   });
 
   test("NoProvidersForToolCallsError carries model + code", () => {
-    const e = new NoProvidersForToolCallsError(MODEL, "3 serve the model but none passed the canary");
+    const e = new NoProvidersForToolCallsError(
+      MODEL,
+      "3 serve the model but none passed the canary",
+    );
     assert.match(e.message, /Qwen3\.5-4B/);
     assert.match(e.message, /verified tool-calling/);
     assert.equal(classifyDispatchError(e), "no-providers-for-tool-calls");
