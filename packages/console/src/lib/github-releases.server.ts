@@ -1,18 +1,18 @@
 // Server-side helpers that proxy GitHub Releases for the cocore agent
-// installer. The cocore repo is private, so an anonymous
-// `curl https://api.github.com/...` returns 404 — but the console
-// runs with a `GITHUB_TOKEN` env var that has `repo` access, so the
-// console can hand both the latest tag and the release tarball back
-// to a fresh Mac running `curl … | sh`.
+// installer, so a fresh Mac running `curl … | sh` gets the latest tag
+// and the release tarball from a stable cocore.dev URL.
 //
 // The two routes that consume this live next to each other:
 //   * `routes/agent.version.ts`  — text/plain  ←  `latestTag()`
 //   * `routes/agent.dl.ts`       — bin stream  ←  `streamAsset()`
 //
-// Token: `process.env.GITHUB_TOKEN`. We deliberately don't fall
-// back silently — if the env var is missing the routes return 503
-// with a clear message, since silent failure would just give the
-// installer the same 404 the public path produces.
+// Auth: the repo is public, so anonymous requests work — but when
+// `process.env.GITHUB_TOKEN` is set we send it first for the higher
+// authenticated rate limit. If the authenticated request fails for any
+// reason (expired token, GitHub auth-path incident — 2026-07-16 GitHub
+// served 503s to ALL authenticated API calls while anonymous ones
+// succeeded, which took the installer down), we retry anonymously
+// before giving up.
 
 const COCORE_REPO = "graze-social/cocore";
 
@@ -30,15 +30,31 @@ export class ReleaseProxyError extends Error {
   }
 }
 
-function token(): string {
+/** Fetch a GitHub API URL, preferring the authenticated path (better rate
+ *  limits) but falling back to anonymous when the authed attempt fails —
+ *  the repo is public, so anonymous is always a valid last resort. */
+async function ghFetch(url: string, accept: string): Promise<Response> {
+  const base: Record<string, string> = {
+    Accept: accept,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "cocore-console-release-proxy",
+  };
   const t = process.env["GITHUB_TOKEN"];
-  if (!t) {
-    throw new ReleaseProxyError(
-      503,
-      "GITHUB_TOKEN env var not set on the console service; agent installer is offline",
-    );
+  if (t) {
+    try {
+      const r = await fetch(url, {
+        headers: { ...base, Authorization: `Bearer ${t}` },
+        redirect: "follow",
+      });
+      // 404 is a real answer (release/asset genuinely absent) — retrying
+      // anonymously can't improve on it. Anything else non-ok (401/403
+      // token trouble, 5xx GitHub incident) is worth the anonymous retry.
+      if (r.ok || r.status === 404) return r;
+    } catch {
+      // network-level failure — fall through to the anonymous attempt
+    }
   }
-  return t;
+  return fetch(url, { headers: base, redirect: "follow" });
 }
 
 interface ReleaseInfo {
@@ -49,18 +65,10 @@ interface ReleaseInfo {
 /** Resolve a tag (or "latest" if `tag` is null) and return the
  *  release info we need to point a downloader at. */
 async function getRelease(tag: string | null, assetName: string): Promise<ReleaseInfo> {
-  const auth = token();
   const url = tag
     ? `https://api.github.com/repos/${COCORE_REPO}/releases/tags/${encodeURIComponent(tag)}`
     : `https://api.github.com/repos/${COCORE_REPO}/releases/latest`;
-  const r = await fetch(url, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${auth}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "cocore-console-release-proxy",
-    },
-  });
+  const r = await ghFetch(url, "application/vnd.github+json");
   if (r.status === 404) {
     throw new ReleaseProxyError(
       404,
@@ -100,15 +108,7 @@ export async function streamAsset(
   if (!release.assetUrl) {
     throw new ReleaseProxyError(404, `release ${release.tag} has no ${assetName} asset`);
   }
-  const r = await fetch(release.assetUrl, {
-    headers: {
-      Accept: "application/octet-stream",
-      Authorization: `Bearer ${token()}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "cocore-console-release-proxy",
-    },
-    redirect: "follow",
-  });
+  const r = await ghFetch(release.assetUrl, "application/octet-stream");
   if (!r.ok || !r.body) {
     const body = await r.text().catch(() => "");
     throw new ReleaseProxyError(502, `github asset ${r.status}: ${body.slice(0, 200)}`);
