@@ -220,31 +220,45 @@ async function checkToolCallSupport(
     return null; // network error — don't block the request
   }
 
-  // Filter to attested, active, model-matching providers.
-  let pool = list.filter(
-    (p) =>
-      p.attestedAt &&
-      p.active !== false &&
-      (p.supportedModels.length === 0 || p.supportedModels.includes(model)),
-  );
-
-  // Friends-only: further filter to the allowed DID set.
+  // Filter to attested, active providers (friends-only: also the allowed
+  // DID set), keeping the model-unfiltered pool around so a rejection can
+  // tell the caller which models WOULD accept their tool request.
+  let live = list.filter((p) => p.attestedAt && p.active !== false);
   if (allowedDids !== undefined) {
-    pool = pool.filter((p) => allowedDids.has(p.did));
+    live = live.filter((p) => allowedDids.has(p.did));
   }
+  const pool = live.filter(
+    (p) => p.supportedModels.length === 0 || p.supportedModels.includes(model),
+  );
 
   // Check if at least one provider in the pool has verified tool calling for
   // this exact model. Legacy providers that predate `toolCallModels` fall back
   // to the coarse boolean; new providers report a per-model canary-passed set.
-  const toolCapable = pool.some((p) => {
-    if (Array.isArray(p.toolCallModels)) return p.toolCallModels.includes(model);
+  const toolCapableFor = (p: AdvisorProviderRow, m: string): boolean => {
+    if (Array.isArray(p.toolCallModels)) return p.toolCallModels.includes(m);
     return p.supportsToolCalls === true;
-  });
-  if (!toolCapable) {
+  };
+  if (!pool.some((p) => toolCapableFor(p, model))) {
+    const alternatives = [
+      ...new Set(
+        live.flatMap((p) =>
+          Array.isArray(p.toolCallModels)
+            ? p.toolCallModels
+            : p.supportsToolCalls === true
+              ? p.supportedModels
+              : [],
+        ),
+      ),
+    ].sort();
+    const hint =
+      alternatives.length > 0
+        ? ` Models with verified tool calling online right now: ${alternatives.join(", ")}.`
+        : " No connected provider currently has verified tool calling for any model.";
     return (
-      "No connected provider supports tool calling for this model. " +
-      "The provider must be started with vLLM tool calling enabled and pass " +
-      "the startup forced-tool canary."
+      `No connected provider supports tool calling for model '${model}'.${hint}` +
+      " Tool requests only route to providers that passed the startup" +
+      " forced-tool canary, so either switch to one of those model ids or" +
+      " retry without tools."
     );
   }
   return null;
