@@ -148,15 +148,15 @@ pub struct ProviderRecord {
     /// fields so opting out clears any previously-shared value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shareLocation: Option<bool>,
-    /// The owner's opt-in to serving tool/function calls. Owner-written INTENT,
-    /// like `desiredModels`/`active`/`desiredTier`/`proBono`/`shareLocation`:
-    /// the agent reconciles toward it (when true it enables vLLM automatic tool
-    /// choice for the curated top models and verifies each with a forced-tool
-    /// startup canary before advertising it) but NEVER authors it, so it must
-    /// PRESERVE whatever it finds on every re-publish. Absent ≡ off (no engine
-    /// advertises tool calls; the machine serves exactly as before).
+    /// Legacy owner opt-in to tool calling. New agents default eligible models
+    /// on, but preserve this field for older agents and console compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub toolCalls: Option<bool>,
+    /// Explicit owner opt-out from default-on tool calling. `true` wins over the
+    /// legacy opt-in; absent/false leaves eligible models enabled unless the
+    /// operator explicitly overrides `COCORE_ENABLE_TOOL_CALLS`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolCallsDisabled: Option<bool>,
     /// True while the agent is still loading its inference engine. Set on
     /// the early "provisioning" publish at serve start so the machine
     /// appears on the console immediately; cleared (set false) on the
@@ -228,7 +228,34 @@ pub const OWNER_INTENT_KEYS: &[&str] = &[
     "proBono",
     "shareLocation",
     "toolCalls",
+    "toolCallsDisabled",
 ];
+
+/// Resolve the effective tool-calling policy once for startup and live
+/// reconciliation. An explicit operator environment override wins; otherwise
+/// the additive owner opt-out (`toolCallsDisabled: true`) disables the
+/// default-on behaviour. The legacy `toolCalls` field is preserved for
+/// serialization and older agents but is intentionally not an input here:
+/// the new model is default-on unless explicitly opted out.
+pub fn effective_tool_calls(explicit_env: Option<bool>, tool_calls_disabled: Option<bool>) -> bool {
+    match (explicit_env, tool_calls_disabled) {
+        (Some(enabled), _) => enabled,
+        (None, Some(true)) => false,
+        (None, _) => true,
+    }
+}
+
+/// Parse the operator's `COCORE_ENABLE_TOOL_CALLS` override. Recognised values
+/// (`"1"`, `"true"` and `"0"`, `"false"`) return `Some`; anything else
+/// (including the empty string or a typo) returns `None`, so a malformed
+/// value cannot silently turn tool calling off.
+pub fn parse_tool_calls_env_override(value: Option<&str>) -> Option<bool> {
+    match value {
+        Some(v) if v.eq_ignore_ascii_case("true") || v == "1" => Some(true),
+        Some(v) if v.eq_ignore_ascii_case("false") || v == "0" => Some(false),
+        _ => None,
+    }
+}
 
 /// Agent-authored OPTIONAL fields — present some serves, absent others (a tier
 /// the machine earned then lost, an engineFault that cleared, region when the
@@ -916,7 +943,13 @@ impl PdsClient {
     pub async fn get_provider_control(
         &self,
         rkey: &str,
-    ) -> Option<(bool, Vec<String>, Option<String>, bool)> {
+    ) -> Option<(
+        bool,
+        Vec<String>,
+        Option<String>,
+        Option<bool>,
+        Option<bool>,
+    )> {
         let listed = self
             .list_my_records("dev.cocore.compute.provider")
             .await
@@ -944,14 +977,17 @@ impl PdsClient {
             .get("desiredTier")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        // The owner's tool-calling opt-in; absent ≡ off. The serve loop restarts
-        // on a change so the fresh build rebuilds engines with the new setting.
-        let tool_calls = rec
-            .value
-            .get("toolCalls")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        Some((active, desired, desired_tier, tool_calls))
+        // Return both owner fields so the serve loop can derive the effective
+        // policy using the same explicit-environment precedence as startup.
+        let tool_calls = rec.value.get("toolCalls").and_then(|v| v.as_bool());
+        let tool_calls_disabled = rec.value.get("toolCallsDisabled").and_then(|v| v.as_bool());
+        Some((
+            active,
+            desired,
+            desired_tier,
+            tool_calls,
+            tool_calls_disabled,
+        ))
     }
 
     /// Field-scoped patch of this machine's provider record: set (or, with
@@ -1190,6 +1226,37 @@ impl PdsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_tool_policy_defaults_on_and_honours_precedence() {
+        // Default-on when no owner field and no env override.
+        assert!(effective_tool_calls(None, None));
+        // Legacy opt-in is ignored absent the opt-out.
+        assert!(effective_tool_calls(None, Some(false)));
+        // Additive opt-out disables, regardless of legacy opt-in.
+        assert!(!effective_tool_calls(None, Some(true)));
+        // Explicit env override wins over opt-out.
+        assert!(!effective_tool_calls(Some(false), Some(true)));
+        assert!(effective_tool_calls(Some(true), Some(true)));
+        // Explicit env override wins over default-on and over opt-in.
+        assert!(!effective_tool_calls(Some(false), None));
+        assert!(effective_tool_calls(Some(true), None));
+    }
+
+    #[test]
+    fn parse_tool_calls_env_override_recognises_bools_and_rejects_garbage() {
+        assert_eq!(parse_tool_calls_env_override(Some("1")), Some(true));
+        assert_eq!(parse_tool_calls_env_override(Some("true")), Some(true));
+        assert_eq!(parse_tool_calls_env_override(Some("TRUE")), Some(true));
+        assert_eq!(parse_tool_calls_env_override(Some("0")), Some(false));
+        assert_eq!(parse_tool_calls_env_override(Some("false")), Some(false));
+        assert_eq!(parse_tool_calls_env_override(Some("FALSE")), Some(false));
+        // Absent, empty, or typo => None (cannot silently disable).
+        assert_eq!(parse_tool_calls_env_override(None), None);
+        assert_eq!(parse_tool_calls_env_override(Some("")), None);
+        assert_eq!(parse_tool_calls_env_override(Some("yes")), None);
+        assert_eq!(parse_tool_calls_env_override(Some("flase")), None);
+    }
 
     fn rec(
         rkey: &str,

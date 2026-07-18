@@ -212,6 +212,7 @@ export interface ProviderRecord {
   attestationFault?: { code: string; message: string; at: string };
   advisorFault?: { code: string; message: string; observedAt: string };
   toolCalls?: boolean;
+  toolCallsDisabled?: boolean;
   shareLocation?: boolean;
   region?: string;
   regionSource?: string;

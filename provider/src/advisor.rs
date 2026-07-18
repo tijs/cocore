@@ -24,7 +24,7 @@ use crate::crypto::{EncryptionKey, ProviderKeypair};
 use crate::engines::{DeltaChannel, Engine, EngineRegistry};
 use crate::error::{ProviderError, Result};
 use crate::hypervisor;
-use crate::pds::{PdsClient, ProBonoPolicy};
+use crate::pds::{effective_tool_calls, PdsClient, ProBonoPolicy};
 use crate::pricing;
 use crate::protocol::{
     AdvisorMessage, AttestationChallenge, AttestationResponse, ChunkChannel,
@@ -154,12 +154,11 @@ impl AdvisorClient {
         // record at serve start. Threaded into `ServeContext` so each job
         // can decide, per requester, whether to serve free + unmetered.
         pro_bono: &ProBonoPolicy,
-        // The owner's `toolCalls` opt-in this serve loaded against. If the
-        // owner flips it on the console we detect the change in the control
-        // re-read below and restart to rebuild engines — the same reload path
-        // as a `desiredModels` edit (engines are built once per serve, and the
-        // per-model tool-call parser is chosen at build time).
+        // The effective tool policy this serve loaded against. Live control
+        // reads use the same captured operator override, so owner edits only
+        // restart engines when they actually change effective behavior.
         tool_calls_at_start: bool,
+        tool_calls_env_override: Option<bool>,
     ) -> Result<()> {
         // Reject a plaintext advisor URL before we connect. A `ws://` link lets
         // a network attacker read/inject job dispatch and control frames
@@ -436,7 +435,11 @@ impl AdvisorClient {
                     }
                     if active_reads.is_empty() {
                         if let Some(rk) = provider_rkey {
-                            active_reads.push(read_provider_control(pds, rk));
+                            active_reads.push(read_provider_control(
+                                pds,
+                                rk,
+                                tool_calls_env_override,
+                            ));
                         }
                     }
                 }
@@ -675,7 +678,11 @@ impl AdvisorClient {
                                     // now (off-loop) so it takes effect in ~a
                                     // second instead of at the next 30s poll.
                                     if let Some(rk) = provider_rkey {
-                                        active_reads.push(read_provider_control(pds, rk));
+                                        active_reads.push(read_provider_control(
+                                            pds,
+                                            rk,
+                                            tool_calls_env_override,
+                                        ));
                                     }
                                 }
                                 Ok(AdvisorMessage::RecoverRequest(rr)) => {
@@ -768,8 +775,18 @@ impl AdvisorClient {
 async fn read_provider_control(
     pds: &PdsClient,
     rkey: &str,
+    tool_calls_env_override: Option<bool>,
 ) -> Option<(bool, Vec<String>, Option<String>, bool)> {
-    pds.get_provider_control(rkey).await
+    pds.get_provider_control(rkey)
+        .await
+        .map(|(active, desired, tier, _legacy, disabled)| {
+            (
+                active,
+                desired,
+                tier,
+                effective_tool_calls(tool_calls_env_override, disabled),
+            )
+        })
 }
 
 /// Whether two `desiredTier` values differ, normalising `None` to the
