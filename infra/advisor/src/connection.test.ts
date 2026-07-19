@@ -423,7 +423,6 @@ describe("provider mid-job socket drop", () => {
           session_id: "sess-r",
           resume_token: "token-r",
           produced_seq: 2,
-          completion_ready: true,
         }),
       );
       await vi.waitFor(() =>

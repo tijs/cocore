@@ -39,7 +39,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -75,7 +75,7 @@ struct BufferedInvocation {
     acked_seq: u32,
     send_seq: u32,
     chunks: BTreeMap<u32, String>,
-    controls: VecDeque<String>,
+    controls: Option<String>,
     completion: Option<String>,
     completion_sent: bool,
     attached: bool,
@@ -170,7 +170,7 @@ impl InvocationManager {
                     acked_seq: 0,
                     send_seq: 0,
                     chunks: BTreeMap::new(),
-                    controls: VecDeque::new(),
+                    controls: None,
                     completion: None,
                     completion_sent: false,
                     attached: true,
@@ -293,8 +293,7 @@ impl InvocationManager {
             }
             AdvisorMessage::InferenceKeepalive(_) => {
                 if job.attached {
-                    job.controls.clear();
-                    job.controls.push_back(payload);
+                    job.controls = Some(payload);
                 }
             }
             _ => return true,
@@ -312,7 +311,6 @@ impl InvocationManager {
                     session_id: session_id.clone(),
                     resume_token: job.resume_token.clone(),
                     produced_seq: job.produced_seq,
-                    completion_ready: job.completion.is_some(),
                 }))
                 .ok()
             })
@@ -383,7 +381,9 @@ impl InvocationManager {
     fn drain(&self) -> Vec<String> {
         let mut out = Vec::new();
         for job in self.jobs().values_mut().filter(|job| job.attached) {
-            out.extend(job.controls.drain(..));
+            if let Some(control) = job.controls.take() {
+                out.push(control);
+            }
             for (&seq, payload) in job.chunks.range(job.send_seq..) {
                 out.push(payload.clone());
                 job.send_seq = seq.saturating_add(1);
@@ -2907,7 +2907,7 @@ mod tests {
                 acked_seq: 0,
                 send_seq: 0,
                 chunks: BTreeMap::new(),
-                controls: VecDeque::new(),
+                controls: None,
                 completion: None,
                 completion_sent: false,
                 attached: true,
@@ -2982,7 +2982,7 @@ mod tests {
                 acked_seq: 0,
                 send_seq: 0,
                 chunks: BTreeMap::new(),
-                controls: VecDeque::new(),
+                controls: None,
                 completion: None,
                 completion_sent: false,
                 attached: true,

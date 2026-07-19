@@ -220,13 +220,11 @@ interface InferenceComplete {
 
 /** Provider → advisor after reconnect: ask to reattach one still-running
  *  invocation. `produced_seq` is the provider's next sequence number (the
- *  number of chunks produced so far); `completion_ready` means generation and
- *  receipt publication finished and the buffered completion can be replayed. */
+ *  number of chunks produced so far). */
 interface InferenceResume {
   session_id: string;
   resume_token: string;
   produced_seq: number;
-  completion_ready: boolean;
 }
 
 /** Advisor → provider: result of an `inference_resume` handshake. `resume`
@@ -461,9 +459,6 @@ export function validateFrame(raw: unknown): FrameCheck {
         Number(raw["produced_seq"]) > 0xffff_ffff
       ) {
         return { ok: false, reason: "inference_resume: produced_seq" };
-      }
-      if (typeof raw["completion_ready"] !== "boolean") {
-        return { ok: false, reason: "inference_resume: completion_ready" };
       }
       break;
     }

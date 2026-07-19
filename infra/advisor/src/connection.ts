@@ -393,7 +393,7 @@ export function handleConnection(
             // A PRESENT token is always fully verified. A bad/mismatched token is
             // an active forgery attempt (someone trying to register AS another
             // DID), not an un-upgraded client — hard-reject it either way.
-            var auth = await verifyServiceAuthToken(msg.auth_jwt, {
+            const auth = await verifyServiceAuthToken(msg.auth_jwt, {
               audience: config.advisorDid,
               lxm: LXM_REGISTER,
               resolver: config.didResolver,
@@ -469,7 +469,7 @@ export function handleConnection(
           );
         }
         sendChallenge();
-        var codeAttestEntry = registry.get(registeredDid, registeredMachineId);
+        const codeAttestEntry = registry.get(registeredDid, registeredMachineId);
         if (
           config.apns &&
           codeAttestEntry &&

@@ -444,9 +444,6 @@ pub struct InferenceResume {
     pub resume_token: String,
     /// Provider's next sequence number (number of chunks produced so far).
     pub produced_seq: u32,
-    /// Generation + receipt publication completed and a completion frame is
-    /// buffered for replay.
-    pub completion_ready: bool,
 }
 
 /// Advisor → provider result of an `InferenceResume` handshake.
@@ -553,18 +550,16 @@ mod tests {
             session_id: "session-1".into(),
             resume_token: "token-1".into(),
             produced_seq: 7,
-            completion_ready: false,
         });
         let json = serde_json::to_string(&resume).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"inference_resume","session_id":"session-1","resume_token":"token-1","produced_seq":7,"completion_ready":false}"#
+            r#"{"type":"inference_resume","session_id":"session-1","resume_token":"token-1","produced_seq":7}"#
         );
         assert!(matches!(
             serde_json::from_str::<AdvisorMessage>(&json).unwrap(),
             AdvisorMessage::InferenceResume(InferenceResume {
                 produced_seq: 7,
-                completion_ready: false,
                 ..
             })
         ));

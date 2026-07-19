@@ -124,6 +124,32 @@ test("resume reattaches the same invocation and suppresses replayed chunks", () 
   });
 });
 
+test("complete rejects a finalSeq that races ahead of a missing chunk", () => {
+  // A resumable completion is valid only after every produced chunk was
+  // accepted: finalSeq must equal the advisor's nextSeq. A mismatch is
+  // rejected without writing the SSE completion or closing the session, so the
+  // provider must replay the missing chunk before it can complete.
+  const sm = new SessionManager({ idleTimeoutMs: 10_000, resumeGraceMs: 2_000 });
+  const res = fakeRes();
+  sm.open("s", "did:plc:p", "m", "did:plc:r", asRes(res), undefined, "secret");
+  sm.acceptChunk("s", 0, { type: "chunk", sessionId: "s", seq: 0, ciphertext: [1] });
+  // nextSeq is now 1; a completion claiming finalSeq=0 (behind) is rejected.
+  expect(sm.complete("s", { tokensIn: 1, tokensOut: 1, receiptUri: "at://r" }, 0)).toEqual({
+    accepted: false,
+    nextSeq: 1,
+    resumeToken: "secret",
+  });
+  // No completion was written and the session is still live.
+  expect(res.chunks.join("")).not.toContain('"type":"complete"');
+  expect(sm.has("s")).toBe(true);
+  // The matching finalSeq completes cleanly.
+  expect(sm.complete("s", { tokensIn: 1, tokensOut: 1, receiptUri: "at://r" }, 1)).toEqual({
+    accepted: true,
+    nextSeq: 1,
+    resumeToken: "secret",
+  });
+});
+
 test("a conflicting duplicate sequence terminates instead of corrupting output", () => {
   const sm = new SessionManager();
   const res = fakeRes();

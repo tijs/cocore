@@ -9,7 +9,6 @@ describe("stream resume wire contract", () => {
       session_id: "session-1",
       resume_token: "token-1",
       produced_seq: 7,
-      completion_ready: false,
     };
 
     expect(validateFrame(frame)).toEqual({ ok: true, msg: frame });
@@ -21,7 +20,6 @@ describe("stream resume wire contract", () => {
         type: "inference_resume",
         resume_token: "token-1",
         produced_seq: 1,
-        completion_ready: false,
       },
       "session_id",
     ],
@@ -30,7 +28,6 @@ describe("stream resume wire contract", () => {
         type: "inference_resume",
         session_id: "session-1",
         produced_seq: 1,
-        completion_ready: false,
       },
       "resume_token",
     ],
@@ -40,7 +37,6 @@ describe("stream resume wire contract", () => {
         session_id: "session-1",
         resume_token: "token-1",
         produced_seq: -1,
-        completion_ready: false,
       },
       "produced_seq",
     ],
@@ -50,7 +46,6 @@ describe("stream resume wire contract", () => {
         session_id: "session-1",
         resume_token: "token-1",
         produced_seq: 1.5,
-        completion_ready: false,
       },
       "produced_seq",
     ],
@@ -60,19 +55,8 @@ describe("stream resume wire contract", () => {
         session_id: "session-1",
         resume_token: "token-1",
         produced_seq: 0x1_0000_0000,
-        completion_ready: false,
       },
       "produced_seq",
-    ],
-    [
-      {
-        type: "inference_resume",
-        session_id: "session-1",
-        resume_token: "token-1",
-        produced_seq: 1,
-        completion_ready: "no",
-      },
-      "completion_ready",
     ],
   ])("rejects malformed resume frame %j", (frame, field) => {
     const result = validateFrame(frame);
