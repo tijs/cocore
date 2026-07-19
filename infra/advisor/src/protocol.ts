@@ -92,6 +92,10 @@ export interface Register {
    *  fleet can upgrade before the advisor flips `COCORE_ADVISOR_REQUIRE_AUTH`
    *  on (see connection.ts). */
   auth_jwt?: string;
+  /** Highest stream-resume protocol version this provider supports. Versioned
+   *  (rather than boolean) so future incompatible handshakes fail closed.
+   *  Absent means legacy fail-fast disconnect handling. */
+  stream_resume_version?: number;
 }
 
 /** Content-free crash signature the provider folds into its heartbeat
@@ -165,6 +169,9 @@ export interface InferenceRequest {
    *  the `/jobs` body; the advisor never reads the plaintext. */
   input_format?: string;
   session_id: string;
+  /** Advisor-generated, unguessable token fencing resume/ack frames to this
+   *  exact dispatch. Present only when both sides use stream-resume v1. */
+  resume_token?: string;
   /** Optional JSON Schema constraining the model's output. When present,
    *  the provider passes it to the inference engine as response_format
    *  guided decoding. Forwarded from the `/jobs` body; the advisor never
@@ -206,6 +213,43 @@ interface InferenceComplete {
   tokens_in: number;
   tokens_out: number;
   receipt_uri: string;
+  /** Number of chunks produced by this invocation. Resume-capable providers
+   *  set it so completion cannot race ahead of a missing chunk. */
+  final_seq?: number;
+}
+
+/** Provider → advisor after reconnect: ask to reattach one still-running
+ *  invocation. `produced_seq` is the provider's next sequence number (the
+ *  number of chunks produced so far); `completion_ready` means generation and
+ *  receipt publication finished and the buffered completion can be replayed. */
+export interface InferenceResume {
+  session_id: string;
+  resume_token: string;
+  produced_seq: number;
+  completion_ready: boolean;
+}
+
+/** Advisor → provider: result of an `inference_resume` handshake. `resume`
+ *  replays from `next_seq`; `completed` acknowledges terminal delivery when its
+ *  ack was lost; `rejected` is terminal for the provider job. */
+export interface InferenceResumeResult {
+  session_id: string;
+  resume_token: string;
+  /** `resume`: replay from next_seq; `completed`: terminal ack was previously
+   *  delivered to the requester; `rejected`: cancel the provider job. */
+  status: "resume" | "completed" | "rejected";
+  next_seq: number;
+  reason?: string;
+}
+
+/** Advisor → provider high-water acknowledgment. Chunks below `next_seq` may
+ *  be dropped from the provider's replay buffer. `completed` is the terminal
+ *  acknowledgment that permits deleting the whole job. */
+export interface InferenceAck {
+  session_id: string;
+  resume_token: string;
+  next_seq: number;
+  completed: boolean;
 }
 
 /** Provider → advisor: "still generating" signal sent during a long job
@@ -282,6 +326,9 @@ export type AdvisorMessage =
   | ({ type: "inference_chunk" } & InferenceChunk)
   | ({ type: "inference_keepalive" } & InferenceKeepalive)
   | ({ type: "inference_complete" } & InferenceComplete)
+  | ({ type: "inference_resume" } & InferenceResume)
+  | ({ type: "inference_resume_result" } & InferenceResumeResult)
+  | ({ type: "inference_ack" } & InferenceAck)
   | ({ type: "ping" } & Ping)
   | ({ type: "pong" } & Pong)
   | ({ type: "health_notice" } & HealthNotice)
@@ -331,6 +378,14 @@ export function validateFrame(raw: unknown): FrameCheck {
         return { ok: false, reason: "register: encryption_pub_key" };
       if (!isStr(raw["attestation_pub_key"]))
         return { ok: false, reason: "register: attestation_pub_key" };
+      if (
+        raw["stream_resume_version"] !== undefined &&
+        (!Number.isSafeInteger(raw["stream_resume_version"]) ||
+          Number(raw["stream_resume_version"]) < 1 ||
+          Number(raw["stream_resume_version"]) > 0xffff_ffff)
+      ) {
+        return { ok: false, reason: "register: stream_resume_version" };
+      }
       break;
     }
     case "attestation_response": {
@@ -349,6 +404,13 @@ export function validateFrame(raw: unknown): FrameCheck {
     }
     case "inference_chunk": {
       if (!isStr(raw["session_id"])) return { ok: false, reason: "inference_chunk: session_id" };
+      if (
+        !Number.isSafeInteger(raw["seq"]) ||
+        Number(raw["seq"]) < 0 ||
+        Number(raw["seq"]) > 0xffff_ffff
+      ) {
+        return { ok: false, reason: "inference_chunk: seq" };
+      }
       if (!isBytes(raw["ciphertext"])) return { ok: false, reason: "inference_chunk: ciphertext" };
       break;
     }
@@ -359,6 +421,31 @@ export function validateFrame(raw: unknown): FrameCheck {
     }
     case "inference_complete": {
       if (!isStr(raw["session_id"])) return { ok: false, reason: "inference_complete: session_id" };
+      if (
+        raw["final_seq"] !== undefined &&
+        (!Number.isSafeInteger(raw["final_seq"]) ||
+          Number(raw["final_seq"]) < 0 ||
+          Number(raw["final_seq"]) > 0xffff_ffff)
+      ) {
+        return { ok: false, reason: "inference_complete: final_seq" };
+      }
+      break;
+    }
+    case "inference_resume": {
+      if (!isStr(raw["session_id"])) return { ok: false, reason: "inference_resume: session_id" };
+      if (!isStr(raw["resume_token"]) || raw["resume_token"].length === 0) {
+        return { ok: false, reason: "inference_resume: resume_token" };
+      }
+      if (
+        !Number.isSafeInteger(raw["produced_seq"]) ||
+        Number(raw["produced_seq"]) < 0 ||
+        Number(raw["produced_seq"]) > 0xffff_ffff
+      ) {
+        return { ok: false, reason: "inference_resume: produced_seq" };
+      }
+      if (typeof raw["completion_ready"] !== "boolean") {
+        return { ok: false, reason: "inference_resume: completion_ready" };
+      }
       break;
     }
     case "pong": {

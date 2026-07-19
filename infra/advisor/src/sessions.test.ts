@@ -91,6 +91,75 @@ test("the first-chunk (prefill) budget is independent of the steady-state idle b
   expect(fired).toEqual([false]);
 });
 
+test("resume reattaches the same invocation and suppresses replayed chunks", () => {
+  const sm = new SessionManager({ idleTimeoutMs: 10_000, resumeGraceMs: 2_000 });
+  const res = fakeRes();
+  sm.open("s", "did:plc:p", "m", "did:plc:r", asRes(res), undefined, "secret");
+
+  expect(
+    sm.acceptChunk("s", 0, { type: "chunk", sessionId: "s", seq: 0, ciphertext: [1] }),
+  ).toEqual({ nextSeq: 1, resumeToken: "secret" });
+  expect(sm.detachForMachine("did:plc:p", "m")).toEqual({ detached: 1, closed: 0 });
+  expect(sm.resume("s", "did:plc:p", "m", "secret", 2)).toEqual({
+    status: "resume",
+    nextSeq: 1,
+  });
+
+  // Replay of seq=0 is acknowledged but not written twice; seq=1 lands once.
+  const before = res.chunks.length;
+  expect(
+    sm.acceptChunk("s", 0, { type: "chunk", sessionId: "s", seq: 0, ciphertext: [1] }),
+  ).toEqual({ nextSeq: 1, resumeToken: "secret" });
+  expect(res.chunks).toHaveLength(before);
+  sm.acceptChunk("s", 1, { type: "chunk", sessionId: "s", seq: 1, ciphertext: [2] });
+  expect(sm.complete("s", { tokensIn: 1, tokensOut: 2, receiptUri: "at://r" }, 2)).toEqual({
+    accepted: true,
+    nextSeq: 2,
+    resumeToken: "secret",
+  });
+  expect(res.chunks.join("").match(/"type":"complete"/g)).toHaveLength(1);
+  expect(sm.resume("s", "did:plc:p", "m", "secret", 2)).toEqual({
+    status: "completed",
+    nextSeq: 2,
+  });
+});
+
+test("a conflicting duplicate sequence terminates instead of corrupting output", () => {
+  const sm = new SessionManager();
+  const res = fakeRes();
+  sm.open("s", "did:plc:p", "m", "did:plc:r", asRes(res), undefined, "secret");
+  sm.acceptChunk("s", 0, { type: "chunk", sessionId: "s", seq: 0, ciphertext: [1] });
+  expect(
+    sm.acceptChunk("s", 0, { type: "chunk", sessionId: "s", seq: 0, ciphertext: [9] }),
+  ).toBeNull();
+  expect(res.chunks.join("")).toContain("resume-sequence-conflict");
+  expect(sm.has("s")).toBe(false);
+});
+
+test("resume rejects a foreign machine or stale token without consuming the grace", () => {
+  const sm = new SessionManager({ resumeGraceMs: 2_000 });
+  sm.open("s", "did:plc:p", "m", "did:plc:r", asRes(fakeRes()), undefined, "secret");
+  sm.detachForMachine("did:plc:p", "m");
+  expect(sm.resume("s", "did:plc:p", "other", "secret", 0).status).toBe("rejected");
+  expect(sm.resume("s", "did:plc:p", "m", "stale", 0).status).toBe("rejected");
+  expect(sm.resume("s", "did:plc:p", "m", "secret", 0).status).toBe("resume");
+});
+
+test("resume grace expiry emits one bounded terminal error", () => {
+  const expired: string[] = [];
+  const sm = new SessionManager({
+    resumeGraceMs: 1_000,
+    onResumeExpired: (_did, machine) => expired.push(machine),
+  });
+  const res = fakeRes();
+  sm.open("s", "did:plc:p", "m", "did:plc:r", asRes(res), undefined, "secret");
+  sm.detachForMachine("did:plc:p", "m");
+  vi.advanceTimersByTime(1_001);
+  expect(expired).toEqual(["m"]);
+  expect(res.chunks.join("").match(/resume-expired/g)).toHaveLength(1);
+  expect(sm.has("s")).toBe(false);
+});
+
 test("closeForMachine drains only the target machine's sessions and clears their idle timers", () => {
   const fired: string[] = [];
   const sm = new SessionManager({

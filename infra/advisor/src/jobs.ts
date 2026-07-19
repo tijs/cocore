@@ -230,7 +230,11 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
     }
     chunks.push(buf);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf-8")) as unknown;
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf-8")) as unknown;
+  } catch {
+    throw new Error("request body is not valid JSON");
+  }
 }
 
 export interface JobsContext {
@@ -469,6 +473,7 @@ function dispatch(
   receivedAt: number,
   ctx: JobsContext,
 ): void {
+  const resumeToken = provider.streamResumeVersion === 1 ? ctx.generateId() : undefined;
   ctx.sessions.open(
     job.sessionId,
     provider.did,
@@ -476,6 +481,7 @@ function dispatch(
     job.requesterDid,
     sink,
     receivedAt,
+    resumeToken,
   );
 
   // ADR-0004: countersign this dispatch so the receipt can prove a trusted
@@ -509,6 +515,7 @@ function dispatch(
     ...(job.toolChoice ? { tool_choice: job.toolChoice } : {}),
     ...(countersignature ? { brokerage_countersignature: countersignature } : {}),
     session_id: job.sessionId,
+    ...(resumeToken ? { resume_token: resumeToken } : {}),
   } as InferenceRequest & { type: "inference_request" };
 
   try {

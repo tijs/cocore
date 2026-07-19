@@ -180,6 +180,9 @@ const SESSION_IDLE_TIMEOUT_MS = CONFIG.sessionIdleTimeoutMs;
  *  pre-first-chunk window is larger. Keepalives from updated providers
  *  cover this too; the larger window is the safety net for old providers. */
 const SESSION_FIRST_CHUNK_TIMEOUT_MS = CONFIG.sessionFirstChunkTimeoutMs;
+/** Bounded provider-edge replacement window. Provider replay state lives 45s,
+ *  slightly longer, so an expired advisor session can reject it explicitly. */
+const SESSION_RESUME_GRACE_MS = 30_000;
 /** Per-job preflight budget: how long to wait for the chosen provider to
  *  answer an app-level `ping` before failing over to the next candidate.
  *  A healthy serve loop answers in a few ms; this only needs to clear
@@ -335,11 +338,18 @@ async function main(): Promise<void> {
   const sessions = new SessionManager({
     idleTimeoutMs: SESSION_IDLE_TIMEOUT_MS,
     firstChunkTimeoutMs: SESSION_FIRST_CHUNK_TIMEOUT_MS,
+    resumeGraceMs: SESSION_RESUME_GRACE_MS,
     onFirstChunk: (ms) => {
       ttft.record(ms);
       // Mirror the TTFT sample into a histogram for OTLP export (the
       // /ttft route keeps serving the rolling in-memory window).
       record(runtime, Metric.update(ttftMs, ms));
+    },
+    onResumeExpired: (providerDid, providerMachineId) => {
+      const tripped = registry.recordFailure(providerDid, providerMachineId, "resume-expired");
+      console.error(
+        `[sessions] resume-expired did=${providerDid} machine=${providerMachineId}${tripped ? ", repeated → cooldown" : ""}`,
+      );
     },
     onIdleTimeout: (providerDid, providerMachineId, streamed) => {
       // The requester's SSE already got a clean `idle-timeout` error. How we
@@ -739,7 +749,7 @@ async function main(): Promise<void> {
 
   await new Promise<void>((r) => http.listen(PORT, r));
   console.error(
-    `advisor: http+ws on :${PORT} (heartbeat-timeout=${HEARTBEAT_TIMEOUT_MS}ms, session-idle=${SESSION_IDLE_TIMEOUT_MS}ms, session-first-chunk=${SESSION_FIRST_CHUNK_TIMEOUT_MS}ms, rechallenge=${RECHALLENGE_INTERVAL_MS}ms, challenge-response-timeout=${CHALLENGE_RESPONSE_TIMEOUT_MS}ms, attestation-max-age=${ATTESTATION_MAX_AGE_MS}ms, ws-keepalive=${WS_KEEPALIVE_INTERVAL_MS}ms, ws-keepalive-max-missed=${WS_KEEPALIVE_MAX_MISSED}, ws-max-connection=${WS_MAX_CONNECTION_MS}ms, perMessageDeflate=off)`,
+    `advisor: http+ws on :${PORT} (heartbeat-timeout=${HEARTBEAT_TIMEOUT_MS}ms, session-idle=${SESSION_IDLE_TIMEOUT_MS}ms, session-first-chunk=${SESSION_FIRST_CHUNK_TIMEOUT_MS}ms, session-resume-grace=${SESSION_RESUME_GRACE_MS}ms, rechallenge=${RECHALLENGE_INTERVAL_MS}ms, challenge-response-timeout=${CHALLENGE_RESPONSE_TIMEOUT_MS}ms, attestation-max-age=${ATTESTATION_MAX_AGE_MS}ms, ws-keepalive=${WS_KEEPALIVE_INTERVAL_MS}ms, ws-keepalive-max-missed=${WS_KEEPALIVE_MAX_MISSED}, ws-max-connection=${WS_MAX_CONNECTION_MS}ms, perMessageDeflate=off)`,
   );
   console.error(
     "advisor: WS connection-stability config tuned for Railway's edge (frequent keepalive under the idle cutoff, compression off, proactive recycle under the 15-min cap)",
