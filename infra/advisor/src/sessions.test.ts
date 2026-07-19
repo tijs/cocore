@@ -160,6 +160,29 @@ test("resume grace expiry emits one bounded terminal error", () => {
   expect(sm.has("s")).toBe(false);
 });
 
+test("repeated detach does not restart the grace timer", () => {
+  // A same-(did,machine) replacement socket that never presents the resume
+  // token must not perpetually extend grace by restarting the timer. Only the
+  // first detach arms expiry; repeated detachForMachine is a no-op on an
+  // already-detached session.
+  const expired: string[] = [];
+  const sm = new SessionManager({
+    resumeGraceMs: 1_000,
+    onResumeExpired: (_did, machine) => expired.push(machine),
+  });
+  const res = fakeRes();
+  sm.open("s", "did:plc:p", "m", "did:plc:r", asRes(res), undefined, "secret");
+  sm.detachForMachine("did:plc:p", "m");
+  // Repeated replacement re-registers (without a resume) several times during
+  // the grace window — none of these should restart the timer.
+  for (let i = 0; i < 5; i++) sm.detachForMachine("did:plc:p", "m");
+  vi.advanceTimersByTime(999);
+  expect(expired).toEqual([]);
+  // The ORIGINAL grace elapses on schedule.
+  vi.advanceTimersByTime(2);
+  expect(expired).toEqual(["m"]);
+});
+
 test("closeForMachine drains only the target machine's sessions and clears their idle timers", () => {
   const fired: string[] = [];
   const sm = new SessionManager({

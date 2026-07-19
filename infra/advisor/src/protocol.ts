@@ -222,7 +222,7 @@ interface InferenceComplete {
  *  invocation. `produced_seq` is the provider's next sequence number (the
  *  number of chunks produced so far); `completion_ready` means generation and
  *  receipt publication finished and the buffered completion can be replayed. */
-export interface InferenceResume {
+interface InferenceResume {
   session_id: string;
   resume_token: string;
   produced_seq: number;
@@ -232,7 +232,7 @@ export interface InferenceResume {
 /** Advisor → provider: result of an `inference_resume` handshake. `resume`
  *  replays from `next_seq`; `completed` acknowledges terminal delivery when its
  *  ack was lost; `rejected` is terminal for the provider job. */
-export interface InferenceResumeResult {
+interface InferenceResumeResult {
   session_id: string;
   resume_token: string;
   /** `resume`: replay from next_seq; `completed`: terminal ack was previously
@@ -245,7 +245,7 @@ export interface InferenceResumeResult {
 /** Advisor → provider high-water acknowledgment. Chunks below `next_seq` may
  *  be dropped from the provider's replay buffer. `completed` is the terminal
  *  acknowledgment that permits deleting the whole job. */
-export interface InferenceAck {
+interface InferenceAck {
   session_id: string;
   resume_token: string;
   next_seq: number;
@@ -421,6 +421,25 @@ export function validateFrame(raw: unknown): FrameCheck {
     }
     case "inference_complete": {
       if (!isStr(raw["session_id"])) return { ok: false, reason: "inference_complete: session_id" };
+      // Terminal accounting fields are bounded non-negative integers so a
+      // malformed frame can't reach the SSE completion / receipt path.
+      if (
+        !Number.isSafeInteger(raw["tokens_in"]) ||
+        Number(raw["tokens_in"]) < 0 ||
+        Number(raw["tokens_in"]) > 0xffff_ffff
+      ) {
+        return { ok: false, reason: "inference_complete: tokens_in" };
+      }
+      if (
+        !Number.isSafeInteger(raw["tokens_out"]) ||
+        Number(raw["tokens_out"]) < 0 ||
+        Number(raw["tokens_out"]) > 0xffff_ffff
+      ) {
+        return { ok: false, reason: "inference_complete: tokens_out" };
+      }
+      if (typeof raw["receipt_uri"] !== "string") {
+        return { ok: false, reason: "inference_complete: receipt_uri" };
+      }
       if (
         raw["final_seq"] !== undefined &&
         (!Number.isSafeInteger(raw["final_seq"]) ||

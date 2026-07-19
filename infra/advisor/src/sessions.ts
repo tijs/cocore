@@ -251,6 +251,12 @@ export class SessionManager {
         legacy.push(sessionId);
         continue;
       }
+      // Idempotent: a session already in grace keeps its ORIGINAL timer. A
+      // same-(did,machine) re-register (e.g. a replacement socket that never
+      // presents the resume token) must not restart grace and so starve
+      // expiry/failure accounting. A genuine second disconnect after a
+      // successful resume has detached=false here, so it gets a fresh timer.
+      if (entry.detached) continue;
       if (entry.idleTimer) clearTimeout(entry.idleTimer);
       if (entry.resumeTimer) clearTimeout(entry.resumeTimer);
       entry.idleTimer = null;

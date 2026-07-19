@@ -326,7 +326,13 @@ export function handleConnection(
   // Preserve WebSocket frame order across async authentication/attestation.
   // In particular, a resume immediately following register must not overtake
   // the awaited service-auth verification and be dropped as "before register".
+  // The chain is BOUNDED: while a slow handler (service-auth / attestation
+  // verification) is awaited, a peer could otherwise enqueue arbitrarily many
+  // parsed frames whose payloads accumulate in the pending closures. Over the
+  // cap we close the socket rather than grow memory without limit.
   let dispatchChain = Promise.resolve();
+  let pendingFrames = 0;
+  const MAX_PENDING_FRAMES = 1024;
   socket.on("message", (data) => {
     let raw: unknown;
     try {
@@ -345,12 +351,22 @@ export function handleConnection(
       console.error(`[ws] bad-frame peer=${peer}: ${check.reason}; closing`);
       return close(1008, "bad-frame");
     }
+    if (pendingFrames >= MAX_PENDING_FRAMES) {
+      console.error(
+        `[ws] dispatch backlog over cap peer=${peer} pending=${pendingFrames}; closing`,
+      );
+      return close(1008, "dispatch-backlog");
+    }
+    pendingFrames += 1;
     // Serialize dispatch and contain failures to this socket.
     dispatchChain = dispatchChain
       .then(() => onMessage(check.msg))
       .catch((e) => {
         console.error(`[ws] onMessage error peer=${peer}: ${(e as Error).message}`);
         close(1011, "internal");
+      })
+      .finally(() => {
+        pendingFrames -= 1;
       });
   });
 

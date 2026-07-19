@@ -81,6 +81,11 @@ struct BufferedInvocation {
     attached: bool,
     bytes: usize,
     task: Option<tokio::task::AbortHandle>,
+    // Monotonic per-detach generation. A retention timer captures the gen it
+    // was armed with and only fires when the job is STILL detached AND the gen
+    // matches — so a second detach (which sets `attached = false` again) can't
+    // let a stale first timer expire the invocation mid-grace.
+    detach_gen: u64,
 }
 
 #[derive(Clone)]
@@ -171,6 +176,7 @@ impl InvocationManager {
                     attached: true,
                     bytes: 0,
                     task: None,
+                    detach_gen: 0,
                 },
             );
         }
@@ -393,25 +399,28 @@ impl InvocationManager {
     }
 
     fn detach_all(&self) {
-        let sessions: Vec<(String, String)> = {
+        let sessions: Vec<(String, String, u64)> = {
             let mut jobs = self.jobs();
             jobs.iter_mut()
                 .map(|(session_id, job)| {
                     job.attached = false;
                     job.send_seq = job.acked_seq;
                     job.completion_sent = false;
-                    (session_id.clone(), job.resume_token.clone())
+                    job.detach_gen = job.detach_gen.wrapping_add(1);
+                    (session_id.clone(), job.resume_token.clone(), job.detach_gen)
                 })
                 .collect()
         };
-        for (session_id, resume_token) in sessions {
+        for (session_id, resume_token, detach_gen) in sessions {
             let manager = self.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(REPLAY_RETENTION).await;
                 let mut jobs = manager.jobs();
-                let expire = jobs
-                    .get(&session_id)
-                    .is_some_and(|job| !job.attached && job.resume_token == resume_token);
+                let expire = jobs.get(&session_id).is_some_and(|job| {
+                    !job.attached
+                        && job.resume_token == resume_token
+                        && job.detach_gen == detach_gen
+                });
                 if expire {
                     if let Some(mut job) = jobs.remove(&session_id) {
                         if let Some(task) = job.task.take() {
@@ -2904,6 +2913,7 @@ mod tests {
                 attached: true,
                 bytes: 0,
                 task: None,
+                detach_gen: 0,
             },
         );
         for seq in 0..2 {
@@ -2954,6 +2964,64 @@ mod tests {
             resume_token: "token-r".into(),
             next_seq: 2,
             completed: true,
+        });
+        assert_eq!(manager.len(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_detach_keeps_the_latest_retention_window() {
+        // A second detach (provider reconnected then dropped again) must not
+        // let the FIRST retention timer expire the invocation early. The
+        // timer is generation-fenced: only the latest detach's timer fires.
+        let manager = InvocationManager::new();
+        manager.jobs().insert(
+            "session-gen".into(),
+            BufferedInvocation {
+                resume_token: "token-gen".into(),
+                produced_seq: 0,
+                acked_seq: 0,
+                send_seq: 0,
+                chunks: BTreeMap::new(),
+                controls: VecDeque::new(),
+                completion: None,
+                completion_sent: false,
+                attached: true,
+                bytes: 0,
+                task: None,
+                detach_gen: 0,
+            },
+        );
+        // T=0: first detach arms timer1 (gen 1, fires at T=45).
+        manager.detach_all();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        // T=10: reattach, then detach again → timer2 (gen 2, fires at T=55).
+        manager.handle_resume_result(InferenceResumeResult {
+            session_id: "session-gen".into(),
+            resume_token: "token-gen".into(),
+            status: ResumeStatus::Resume,
+            next_seq: 0,
+            reason: None,
+        });
+        manager.detach_all();
+        // Advance to T=46: timer1 has fired but the gen guard no-ops it; the
+        // job survives. Without the guard the stale timer would have removed
+        // the invocation before the second window opened.
+        tokio::time::advance(Duration::from_secs(36)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            manager.len(),
+            1,
+            "stale first timer must not expire the job before the latest window"
+        );
+        // Clean up via an explicit rejection rather than waiting for timer2.
+        manager.handle_resume_result(InferenceResumeResult {
+            session_id: "session-gen".into(),
+            resume_token: "token-gen".into(),
+            status: ResumeStatus::Rejected,
+            next_seq: 0,
+            reason: Some("test-cleanup".into()),
         });
         assert_eq!(manager.len(), 0);
     }

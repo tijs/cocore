@@ -96,11 +96,54 @@ describe("stream resume wire contract", () => {
   });
 
   it("keeps final_seq optional for legacy completion frames", () => {
-    const legacy = { type: "inference_complete", session_id: "session-1" };
+    const legacy = {
+      type: "inference_complete",
+      session_id: "session-1",
+      tokens_in: 1,
+      tokens_out: 2,
+      receipt_uri: "at://receipt/one",
+    };
     expect(validateFrame(legacy)).toEqual({ ok: true, msg: legacy });
     expect(validateFrame({ ...legacy, final_seq: -1 })).toEqual({
       ok: false,
       reason: "inference_complete: final_seq",
     });
+  });
+
+  it.each([
+    [
+      {
+        type: "inference_complete",
+        session_id: "s",
+        tokens_in: -1,
+        tokens_out: 2,
+        receipt_uri: "at://r",
+      },
+      "tokens_in",
+    ],
+    [
+      {
+        type: "inference_complete",
+        session_id: "s",
+        tokens_in: 1,
+        tokens_out: -1,
+        receipt_uri: "at://r",
+      },
+      "tokens_out",
+    ],
+    [
+      {
+        type: "inference_complete",
+        session_id: "s",
+        tokens_in: 1,
+        tokens_out: 2,
+        receipt_uri: 42,
+      },
+      "receipt_uri",
+    ],
+  ])("rejects malformed inference_complete accounting fields %j", (frame, field) => {
+    const result = validateFrame(frame);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain(field);
   });
 });

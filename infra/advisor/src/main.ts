@@ -73,6 +73,9 @@ const CONFIG = Effect.runSync(
     sessionFirstChunkTimeoutMs: Config.integer(
       "COCORE_ADVISOR_SESSION_FIRST_CHUNK_TIMEOUT_MS",
     ).pipe(Config.withDefault(120_000)),
+    sessionResumeGraceMs: Config.integer("COCORE_ADVISOR_SESSION_RESUME_GRACE_MS").pipe(
+      Config.withDefault(30_000),
+    ),
     preflightTimeoutMs: Config.integer("COCORE_ADVISOR_PREFLIGHT_TIMEOUT_MS").pipe(
       Config.withDefault(1500),
     ),
@@ -182,7 +185,7 @@ const SESSION_IDLE_TIMEOUT_MS = CONFIG.sessionIdleTimeoutMs;
 const SESSION_FIRST_CHUNK_TIMEOUT_MS = CONFIG.sessionFirstChunkTimeoutMs;
 /** Bounded provider-edge replacement window. Provider replay state lives 45s,
  *  slightly longer, so an expired advisor session can reject it explicitly. */
-const SESSION_RESUME_GRACE_MS = 30_000;
+const SESSION_RESUME_GRACE_MS = CONFIG.sessionResumeGraceMs;
 /** Per-job preflight budget: how long to wait for the chosen provider to
  *  answer an app-level `ping` before failing over to the next candidate.
  *  A healthy serve loop answers in a few ms; this only needs to clear
