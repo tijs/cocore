@@ -353,6 +353,9 @@ const isStr = (v: unknown): v is string => typeof v === "string";
 /** Bytes on the wire: a base64 string OR a JSON array of byte values. */
 const isBytes = (v: unknown): boolean =>
   typeof v === "string" || (Array.isArray(v) && v.every((n) => typeof n === "number"));
+/** Bounded wire counter: a safe integer in [0, u32::MAX]. */
+const isU32 = (v: unknown): v is number =>
+  Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= 0xffff_ffff;
 
 /** Result of validating a raw inbound frame: either the typed message or a
  *  reason string for the `close(1008,"bad-frame")` log. */
@@ -378,9 +381,7 @@ export function validateFrame(raw: unknown): FrameCheck {
         return { ok: false, reason: "register: attestation_pub_key" };
       if (
         raw["stream_resume_version"] !== undefined &&
-        (!Number.isSafeInteger(raw["stream_resume_version"]) ||
-          Number(raw["stream_resume_version"]) < 1 ||
-          Number(raw["stream_resume_version"]) > 0xffff_ffff)
+        (!isU32(raw["stream_resume_version"]) || raw["stream_resume_version"] < 1)
       ) {
         return { ok: false, reason: "register: stream_resume_version" };
       }
@@ -402,11 +403,7 @@ export function validateFrame(raw: unknown): FrameCheck {
     }
     case "inference_chunk": {
       if (!isStr(raw["session_id"])) return { ok: false, reason: "inference_chunk: session_id" };
-      if (
-        !Number.isSafeInteger(raw["seq"]) ||
-        Number(raw["seq"]) < 0 ||
-        Number(raw["seq"]) > 0xffff_ffff
-      ) {
+      if (!isU32(raw["seq"])) {
         return { ok: false, reason: "inference_chunk: seq" };
       }
       if (!isBytes(raw["ciphertext"])) return { ok: false, reason: "inference_chunk: ciphertext" };
@@ -421,29 +418,16 @@ export function validateFrame(raw: unknown): FrameCheck {
       if (!isStr(raw["session_id"])) return { ok: false, reason: "inference_complete: session_id" };
       // Terminal accounting fields are bounded non-negative integers so a
       // malformed frame can't reach the SSE completion / receipt path.
-      if (
-        !Number.isSafeInteger(raw["tokens_in"]) ||
-        Number(raw["tokens_in"]) < 0 ||
-        Number(raw["tokens_in"]) > 0xffff_ffff
-      ) {
+      if (!isU32(raw["tokens_in"])) {
         return { ok: false, reason: "inference_complete: tokens_in" };
       }
-      if (
-        !Number.isSafeInteger(raw["tokens_out"]) ||
-        Number(raw["tokens_out"]) < 0 ||
-        Number(raw["tokens_out"]) > 0xffff_ffff
-      ) {
+      if (!isU32(raw["tokens_out"])) {
         return { ok: false, reason: "inference_complete: tokens_out" };
       }
       if (typeof raw["receipt_uri"] !== "string") {
         return { ok: false, reason: "inference_complete: receipt_uri" };
       }
-      if (
-        raw["final_seq"] !== undefined &&
-        (!Number.isSafeInteger(raw["final_seq"]) ||
-          Number(raw["final_seq"]) < 0 ||
-          Number(raw["final_seq"]) > 0xffff_ffff)
-      ) {
+      if (raw["final_seq"] !== undefined && !isU32(raw["final_seq"])) {
         return { ok: false, reason: "inference_complete: final_seq" };
       }
       break;
@@ -453,11 +437,7 @@ export function validateFrame(raw: unknown): FrameCheck {
       if (!isStr(raw["resume_token"]) || raw["resume_token"].length === 0) {
         return { ok: false, reason: "inference_resume: resume_token" };
       }
-      if (
-        !Number.isSafeInteger(raw["produced_seq"]) ||
-        Number(raw["produced_seq"]) < 0 ||
-        Number(raw["produced_seq"]) > 0xffff_ffff
-      ) {
+      if (!isU32(raw["produced_seq"])) {
         return { ok: false, reason: "inference_resume: produced_seq" };
       }
       break;

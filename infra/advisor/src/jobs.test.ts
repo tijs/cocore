@@ -313,6 +313,35 @@ describe("POST /jobs", () => {
     await linesP;
   });
 
+  it("409s a duplicate client-supplied sessionId instead of crashing", async () => {
+    const fp = fakeProvider(h.registry, "did:plc:dup", "pub-dup");
+    const job = {
+      jobUri: "at://job",
+      requesterDid: "did:plc:requester",
+      requesterPubKey: "req-pub",
+      model: "stub",
+      maxTokensOut: 32,
+      ciphertext: [1],
+      sessionId: "dup-session",
+    };
+    const linesP = readSseLines(`${h.url}/jobs`, job);
+    await vi.waitFor(() => expect(fp.sent.length).toBeGreaterThan(0));
+
+    // The same sessionId while the first is live must become a structured
+    // 409 (sessions.open would throw uncaught otherwise) — and must not
+    // disturb the live session.
+    const resp = await fetch(`${h.url}/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...job, jobUri: "at://job2" }),
+    });
+    expect(resp.status).toBe(409);
+    expect(h.sessions.has("dup-session")).toBe(true);
+
+    h.sessions.close("dup-session", "test-done");
+    await linesP;
+  });
+
   it("fires onDispatched (time-to-ack) once the inference_request is handed off", async () => {
     await new Promise<void>((r) => h.server.close(() => r()));
     const acks: number[] = [];

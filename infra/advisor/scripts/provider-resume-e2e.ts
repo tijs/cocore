@@ -21,18 +21,6 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-async function reservePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert(address && typeof address === "object", "could not reserve a port");
-  const port = address.port;
-  await new Promise<void>((resolve, reject) =>
-    server.close((error) => (error ? reject(error) : resolve())),
-  );
-  return port;
-}
-
 async function waitFor<T>(
   read: () => Promise<T>,
   accept: (value: T) => boolean,
@@ -159,15 +147,15 @@ async function main(): Promise<void> {
   assert(pdsAddress && typeof pdsAddress === "object", "mock PDS failed to listen");
   const pdsBase = `http://127.0.0.1:${pdsAddress.port}`;
 
-  const advisorPort = await reservePort();
-  const advisorHttp = `http://127.0.0.1:${advisorPort}`;
-  const advisorWs = `ws://127.0.0.1:${advisorPort}/v1/agent`;
+  // PORT=0 → the advisor binds an ephemeral port and logs it; parsing that
+  // line instead of reserve-and-release avoids the TOCTOU where another
+  // process (a concurrent CI job) grabs the released port before spawn.
   const advisor = startChild(
     process.execPath,
     ["--experimental-strip-types", "infra/advisor/src/main.ts"],
     {
       ...process.env,
-      PORT: String(advisorPort),
+      PORT: "0",
       COCORE_ADVISOR_SESSION_RESUME_GRACE_MS: "1000",
       COCORE_ADVISOR_PREFLIGHT_TIMEOUT_MS: "1000",
       COCORE_ADVISOR_WS_KEEPALIVE_MS: "1000",
@@ -175,6 +163,17 @@ async function main(): Promise<void> {
   );
 
   watchExit(advisor.child, "advisor");
+  const advisorPort = Number(
+    await waitFor(
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async () => advisor.output().match(/advisor: http\+ws on :(\d+)/)?.[1],
+      (port) => Boolean(port),
+      "advisor bound port",
+      30_000,
+    ),
+  );
+  const advisorHttp = `http://127.0.0.1:${advisorPort}`;
+  const advisorWs = `ws://127.0.0.1:${advisorPort}/v1/agent`;
   let mode: FaultMode = "none";
   let stage = 0;
   let invocationBaseline = 0;
@@ -266,7 +265,14 @@ async function main(): Promise<void> {
             (status) => status.invocations > invocationBaseline,
             "provider invocation to enter prefill",
           ).then(() => {
-            if (activeMode === "expiry") blockedUntil = Date.now() + 1_300;
+            // The block window is bounded on BOTH sides: it must outlast the
+            // 1s resume grace (so the session expires) but end before the
+            // fault provider's 3.6s prefill finishes (so the post-block
+            // resume rejection aborts the job before any receipt publishes).
+            // 2.5s sits ~1.5s clear of the grace and ~1s clear of generation
+            // end — wide margins for a loaded CI runner (the old 1.3s window
+            // left only 300ms above the grace and flaked).
+            if (activeMode === "expiry") blockedUntil = Date.now() + 2_500;
             drop();
           });
         });

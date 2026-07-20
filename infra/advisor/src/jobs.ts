@@ -472,7 +472,11 @@ function dispatch(
   job: ParsedJob["body"],
   receivedAt: number,
   ctx: JobsContext,
-): void {
+): boolean {
+  // `sessionId` is client-supplied: a duplicate of a live session or a
+  // recently-completed tombstone must become a structured error at the HTTP
+  // edge, not an uncaught throw from `sessions.open`.
+  if (ctx.sessions.known(job.sessionId)) return false;
   const resumeToken = provider.streamResumeVersion === 1 ? ctx.generateId() : undefined;
   ctx.sessions.open(
     job.sessionId,
@@ -539,6 +543,7 @@ function dispatch(
   } catch (e) {
     ctx.sessions.close(job.sessionId, `provider-send-failed: ${(e as Error).message}`);
   }
+  return true;
 }
 
 /** Handle one POST /jobs request against a raw Node `ServerResponse` (success:
@@ -570,7 +575,9 @@ export async function handleJobsRequest(
       ctx.sessions.close(sel.job.sessionId, "client-disconnected");
     }
   });
-  dispatch(res, sel.provider, sel.job, receivedAt, ctx);
+  if (!dispatch(res, sel.provider, sel.job, receivedAt, ctx)) {
+    jsonError(res, 409, "sessionId is already active or was completed recently");
+  }
 }
 
 /** An {@link SseResponse} that writes SSE frames into an Effect `Mailbox`
@@ -643,10 +650,13 @@ export function jobsRoute(ctx: JobsContext) {
       return err(sel.status, { error: sel.error });
     }
 
-    yield* recordOutcome("ok");
     const mailbox = yield* Mailbox.make<Uint8Array>();
     const sink = new MailboxSink(mailbox);
-    dispatch(sink, sel.provider, sel.job, receivedAt, ctx);
+    if (!dispatch(sink, sel.provider, sel.job, receivedAt, ctx)) {
+      yield* recordOutcome("rejected");
+      return err(409, { error: "sessionId is already active or was completed recently" });
+    }
+    yield* recordOutcome("ok");
 
     const sessionId = sel.job.sessionId;
     const stream = Mailbox.toStream(mailbox).pipe(

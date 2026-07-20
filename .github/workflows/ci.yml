@@ -128,13 +128,12 @@ jobs:
           aube run test 2>&1 | tee -a /tmp/ci.log
 
       # Process-level resume fault matrix: drives a real provider binary +
-      # advisor through a fault-injecting WS proxy. Informational (non-blocking):
-      # the fault proxy can lose the terminal ACK during a transient upstream
-      # reconnect — a test artifact, not a product bug. The deterministic
-      # unit/component suites above are the hard gate; this is end-to-end
-      # confidence that wires up without truncation/duplication in the common case.
+      # advisor through a fault-injecting WS proxy. Blocking: the harness's
+      # known non-determinism is contained (the terminal-ACK-loss window is a
+      # soft wait inside the script, the advisor binds an ephemeral port it
+      # logs rather than a racy reserved one, and the expiry block window has
+      # a wide margin), so a red run here means resume actually broke.
       - name: Provider resume fault matrix
-        continue-on-error: true
         if: success() || failure()
         run: |
           set -o pipefail

@@ -37,7 +37,7 @@ import { KnownGoodSet } from "./known-good.ts";
 import { hydrateLatencyWindow, persistLatencyWindow } from "./latency-store.ts";
 import { LatencyWindow } from "./latency-window.ts";
 import { ackMs, onlineProviders, ttftMs } from "./metrics.ts";
-import { ProviderRegistry } from "./registry.ts";
+import { ProviderRegistry, resumeExpiredHandler } from "./registry.ts";
 import { SessionManager } from "./sessions.ts";
 
 const SERVICE = { serviceName: "cocore-advisor" };
@@ -348,12 +348,7 @@ async function main(): Promise<void> {
       // /ttft route keeps serving the rolling in-memory window).
       record(runtime, Metric.update(ttftMs, ms));
     },
-    onResumeExpired: (providerDid, providerMachineId) => {
-      const tripped = registry.recordFailure(providerDid, providerMachineId, "resume-expired");
-      console.error(
-        `[sessions] resume-expired did=${providerDid} machine=${providerMachineId}${tripped ? ", repeated → cooldown" : ""}`,
-      );
-    },
+    onResumeExpired: resumeExpiredHandler(registry),
     onIdleTimeout: (providerDid, providerMachineId, streamed) => {
       // The requester's SSE already got a clean `idle-timeout` error. How we
       // treat the MACHINE depends on what it did — but either way this is a
@@ -751,8 +746,12 @@ async function main(): Promise<void> {
   }
 
   await new Promise<void>((r) => http.listen(PORT, r));
+  // Log the port the OS actually bound (PORT=0 asks for an ephemeral one —
+  // the resume e2e harness starts the advisor that way and parses this line).
+  const boundAddr = http.address();
+  const boundPort = boundAddr && typeof boundAddr === "object" ? boundAddr.port : PORT;
   console.error(
-    `advisor: http+ws on :${PORT} (heartbeat-timeout=${HEARTBEAT_TIMEOUT_MS}ms, session-idle=${SESSION_IDLE_TIMEOUT_MS}ms, session-first-chunk=${SESSION_FIRST_CHUNK_TIMEOUT_MS}ms, session-resume-grace=${SESSION_RESUME_GRACE_MS}ms, rechallenge=${RECHALLENGE_INTERVAL_MS}ms, challenge-response-timeout=${CHALLENGE_RESPONSE_TIMEOUT_MS}ms, attestation-max-age=${ATTESTATION_MAX_AGE_MS}ms, ws-keepalive=${WS_KEEPALIVE_INTERVAL_MS}ms, ws-keepalive-max-missed=${WS_KEEPALIVE_MAX_MISSED}, ws-max-connection=${WS_MAX_CONNECTION_MS}ms, perMessageDeflate=off)`,
+    `advisor: http+ws on :${boundPort} (heartbeat-timeout=${HEARTBEAT_TIMEOUT_MS}ms, session-idle=${SESSION_IDLE_TIMEOUT_MS}ms, session-first-chunk=${SESSION_FIRST_CHUNK_TIMEOUT_MS}ms, session-resume-grace=${SESSION_RESUME_GRACE_MS}ms, rechallenge=${RECHALLENGE_INTERVAL_MS}ms, challenge-response-timeout=${CHALLENGE_RESPONSE_TIMEOUT_MS}ms, attestation-max-age=${ATTESTATION_MAX_AGE_MS}ms, ws-keepalive=${WS_KEEPALIVE_INTERVAL_MS}ms, ws-keepalive-max-missed=${WS_KEEPALIVE_MAX_MISSED}, ws-max-connection=${WS_MAX_CONNECTION_MS}ms, perMessageDeflate=off)`,
   );
   console.error(
     "advisor: WS connection-stability config tuned for Railway's edge (frequent keepalive under the idle cutoff, compression off, proactive recycle under the 15-min cap)",

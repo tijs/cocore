@@ -46,7 +46,11 @@ impl Engine for CountingStub {
         on_delta: &mut dyn FnMut(DeltaChannel, &str) -> Result<()>,
     ) -> Result<GenerateResponse> {
         self.invocations.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(1_600));
+        // Long enough that the expiry scenario's reconnect block (2.5s in
+        // provider-resume-e2e.ts) plus reconnect latency comfortably ends
+        // BEFORE generation completes — the resume rejection must abort the
+        // job pre-receipt, with a wide margin on a loaded CI runner.
+        std::thread::sleep(Duration::from_millis(3_600));
         let response = self.generate_once(request)?;
         for chunk in response.text.as_bytes().chunks(24) {
             let text = std::str::from_utf8(chunk)?;

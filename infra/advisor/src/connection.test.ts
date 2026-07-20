@@ -474,6 +474,105 @@ describe("provider mid-job socket drop", () => {
     }
   }, 5_000);
 
+  it("drops session frames from a replaced-but-still-open stale socket", async () => {
+    // The exact race ownsCurrentRegistration exists for: ws1 is replaced by
+    // ws2 for the same (did, machine) but hasn't died yet and keeps sending.
+    // Its frames — even with the correct session_id AND resume token — must
+    // not reach the session or the resume handshake.
+    const h = await startDropHarness();
+    try {
+      const ws1 = await registerProvider(h.url, "did:plc:stale", true);
+      const res = fakeSseRes();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      h.sessions.open("sess-s", "did:plc:stale", "a", "did:plc:req", res as any, undefined, "tok");
+      ws1.send(
+        JSON.stringify({ type: "inference_chunk", session_id: "sess-s", seq: 0, ciphertext: [1] }),
+      );
+      await vi.waitFor(() => expect(res.chunks.join("")).toContain('"seq":0'));
+
+      // Stop ws1's receive side so it never processes the advisor's
+      // close(1000, "replaced") and stays OPEN from its own point of view —
+      // the deterministic version of the replaced-but-not-yet-dead window.
+      ws1.pause();
+      const errSpy = vi.spyOn(console, "error");
+      const ws2 = await registerProvider(h.url, "did:plc:stale", true);
+
+      // The stale socket injects a chunk, a resume claim, and a completion.
+      ws1.send(
+        JSON.stringify({ type: "inference_chunk", session_id: "sess-s", seq: 1, ciphertext: [9] }),
+      );
+      ws1.send(
+        JSON.stringify({
+          type: "inference_resume",
+          session_id: "sess-s",
+          resume_token: "tok",
+          produced_seq: 2,
+        }),
+      );
+      ws1.send(
+        JSON.stringify({
+          type: "inference_complete",
+          session_id: "sess-s",
+          tokens_in: 1,
+          tokens_out: 1,
+          receipt_uri: "at://evil",
+          final_seq: 2,
+        }),
+      );
+      // The drop log proves the frames were processed AND fenced (a silently
+      // lost frame would make the assertions below vacuous).
+      await vi.waitFor(() =>
+        expect(
+          errSpy.mock.calls.some((c) => String(c[0]).includes("drop inference_complete")),
+        ).toBe(true),
+      );
+      expect(res.chunks.join("")).not.toContain('"seq":1');
+      expect(res.chunks.join("")).not.toContain("at://evil");
+      expect(res.writableEnded).toBe(false);
+      expect(h.sessions.has("sess-s")).toBe(true);
+
+      // The successor socket resumes and completes the session normally —
+      // the stale frames advanced nothing.
+      const inbound: Record<string, unknown>[] = [];
+      ws2.on("message", (data) => {
+        inbound.push(JSON.parse(data.toString("utf-8")) as Record<string, unknown>);
+      });
+      ws2.send(
+        JSON.stringify({
+          type: "inference_resume",
+          session_id: "sess-s",
+          resume_token: "tok",
+          produced_seq: 2,
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(
+          inbound.some((m) => m["type"] === "inference_resume_result" && m["next_seq"] === 1),
+        ).toBe(true),
+      );
+      ws2.send(
+        JSON.stringify({ type: "inference_chunk", session_id: "sess-s", seq: 1, ciphertext: [2] }),
+      );
+      ws2.send(
+        JSON.stringify({
+          type: "inference_complete",
+          session_id: "sess-s",
+          tokens_in: 1,
+          tokens_out: 2,
+          receipt_uri: "at://receipt/good",
+          final_seq: 2,
+        }),
+      );
+      await vi.waitFor(() => expect(res.writableEnded).toBe(true));
+      expect(res.chunks.join("")).toContain("at://receipt/good");
+      errSpy.mockRestore();
+      ws1.terminate();
+      ws2.close();
+    } finally {
+      await new Promise<void>((r) => h.server.close(() => r()));
+    }
+  }, 5_000);
+
   it("fails legacy sessions but preserves resumable sessions on advisor recycle", async () => {
     const h = await startDropHarness({ maxConnectionMs: 150 });
     try {

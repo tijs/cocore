@@ -148,7 +148,7 @@ export class SessionManager {
     receivedAt?: number,
     resumeToken?: string,
   ): SessionEntry {
-    if (this.bySessionId.has(sessionId) || this.completed.has(sessionId)) {
+    if (this.known(sessionId)) {
       throw new Error("session_id is already active or recently completed");
     }
     res.statusCode = 200;
@@ -184,6 +184,14 @@ export class SessionManager {
 
   has(sessionId: string): boolean {
     return this.bySessionId.has(sessionId);
+  }
+
+  /** Would {@link open} refuse this id? True while the session is live OR
+   *  within the completed-tombstone grace. `sessionId` is client-supplied on
+   *  `/jobs`, so callers must check this and answer with a structured error
+   *  instead of letting `open` throw. */
+  known(sessionId: string): boolean {
+    return this.bySessionId.has(sessionId) || this.completed.has(sessionId);
   }
 
   /** H6b: is `(providerDid, providerMachineId)` the provider this session was
