@@ -317,14 +317,30 @@ async function main(): Promise<void> {
 
   watchExit(provider.child, "provider");
 
-  const providerRows = async (): Promise<Array<{ did: string; machineId: string }>> => {
+  const providerRows = async (): Promise<
+    Array<{ did: string; machineId: string; attestedAt: string | null }>
+  > => {
     const response = await fetch(`${advisorHttp}/providers`);
-    return (await response.json()) as Array<{ did: string; machineId: string }>;
+    return (await response.json()) as Array<{
+      did: string;
+      machineId: string;
+      attestedAt: string | null;
+    }>;
   };
-  const waitForProvider = (): Promise<Array<{ did: string; machineId: string }>> =>
+  // Gate on ATTESTATION, not mere registration. `runDispatch` → `pickProvider`
+  // only considers providers whose `attestedAt` is set (it filters the pool by
+  // it), so waiting for the row to merely appear is a race: under a loaded CI
+  // runner the attestation challenge/response round-trip lags registration, and
+  // a dispatch fired in that window fails with NoProvidersConnectedError — the
+  // job never runs, and the (misleading) "inference ran more than once" invocation
+  // assertion trips on invocations=0. Requiring `attestedAt` closes the window.
+  const waitForProvider = () =>
     waitFor(
       providerRows,
-      (rows) => rows.some((row) => row.did === PROVIDER_DID && row.machineId === MACHINE_ID),
+      (rows) =>
+        rows.some(
+          (row) => row.did === PROVIDER_DID && row.machineId === MACHINE_ID && row.attestedAt,
+        ),
       "provider registration",
       30_000,
     );
@@ -393,9 +409,12 @@ async function main(): Promise<void> {
       // Ack lost in the proxy; the retention timer will reclaim it.
     }
     await waitFor(health, (value) => value.sessions === 0, `${scenario} advisor session cleanup`);
+    const finalInvocations = (await readStatus(statusPath)).invocations;
     assert(
-      (await readStatus(statusPath)).invocations === before.invocations + 1,
-      `${scenario}: inference ran more than once`,
+      finalInvocations === before.invocations + 1,
+      // NB: fires for BOTH too-few and too-many — spell out the actual counts so
+      // a "0 vs 1" dispatch failure isn't misread as a "2 vs 1" double-run.
+      `${scenario}: expected exactly one inference (before=${before.invocations}, after=${finalInvocations})`,
     );
 
     const completions = events.filter((event) => event.kind === "complete");
