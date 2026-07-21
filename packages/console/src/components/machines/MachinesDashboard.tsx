@@ -1525,10 +1525,10 @@ export function AdvancedSettingsDialogContent({
               Tool calling
             </Switch>
             <SmallBody variant="secondary">
-              Lets this machine serve tool/function calls. It's enabled only for the curated top
-              models a tool-call parser is known for; each is verified with a startup check before
-              it's advertised, and any other model keeps serving exactly as it does now. Picked up
-              the next time the machine serves.
+              Eligible models generate structured tool-call intents by default and must pass a
+              startup check before they're advertised. This provider never executes tools; requester
+              clients execute them and may return results in a follow-up turn. Turning this off
+              leaves ordinary inference unchanged. Picked up the next time the machine serves.
             </SmallBody>
           </Flex>
 

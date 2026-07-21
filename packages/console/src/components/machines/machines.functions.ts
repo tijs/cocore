@@ -468,10 +468,9 @@ const setMyProviderToolCallsServerFn = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .inputValidator(setProviderToolCallsSchema)
   .handler(async ({ context, data }) => {
-    // Owner INTENT only. The agent reads `toolCalls` off its own record at
-    // serve start and, when on, enables vLLM automatic tool choice for the
-    // curated top models, verifying each with a forced-tool startup canary
-    // before advertising it. Turning it on can only ADD capability.
+    // Owner INTENT only. The atomic write keeps legacy agents compatible and
+    // sets/clears the new default-on opt-out. The agent still advertises only
+    // exact model/backend pairs that pass the startup canary.
     await setProviderRecordToolCalls(context.oauthSession, data.rkey, data.enabled);
     await nudgeAdvisorControl(context.did);
     return { ok: true as const };

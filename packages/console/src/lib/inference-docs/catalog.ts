@@ -215,6 +215,13 @@ export const INFERENCE_API_TOPIC_SECTIONS = [
       "Vision-capable models accept images alongside text using OpenAI's multimodal content parts. Carried inline as base64 or fetched from a URL; no separate upload step.",
   },
   {
+    id: "inference-api-tool-calling",
+    navLabel: "tool calling",
+    title: "Tool calling",
+    description:
+      "Send standard OpenAI tools and receive structured tool-call intents from canary-verified provider/model pairs; requester clients execute every tool.",
+  },
+  {
     id: "inference-api-provider-version",
     navLabel: "provider version",
     title: "Provider version",

@@ -552,6 +552,21 @@ pub struct SubprocessEngine {
     verified_tool_calls: Mutex<bool>,
 }
 
+fn tool_canary_passed(resp: &serde_json::Value) -> bool {
+    resp.pointer("/choices/0/message/tool_calls")
+        .and_then(|v| v.as_array())
+        .is_some_and(|calls| {
+            calls.iter().any(|call| {
+                call.pointer("/function/name").and_then(|v| v.as_str()) == Some("report_status")
+                    && call
+                        .pointer("/function/arguments")
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                        == Some(serde_json::json!({ "status": "ok" }))
+            })
+        })
+}
+
 impl SubprocessEngine {
     /// Construct an engine bound to `model_id`. Does not spawn the
     /// child — call `start()` to do that. `venv_python` is the
@@ -1008,17 +1023,7 @@ impl SubprocessEngine {
                 resp_bytes.len()
             )
         })?;
-        let Some(tool_calls) = resp
-            .pointer("/choices/0/message/tool_calls")
-            .and_then(|v| v.as_array())
-        else {
-            return Ok(false);
-        };
-        Ok(tool_calls.iter().any(|tc| {
-            tc.pointer("/function/name")
-                .and_then(|v| v.as_str())
-                .is_some_and(|name| name == "report_status")
-        }))
+        Ok(tool_canary_passed(&resp))
     }
 
     /// Probe `GET /v1/models` to confirm the FastAPI app under
@@ -1778,7 +1783,7 @@ mod tests {
         };
         let top = on.for_model("mlx-community/Qwen3.5-4B-MLX-4bit");
         assert!(top.enabled);
-        assert_eq!(top.tool_call_parser.as_deref(), Some("hermes"));
+        assert_eq!(top.tool_call_parser.as_deref(), Some("qwen3_xml"));
         let bonsai = on.for_model("prism-ml/Ternary-Bonsai-27B-mlx-2bit");
         assert!(bonsai.enabled);
         assert_eq!(bonsai.tool_call_parser.as_deref(), Some("qwen3_xml"));
@@ -1786,12 +1791,12 @@ mod tests {
         assert!(llama.enabled);
         assert_eq!(llama.tool_call_parser.as_deref(), Some("llama4_pythonic"));
 
-        // …a legacy / off-catalog model with no vetted pairing stays OFF
-        // (served exactly as before — never a wrong-parser guess).
-        assert!(
-            !on.for_model("mlx-community/Qwen2.5-7B-Instruct-4bit")
-                .enabled
-        );
+        // …Qwen 2.5 uses Hermes, while an unpaired legacy/off-catalog model
+        // stays off (never a wrong-parser guess).
+        let qwen25 = on.for_model("mlx-community/Qwen2.5-7B-Instruct-4bit");
+        assert!(qwen25.enabled);
+        assert_eq!(qwen25.tool_call_parser.as_deref(), Some("hermes"));
+        assert!(!on.for_model("mlx-community/gemma-3-4b-it-qat-4bit").enabled);
         assert!(!on.for_model("some/custom-model").enabled);
 
         // An explicit operator parser override applies to EVERY model verbatim,
@@ -1804,6 +1809,68 @@ mod tests {
         let any = forced.for_model("some/custom-model");
         assert!(any.enabled);
         assert_eq!(any.tool_call_parser.as_deref(), Some("mistral"));
+    }
+
+    #[test]
+    fn tool_canary_requires_name_and_preserved_arguments() {
+        let response = |name: Option<&str>, arguments: Option<&str>| {
+            serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "tool_calls": [{
+                            "function": {
+                                "name": name,
+                                "arguments": arguments
+                            }
+                        }]
+                    }
+                }]
+            })
+        };
+
+        assert!(tool_canary_passed(&response(
+            Some("report_status"),
+            Some(r#"{ "status": "ok" }"#),
+        )));
+        assert!(!tool_canary_passed(&response(
+            Some("wrong_name"),
+            Some(r#"{"status":"ok"}"#),
+        )));
+        assert!(!tool_canary_passed(&response(
+            Some("report_status"),
+            Some(r#"{"status":"wrong"}"#),
+        )));
+        assert!(!tool_canary_passed(&response(Some("report_status"), None)));
+        assert!(!tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": {} }]
+        })));
+        assert!(!tool_canary_passed(&response(
+            Some("report_status"),
+            Some("not json")
+        )));
+        assert!(!tool_canary_passed(&response(
+            Some("report_status"),
+            Some("{\"status\": \"not ok\"}")
+        )));
+        assert!(!tool_canary_passed(&response(
+            Some("report_status"),
+            Some(r#"{"status":"ok","extra":"x"}"#),
+        )));
+        assert!(!tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [] } }]
+        })));
+        assert!(!tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [{ "function": { "name": "wrong", "arguments": "{\"status\":\"ok\"}" } }] } }]
+        })));
+        assert!(tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [
+                { "function": { "name": "wrong", "arguments": "{\"status\":\"ok\"}" } },
+                { "function": { "name": "report_status", "arguments": "{\"status\":\"ok\"}" } }
+            ]}}]
+        })));
+        assert!(!tool_canary_passed(&serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [{ "function": { "name": "report_status", "arguments": { "status": "ok" } } }] } }]
+        })));
     }
 
     #[test]
