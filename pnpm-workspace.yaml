@@ -9,6 +9,11 @@ overrides:
   # builds cleanly from source on Node 24.
   better-sqlite3: "^11.10.0"
 
+  # pnpm 10+ reads overrides only from this file (package.json's
+  # npm-style `overrides` are ignored), so mirror the root package.json's
+  # `vite: 8.0.11` pin — the committed lockfile was resolved with it.
+  vite: 8.0.11
+
 allowBuilds:
   better-sqlite3: true
   core-js: true
@@ -16,16 +21,18 @@ allowBuilds:
   sharp: true
   esbuild: true
 
+  # pnpm 12 fails on undecided allowBuilds entries (placeholders pnpm wrote
+  # during an earlier non-interactive install). Deny source builds:
+  # prebuilt platform packages and JS fallbacks cover both.
+  '@parcel/watcher': false
+  msgpackr-extract: false
+
 # Exclude `undici` from trust-downgrade enforcement: it's pulled
 # transitively at 5.29.0 by `@connectrpc/connect-node`, which doesn't
 # ship with provenance attestation at that version. Newer versions
 # elsewhere in the graph (6.x via @types/node, 7.x via
 # @atcute/oauth-node-client) are fine; the alarm is only on the older
 # transitive. Tighten when connect-node upgrades undici.
-  '@parcel/watcher': set this to true or false
-  msgpackr-extract: set this to true or false
-
-
 trustPolicyExclude:
   - "undici"
   - "@noble/secp256k1"
